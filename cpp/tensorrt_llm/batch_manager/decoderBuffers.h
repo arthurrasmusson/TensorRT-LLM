@@ -1,0 +1,152 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#pragma once
+
+#include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/runtime/explicitDraftTokensBuffers.h"
+#include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/modelConfig.h"
+#include "tensorrt_llm/runtime/worldConfig.h"
+
+#include <vector>
+
+namespace tensorrt_llm::runtime
+{
+class TllmRuntime;
+} // namespace tensorrt_llm::runtime
+
+namespace tensorrt_llm::batch_manager
+{
+
+class DecoderStepAsyncSend
+{
+public:
+    using BufferPtr = runtime::IBuffer::SharedPtr;
+
+    DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession, BufferPtr const& newOutputTokensHost,
+        BufferPtr const& finished, BufferPtr const& sequenceLengthsHost, BufferPtr const& cumLogProbsHost,
+        BufferPtr const& logProbsHost, BufferPtr const& cacheIndirectionOutput, BufferPtr const& acceptedCumSum,
+        BufferPtr const& packedPaths, int peer);
+
+    ~DecoderStepAsyncSend();
+
+private:
+    std::shared_ptr<mpi::MpiRequest> mRequest1;
+    std::shared_ptr<mpi::MpiRequest> mRequest2;
+    std::shared_ptr<mpi::MpiRequest> mRequest3;
+    std::shared_ptr<mpi::MpiRequest> mRequest4;
+    std::shared_ptr<mpi::MpiRequest> mRequest5;
+    std::shared_ptr<mpi::MpiRequest> mRequest6;
+    std::shared_ptr<mpi::MpiRequest> mRequest7;
+    std::shared_ptr<mpi::MpiRequest> mRequest8;
+};
+
+class DecoderSlotAsyncSend
+{
+public:
+    using TensorPtr = runtime::ITensor::SharedPtr;
+
+    DecoderSlotAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession, TensorPtr const& outputIdsView,
+        TensorPtr const& sequenceLengthView, TensorPtr const& cumLogProbsView, TensorPtr const& logProbsView,
+        bool returnLogProbs, int peer);
+
+    ~DecoderSlotAsyncSend();
+
+private:
+    std::shared_ptr<mpi::MpiRequest> mRequest1;
+    std::shared_ptr<mpi::MpiRequest> mRequest2;
+    std::shared_ptr<mpi::MpiRequest> mRequest3;
+    std::shared_ptr<mpi::MpiRequest> mRequest4;
+};
+
+class DecoderBuffers
+{
+public:
+    using SizeType32 = runtime::SizeType32;
+    using TensorPtr = runtime::ITensor::SharedPtr;
+
+    std::vector<TensorPtr> logits;
+    TensorPtr slotOutputIds;     // [mMaxNumRequests, beamWidth, maxSeqLen], outputIds of all batch slots
+    TensorPtr slotOutputIdsHost; // [beamWidth, maxSeqLen], outputIds of single batch slot
+    TensorPtr cacheIndirectionInput;
+    TensorPtr cacheIndirectionOutput;
+    TensorPtr sequenceLengths;     // [mMaxNumRequests]
+    TensorPtr sequenceLengthsHost; // [mMaxNumRequests] pinned host tensor
+    TensorPtr finished;            // [mMaxNumRequests] pinned host tensor
+    TensorPtr newOutputTokens;     // [maxTokensPerStep, mMaxNumRequests, beamWidth]
+    TensorPtr newOutputTokensHost; // [maxTokensPerStep, mMaxNumRequests, beamWidth]
+    TensorPtr cumLogProbs;         // [mMaxNumRequests, beamWidth]
+    TensorPtr cumLogProbsHost;     // [mMaxNumRequests, beamWidth]
+    TensorPtr logProbs;            // [mMaxNumRequests, beamWidth, maxSeqLen]
+    TensorPtr logProbsHost;        // [mMaxNumRequests, beamWidth, maxSeqLen]
+
+    class DraftBuffers
+    {
+    public:
+        TensorPtr nextDraftTokensDevice;        // [mMaxNumRequests, maxTokensPerStep-1]
+        TensorPtr nextDraftTokensHost;          // [mMaxNumRequests, maxTokensPerStep-1]
+        TensorPtr prevDraftTokensLengthsDevice; // [mMaxNumRequests]
+        TensorPtr prevDraftTokensLengthsHost;   // [mMaxNumRequests]
+        TensorPtr nextDraftTokensLengthsDevice; // [mMaxNumRequests]
+        TensorPtr nextDraftTokensLengthsHost;   // [mMaxNumRequests]
+        TensorPtr acceptedLengthsCumSumDevice;  // [mMaxNumRequests+1]
+        TensorPtr acceptedPackedPathsDevice;    // [mMaxNumRequests * maxAcceptedTokens]
+        std::vector<std::vector<runtime::ITensor::SharedConstPtr>>
+            predictedDraftLogits;               // [mMaxNumRequests][mMaxNumHeads][maxDraftTokens + 1, vocabSize]
+
+        void create(SizeType32 maxNumSequences, SizeType32 maxTokensPerStep, runtime::TllmRuntime const& runtime,
+            runtime::ModelConfig const& modelConfig);
+    };
+
+    DraftBuffers draftBuffers;
+    runtime::ExplicitDraftTokensBuffers::Inputs explicitDraftTokensBuffers;
+
+    DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
+        SizeType32 maxSeqLen, SizeType32 maxTokensPerStep, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
+
+    std::unique_ptr<DecoderStepAsyncSend> asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+        bool returnLogProbs, SizeType32 maxBeamWidth, bool useMedusa, int peer);
+
+    void recv(std::shared_ptr<mpi::MpiComm> const& commSession, bool returnLogProbs, SizeType32 maxBeamWidth,
+        bool useMedusa, int peer);
+};
+
+class SlotDecoderBuffers
+{
+public:
+    using SizeType32 = runtime::SizeType32;
+    using TensorPtr = runtime::ITensor::SharedPtr;
+
+    TensorPtr outputIds;           // [beamWidth, maxSeqLen], outputIds of single batch slot
+    TensorPtr outputIdsHost;       // [beamWidth, maxSeqLen], outputIds of single batch slot
+    TensorPtr sequenceLengthsHost; // [beamWidth]
+    TensorPtr cumLogProbs;         // [beamWidth]
+    TensorPtr cumLogProbsHost;     // [beamWidth]
+    TensorPtr logProbs;            // [beamWidth, maxSeqLen]
+    TensorPtr logProbsHost;        // [beamWidth, maxSeqLen]
+
+    SlotDecoderBuffers(SizeType32 maxBeamWidth, SizeType32 maxSeqLen, runtime::TllmRuntime const& runtime);
+
+    static std::unique_ptr<DecoderSlotAsyncSend> asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+        TensorPtr const& outputIdsView, TensorPtr const& sequenceLengthView, TensorPtr const& cumLogProbsView,
+        TensorPtr const& logProbsView, bool returnLogProbs, int peer);
+
+    std::unique_ptr<DecoderSlotAsyncSend> asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+        TensorPtr const& sequenceLengthView, bool returnLogProbs, int peer);
+
+    void recv(std::shared_ptr<mpi::MpiComm> const& commSession, TensorPtr const& sequenceLengthView,
+        bool returnLogProbs, int peer);
+};
+
+} // namespace tensorrt_llm::batch_manager

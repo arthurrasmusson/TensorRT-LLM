@@ -1,0 +1,283 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#include "decoderBuffers.h"
+
+#include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/tllmRuntime.h"
+#include "tensorrt_llm/runtime/utils/sessionUtils.h"
+
+using namespace tensorrt_llm::runtime;
+
+namespace tensorrt_llm::batch_manager
+{
+
+DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
+    SizeType32 maxSeqLen, SizeType32 maxTokensPerStep, TllmRuntime const& runtime, ModelConfig const& modelConfig,
+    WorldConfig const& worldConfig)
+{
+    auto const& manager = runtime.getBufferManager();
+
+    if (worldConfig.isLastPipelineParallelRank())
+    {
+        logits.resize(maxNumSequences);
+    }
+
+    auto constexpr TRTTokenIdType = runtime::TRTDataType<runtime::TokenIdType>::value;
+
+    cacheIndirectionInput = manager.gpu(
+        ITensor::makeShape({maxNumSequences, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
+    cacheIndirectionOutput = manager.gpu(
+        ITensor::makeShape({maxNumSequences, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
+
+    sequenceLengths = manager.gpu(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kINT32);
+    sequenceLengthsHost
+        = BufferManager::pinned(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kINT32);
+
+    finished = BufferManager::pinned(ITensor::makeShape({maxNumSequences}), nvinfer1::DataType::kUINT8);
+
+    newOutputTokens
+        = manager.gpu(ITensor::makeShape({maxTokensPerStep, maxNumSequences, maxBeamWidth}), TRTTokenIdType);
+
+    newOutputTokensHost
+        = BufferManager::pinned(ITensor::makeShape({maxTokensPerStep, maxNumSequences, maxBeamWidth}), TRTTokenIdType);
+
+    cumLogProbs = manager.gpu(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kFLOAT);
+
+    cumLogProbsHost
+        = BufferManager::pinned(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kFLOAT);
+
+    logProbs = manager.gpu(ITensor::makeShape({maxNumSequences, maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kFLOAT);
+
+    logProbsHost = BufferManager::pinned(
+        ITensor::makeShape({maxNumSequences, maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kFLOAT);
+
+    if (modelConfig.getSpeculativeDecodingMode().needsKVCacheRewind()
+        || modelConfig.getSpeculativeDecodingMode().hasDraftLogits()
+        || modelConfig.getSpeculativeDecodingMode().predictsDraftTokens())
+    {
+        draftBuffers.create(maxNumSequences, maxTokensPerStep, runtime, modelConfig);
+    }
+
+    if (modelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
+    {
+        explicitDraftTokensBuffers.create(maxNumSequences, runtime, modelConfig, worldConfig);
+    }
+}
+
+void DecoderBuffers::DraftBuffers::create(
+    SizeType32 maxNumSequences, SizeType32 maxTokensPerStep, TllmRuntime const& runtime, ModelConfig const& modelConfig)
+{
+    auto const& manager = runtime.getBufferManager();
+
+    auto const speculativeDecodingMode = modelConfig.getSpeculativeDecodingMode();
+
+    auto constexpr TRTTokenIdType = runtime::TRTDataType<runtime::TokenIdType>::value;
+
+    if (speculativeDecodingMode.predictsDraftTokens())
+    {
+        nextDraftTokensHost
+            = BufferManager::pinned(ITensor::makeShape({maxNumSequences, maxTokensPerStep - 1}), TRTTokenIdType);
+        if (speculativeDecodingMode.variableDraftLength())
+        {
+            nextDraftTokensLengthsHost
+                = BufferManager::pinned(ITensor::makeShape({maxNumSequences}), nvinfer1::DataType::kINT32);
+            prevDraftTokensLengthsHost
+                = BufferManager::pinned(ITensor::makeShape({maxNumSequences}), nvinfer1::DataType::kINT32);
+        }
+    }
+
+    if (speculativeDecodingMode.isMedusa())
+    {
+        auto const maxDraftPathLen = modelConfig.getSpeculativeDecodingModule().getMaxDraftPathLen();
+        predictedDraftLogits.resize(maxNumSequences);
+        for (auto& medusaLogitsHead : predictedDraftLogits)
+        {
+            medusaLogitsHead.resize(maxDraftPathLen);
+        }
+    }
+
+    if (speculativeDecodingMode.needsKVCacheRewind())
+    {
+        auto const maxDraftPathLen = modelConfig.getSpeculativeDecodingModule().getMaxDraftPathLen();
+        acceptedLengthsCumSumDevice
+            = manager.gpu(ITensor::makeShape({maxNumSequences + 1}), nvinfer1::DataType::kINT32);
+        acceptedPackedPathsDevice
+            = manager.gpu(ITensor::makeShape({maxNumSequences, maxDraftPathLen}), nvinfer1::DataType::kINT32);
+    }
+}
+
+DecoderStepAsyncSend::DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+    BufferPtr const& newOutputTokensHost, BufferPtr const& finished, BufferPtr const& sequenceLengthsHost,
+    BufferPtr const& cumLogProbsHost, BufferPtr const& logProbsHost, BufferPtr const& cacheIndirectionOutput,
+    BufferPtr const& acceptedCumSum, BufferPtr const& packedPaths, int const peer)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("start send outputs of DecoderBuffers to rank %d", peer);
+
+    mRequest1 = commSession->sendAsync(*newOutputTokensHost, peer, 0);
+    mRequest2 = commSession->sendAsync(*finished, peer, 1);
+    mRequest3 = commSession->sendAsync(*sequenceLengthsHost, peer, 2);
+    mRequest4 = cumLogProbsHost ? commSession->sendAsync(*cumLogProbsHost, peer, 3) : nullptr;
+    mRequest5 = logProbsHost ? commSession->sendAsync(*logProbsHost, peer, 4) : nullptr;
+    mRequest6 = cacheIndirectionOutput ? commSession->sendAsync(*cacheIndirectionOutput, peer, 5) : nullptr;
+    mRequest7 = acceptedCumSum ? commSession->sendAsync(*acceptedCumSum, peer, 6) : nullptr;
+    mRequest8 = packedPaths ? commSession->sendAsync(*packedPaths, peer, 7) : nullptr;
+
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+DecoderStepAsyncSend::~DecoderStepAsyncSend()
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+
+    mRequest1->wait();
+    mRequest2->wait();
+    mRequest3->wait();
+    if (mRequest4)
+        mRequest4->wait();
+    if (mRequest5)
+        mRequest5->wait();
+    if (mRequest6)
+        mRequest6->wait();
+    if (mRequest7)
+        mRequest7->wait();
+    if (mRequest8)
+        mRequest8->wait();
+
+    TLLM_LOG_DEBUG("end send outputs of DecoderBuffers");
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+DecoderSlotAsyncSend::DecoderSlotAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+    TensorPtr const& outputIdsView, TensorPtr const& sequenceLengthView, TensorPtr const& cumLogProbsView,
+    TensorPtr const& logProbsView, bool const returnLogProbs, int const peer)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("start send outputs of SlotDecoderBuffers to rank %d", peer);
+
+    mRequest1 = commSession->sendAsync(*outputIdsView, peer, 8);
+    mRequest2 = commSession->sendAsync(*sequenceLengthView, peer, 9);
+    mRequest3 = returnLogProbs ? commSession->sendAsync(*cumLogProbsView, peer, 10) : nullptr;
+    mRequest4 = returnLogProbs ? commSession->sendAsync(*logProbsView, peer, 11) : nullptr;
+
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+DecoderSlotAsyncSend::~DecoderSlotAsyncSend()
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+
+    mRequest1->wait();
+    mRequest2->wait();
+    if (mRequest3)
+        mRequest3->wait();
+    if (mRequest4)
+        mRequest4->wait();
+
+    TLLM_LOG_DEBUG("end send outputs of SlotDecoderBuffers");
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+std::unique_ptr<DecoderStepAsyncSend> DecoderBuffers::asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+    bool const returnLogProbs, SizeType32 const maxBeamWidth, bool const useMedusa, int const peer)
+{
+    auto decStepAsyncSndHdl = std::make_unique<DecoderStepAsyncSend>(commSession, newOutputTokensHost, finished,
+        sequenceLengthsHost, returnLogProbs ? cumLogProbsHost : nullptr, returnLogProbs ? logProbsHost : nullptr,
+        maxBeamWidth > 1 ? cacheIndirectionOutput : nullptr,
+        useMedusa ? draftBuffers.acceptedLengthsCumSumDevice : nullptr,
+        useMedusa ? draftBuffers.acceptedPackedPathsDevice : nullptr, peer);
+    return decStepAsyncSndHdl;
+}
+
+void DecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, bool const returnLogProbs,
+    SizeType32 const maxBeamWidth, bool const useMedusa, int const peer)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("start recv outputs of DecoderBuffers from rank %d", peer);
+
+    commSession->recv(*newOutputTokensHost, peer, 0);
+    commSession->recv(*finished, peer, 1);
+    commSession->recv(*sequenceLengthsHost, peer, 2);
+    if (returnLogProbs)
+    {
+        commSession->recv(*cumLogProbsHost, peer, 3);
+        commSession->recv(*logProbsHost, peer, 4);
+    }
+    if (maxBeamWidth > 1)
+    {
+        commSession->recv(*cacheIndirectionOutput, peer, 5);
+    }
+    if (useMedusa)
+    {
+        commSession->recv(*draftBuffers.acceptedLengthsCumSumDevice, peer, 6);
+        commSession->recv(*draftBuffers.acceptedPackedPathsDevice, peer, 7);
+    }
+
+    TLLM_LOG_DEBUG("end recv outputs of DecoderBuffers from rank %d", peer);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+std::unique_ptr<DecoderSlotAsyncSend> SlotDecoderBuffers::asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+    TensorPtr const& outputIdsView, TensorPtr const& sequenceLengthView, TensorPtr const& cumLogProbsView,
+    TensorPtr const& logProbsView, bool const returnLogProbs, int const peer)
+{
+    auto decSlotAsyncSndHdl = std::make_unique<DecoderSlotAsyncSend>(
+        commSession, outputIdsView, sequenceLengthView, cumLogProbsView, logProbsView, returnLogProbs, peer);
+    return decSlotAsyncSndHdl;
+}
+
+std::unique_ptr<DecoderSlotAsyncSend> SlotDecoderBuffers::asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
+    TensorPtr const& sequenceLengthView, bool const returnLogProbs, int const peer)
+{
+    auto decSlotAsyncSndHdl = std::make_unique<DecoderSlotAsyncSend>(
+        commSession, outputIds, sequenceLengthView, cumLogProbs, logProbs, returnLogProbs, peer);
+    return decSlotAsyncSndHdl;
+}
+
+void SlotDecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, TensorPtr const& sequenceLengthView,
+    bool const returnLogProbs, int const peer)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("start recv outputs of SlotDecoderBuffers from rank %d", peer);
+
+    commSession->recv(*outputIds, peer, 8);
+    commSession->recv(*sequenceLengthView, peer, 9);
+    if (returnLogProbs)
+    {
+        commSession->recv(*cumLogProbs, peer, 10);
+        commSession->recv(*logProbs, peer, 11);
+    }
+
+    TLLM_LOG_DEBUG("end recv outputs of SlotDecoderBuffers from rank %d", peer);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+SlotDecoderBuffers::SlotDecoderBuffers(SizeType32 maxBeamWidth, SizeType32 maxSeqLen, TllmRuntime const& runtime)
+{
+    auto const& manager = runtime.getBufferManager();
+
+    outputIds = manager.gpu(ITensor::makeShape({maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kINT32);
+
+    outputIdsHost = BufferManager::pinned(ITensor::makeShape({maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kINT32);
+
+    sequenceLengthsHost = BufferManager::pinned(ITensor::makeShape({maxBeamWidth}), nvinfer1::DataType::kINT32);
+
+    cumLogProbs = manager.gpu(ITensor::makeShape({maxBeamWidth}), nvinfer1::DataType::kFLOAT);
+    cumLogProbsHost = BufferManager::pinned(ITensor::makeShape({maxBeamWidth}), nvinfer1::DataType::kFLOAT);
+
+    logProbs = manager.gpu(ITensor::makeShape({maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kFLOAT);
+    logProbsHost = BufferManager::pinned(ITensor::makeShape({maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kFLOAT);
+}
+
+} // namespace tensorrt_llm::batch_manager

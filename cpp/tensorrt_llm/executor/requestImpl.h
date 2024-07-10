@@ -1,0 +1,264 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#pragma once
+
+#include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
+#include "tensorrt_llm/executor/tensor.h"
+#include "tensorrt_llm/executor/types.h"
+
+namespace su = tensorrt_llm::executor::serialize_utils;
+
+namespace tensorrt_llm::executor
+{
+class Request::Impl
+{
+
+public:
+    // Constructor
+    Impl(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streaming, SamplingConfig const& samplingConfig,
+        OutputConfig const& outputConfig, std::optional<TokenIdType> const& endId,
+        std::optional<TokenIdType> const& padId, std::optional<std::list<VecTokens>> badWords,
+        std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
+        std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
+        std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
+        std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds)
+        : mInputTokenIds(std::move(inputTokenIds))
+        , mMaxNewTokens(maxNewTokens)
+        , mStreaming(streaming)
+        , mSamplingConfig(samplingConfig)
+        , mOutputConfig(outputConfig)
+        , mEndId(endId)
+        , mPadId(padId)
+        , mBadWords(std::move(badWords))
+        , mStopWords(std::move(stopWords))
+        , mEmbeddingBias(checkEmbeddingBias(std::move(embeddingBias)))
+        , mExternalDraftTokensConfig(std::move(externalDraftTokensConfig))
+        , mPTuningConfig(std::move(pTuningConfig))
+        , mLoraConfig(std::move(loraConfig))
+        , mLogitsPostProcessorName(std::move(logitsPostProcessorName))
+        , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
+    {
+        validate();
+    }
+
+    ~Impl() = default;
+
+    void serialize(std::ostream& ostream) const
+    {
+        visitMembers([&ostream](auto const& member) { su::serialize(member, ostream); });
+    }
+
+    [[nodiscard]] size_t serializedSize() const
+    {
+        size_t totalSize = 0;
+        visitMembers([&totalSize](auto const& member) { totalSize += su::serializedSize(member); });
+        return totalSize;
+    }
+
+    VecTokens getInputTokenIds() const
+    {
+        return mInputTokenIds;
+    }
+
+    SizeType32 getMaxNewTokens() const
+    {
+        return mMaxNewTokens;
+    }
+
+    bool getStreaming() const
+    {
+        return mStreaming;
+    }
+
+    SamplingConfig getSamplingConfig() const
+    {
+        return mSamplingConfig;
+    }
+
+    OutputConfig getOutputConfig() const
+    {
+        return mOutputConfig;
+    }
+
+    std::optional<SizeType32> getEndId() const
+    {
+        return mEndId;
+    }
+
+    std::optional<SizeType32> getPadId() const
+    {
+        return mPadId;
+    }
+
+    std::optional<std::list<VecTokens>> getBadWords() const
+    {
+        return mBadWords;
+    }
+
+    std::optional<std::list<VecTokens>> getStopWords() const
+    {
+        return mStopWords;
+    }
+
+    std::optional<Tensor> getEmbeddingBias() const
+    {
+        return mEmbeddingBias;
+    }
+
+    std::optional<ExternalDraftTokensConfig> getExternalDraftTokensConfig() const
+    {
+        return mExternalDraftTokensConfig;
+    }
+
+    std::optional<PromptTuningConfig> getPromptTuningConfig() const
+    {
+        return mPTuningConfig;
+    }
+
+    std::optional<LoraConfig> getLoraConfig() const
+    {
+        return mLoraConfig;
+    }
+
+    std::optional<std::string> getLogitsPostProcessorName() const
+    {
+        return mLogitsPostProcessorName;
+    }
+
+    std::optional<VecTokens> getEncoderInputTokenIds() const
+    {
+        return mEncoderInputTokenIds;
+    }
+
+    void setStreaming(bool streaming)
+    {
+        mStreaming = streaming;
+    }
+
+    void setSamplingConfig(SamplingConfig const& config)
+    {
+        mSamplingConfig = config;
+    }
+
+    void setOutputConfig(OutputConfig const& outputConfig)
+    {
+        mOutputConfig = outputConfig;
+    }
+
+    void setEndId(SizeType32 endId)
+    {
+        mEndId = endId;
+    }
+
+    void setPadId(SizeType32 padId)
+    {
+        mPadId = padId;
+    }
+
+    void setBadWords(std::list<VecTokens> const& badWords)
+    {
+        mBadWords = badWords;
+    }
+
+    void setStopWords(std::list<VecTokens> const& stopWords)
+    {
+        mStopWords = stopWords;
+    }
+
+    void setEmbeddingBias(Tensor const& embeddingBias)
+    {
+        mEmbeddingBias = checkEmbeddingBias(embeddingBias);
+    }
+
+    void setExternalDraftTokensConfig(ExternalDraftTokensConfig const& externalDraftTokensConfig)
+    {
+        mExternalDraftTokensConfig = externalDraftTokensConfig;
+    }
+
+    void setPromptTuningConfig(PromptTuningConfig const& pTuningConfig)
+    {
+        mPTuningConfig = pTuningConfig;
+    }
+
+    void setLoraConfig(LoraConfig const& loraConfig)
+    {
+        mLoraConfig = loraConfig;
+    }
+
+    void setLogitsPostProcessorName(std::string const& logitsPostProcessorName)
+    {
+        mLogitsPostProcessorName = logitsPostProcessorName;
+    }
+
+    void setEncoderInputTokenIds(VecTokens const& encoderInputTokenIds)
+    {
+        mEncoderInputTokenIds = encoderInputTokenIds;
+    }
+
+private:
+    void validate()
+    {
+        TLLM_CHECK(!mInputTokenIds.empty());
+        TLLM_CHECK(mMaxNewTokens > 0);
+    }
+
+    static std::optional<Tensor> checkEmbeddingBias(std::optional<Tensor> bias)
+    {
+        if (bias)
+        {
+            TLLM_CHECK(bias.value().getShape().size() == 1);
+            TLLM_CHECK(bias.value().getDataType() == DataType::kFP32);
+        }
+        return bias;
+    }
+
+    template <typename Lambda>
+    void visitMembers(Lambda const& lambda) const
+    {
+        lambda(mInputTokenIds);
+        lambda(mMaxNewTokens);
+        lambda(mStreaming);
+        lambda(mSamplingConfig);
+        lambda(mOutputConfig);
+        lambda(mEndId);
+        lambda(mPadId);
+        lambda(mBadWords);
+        lambda(mStopWords);
+        lambda(mEmbeddingBias);
+        lambda(mExternalDraftTokensConfig);
+        lambda(mPTuningConfig);
+        lambda(mLoraConfig);
+        lambda(mLogitsPostProcessorName);
+        lambda(mEncoderInputTokenIds);
+    }
+
+    VecTokens mInputTokenIds;
+    SizeType32 mMaxNewTokens;
+    bool mStreaming;
+    SamplingConfig mSamplingConfig;
+    OutputConfig mOutputConfig;
+    std::optional<SizeType32> mEndId;
+    std::optional<SizeType32> mPadId;
+    std::optional<std::list<VecTokens>> mBadWords;
+    std::optional<std::list<VecTokens>> mStopWords;
+    std::optional<Tensor> mEmbeddingBias;
+    std::optional<ExternalDraftTokensConfig> mExternalDraftTokensConfig;
+    std::optional<PromptTuningConfig> mPTuningConfig;
+    std::optional<LoraConfig> mLoraConfig;
+    std::optional<std::string> mLogitsPostProcessorName;
+    std::optional<VecTokens> mEncoderInputTokenIds;
+};
+
+} // namespace tensorrt_llm::executor

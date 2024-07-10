@@ -1,0 +1,407 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/types.h"
+#include <chrono>
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include <thread>
+
+using ::testing::_;
+using ::testing::Invoke;
+
+namespace tr = tensorrt_llm::runtime;
+namespace tc = tensorrt_llm::common;
+namespace texec = tensorrt_llm::executor;
+namespace tb = tensorrt_llm::batch_manager;
+
+class LlmRequestTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+{
+protected:
+    void SetUp() override {}
+
+    void TearDown() override {}
+};
+
+TEST_F(LlmRequestTest, fromExecutorRequest)
+{
+    texec::VecTokens inputTokens{1, 2, 3, 4, 5};
+    texec::SizeType32 maxNewTokens(66);
+    texec::IdType requestId{77};
+    {
+        texec::Request execReq(inputTokens, maxNewTokens);
+        tb::LlmRequest llmReq(requestId, execReq);
+        EXPECT_EQ(llmReq.getTokens().size(), 1);
+        EXPECT_EQ(llmReq.getTokens().at(0), inputTokens);
+        EXPECT_EQ(llmReq.mMaxNewTokens, maxNewTokens);
+        EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
+        EXPECT_EQ(llmReq.getMaxSentTokenPos(), inputTokens.size() - 1);
+        EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+        EXPECT_FALSE(llmReq.mSeqSlot);
+        // No speculative decoding config, draft tokens should be empty
+        EXPECT_EQ(llmReq.getDraftTokens()->size(), 0);
+        EXPECT_FALSE(llmReq.getEmbeddingBias().has_value());
+        EXPECT_FALSE(llmReq.getBadWordsList().has_value());
+        EXPECT_FALSE(llmReq.getStopWordsList().has_value());
+        EXPECT_FALSE(llmReq.getPromptEmbeddingTable().has_value());
+        EXPECT_FALSE(llmReq.getPromptVocabSize().has_value());
+    }
+
+    // Embedding bias
+    {
+        texec::Request execReq(inputTokens, maxNewTokens);
+        texec::SizeType32 vocabSize = 100;
+        // Try adding embedding bias
+        auto embeddingBias = texec::Tensor::cpu(texec::DataType::kFP32, {vocabSize});
+        execReq.setEmbeddingBias(std::move(embeddingBias));
+        tb::LlmRequest llmReq(requestId, execReq);
+        EXPECT_TRUE(llmReq.getEmbeddingBias().has_value());
+        EXPECT_EQ(llmReq.getEmbeddingBias().value()->getShape().nbDims, 2);
+        EXPECT_EQ(llmReq.getEmbeddingBias().value()->getShape().d[0], 1);
+        EXPECT_EQ(llmReq.getEmbeddingBias().value()->getShape().d[1], vocabSize);
+    }
+
+    // bad/stop words
+    {
+        texec::Request execReq(inputTokens, maxNewTokens);
+        texec::SizeType32 vocabSize = 100;
+        // Try adding embedding bias
+        std::list<texec::VecTokens> badWords{{1, 2, 3}, {4, 5}, {9}};
+        std::list<texec::VecTokens> stopWords{{1, 3}, {4}};
+        execReq.setBadWords(badWords);
+        execReq.setStopWords(stopWords);
+        tb::LlmRequest llmReq(requestId, execReq);
+        EXPECT_TRUE(llmReq.getBadWordsList().has_value());
+        EXPECT_TRUE(llmReq.getStopWordsList().has_value());
+        {
+            auto badWordsTensor = llmReq.getBadWordsList().value();
+            EXPECT_EQ(badWordsTensor->getDataType(), nvinfer1::DataType::kINT32);
+            EXPECT_EQ(badWordsTensor->getShape().nbDims, 3);
+            EXPECT_EQ(badWordsTensor->getShape().d[0], 1);
+            EXPECT_EQ(badWordsTensor->getShape().d[1], 2);
+            EXPECT_EQ(badWordsTensor->getShape().d[2], 6);
+            auto data = tr::bufferCast<int32_t>(*badWordsTensor);
+            EXPECT_EQ(data[0], 1);
+            EXPECT_EQ(data[1], 2);
+            EXPECT_EQ(data[2], 3);
+            EXPECT_EQ(data[3], 4);
+            EXPECT_EQ(data[4], 5);
+            EXPECT_EQ(data[5], 9);
+            EXPECT_EQ(data[6 + 0], 3);
+            EXPECT_EQ(data[6 + 1], 5);
+            EXPECT_EQ(data[6 + 2], 6);
+            EXPECT_EQ(data[6 + 3], -1);
+            EXPECT_EQ(data[6 + 4], -1);
+            EXPECT_EQ(data[6 + 5], -1);
+        }
+
+        {
+            auto stopWordsTensor = llmReq.getStopWordsList().value();
+            EXPECT_EQ(stopWordsTensor->getDataType(), nvinfer1::DataType::kINT32);
+            EXPECT_EQ(stopWordsTensor->getShape().nbDims, 3);
+            EXPECT_EQ(stopWordsTensor->getShape().d[0], 1);
+            EXPECT_EQ(stopWordsTensor->getShape().d[1], 2);
+            EXPECT_EQ(stopWordsTensor->getShape().d[2], 3);
+            auto data = tr::bufferCast<int32_t>(*stopWordsTensor);
+            EXPECT_EQ(data[0], 1);
+            EXPECT_EQ(data[1], 3);
+            EXPECT_EQ(data[2], 4);
+            EXPECT_EQ(data[3 + 0], 2);
+            EXPECT_EQ(data[3 + 1], 3);
+            EXPECT_EQ(data[3 + 2], -1);
+        }
+    }
+
+    // Prompt tuning
+    {
+        texec::Request execReq(inputTokens, maxNewTokens);
+        texec::SizeType32 vocabSize = 100;
+        texec::SizeType32 hiddenSize = 64;
+        auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {vocabSize, hiddenSize});
+        texec::PromptTuningConfig config(embeddingTable);
+        execReq.setPromptTuningConfig(config);
+        tb::LlmRequest llmReq(requestId, execReq);
+
+        EXPECT_TRUE(llmReq.getPromptEmbeddingTable().has_value());
+        EXPECT_TRUE(llmReq.getPromptVocabSize().has_value());
+        EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getShape().nbDims, 3);
+        EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getShape().d[0], 1);
+        EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getShape().d[1], vocabSize);
+        EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getShape().d[2], hiddenSize);
+        EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getDataType(), nvinfer1::DataType::kFLOAT);
+        EXPECT_EQ(llmReq.getPromptVocabSize().value(), vocabSize);
+    }
+}
+
+TEST_F(LlmRequestTest, invalidExecRequest)
+{
+    texec::VecTokens inputTokens{1, 2, 3, 4, 5};
+    texec::SizeType32 maxNewTokens(66);
+    texec::IdType requestId{77};
+
+    // Input is too long
+    std::list<std::pair<std::function<void()>, std::string>> lambdaErrMsgs;
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            tb::LlmRequest llmReq(requestId, execReq);
+
+            llmReq.validate(2, 1000, 0);
+        };
+        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "exceeds maximum input"));
+    }
+    // Invalid beam width
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            execReq.setSamplingConfig(texec::SamplingConfig(-1));
+            tb::LlmRequest llmReq(requestId, execReq);
+
+            llmReq.validate(500, 1000, 0);
+        };
+        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "beamWidth > 0"));
+    }
+    // Invalid input draft len
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            execReq.setExternalDraftTokensConfig(texec::ExternalDraftTokensConfig({1, 2}));
+            tb::LlmRequest llmReq(requestId, execReq);
+
+            llmReq.validate(500, 1000, 1);
+        };
+        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "exceeds maximum draft"));
+    }
+
+    // Invalid ptable shape
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {17, 32, 69});
+            texec::PromptTuningConfig config(embeddingTable);
+            execReq.setPromptTuningConfig(config);
+            tb::LlmRequest llmReq(requestId, execReq);
+        };
+        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "Expected prompt embedding table to have shape"));
+    }
+
+    for (auto& lambdaErrMsg : lambdaErrMsgs)
+    {
+        auto& lambda = lambdaErrMsg.first;
+        auto& errMsg = lambdaErrMsg.second;
+        try
+        {
+            lambda();
+            FAIL() << "Expected failure with " << errMsg;
+        }
+        catch (tc::TllmException const& e)
+        {
+            EXPECT_THAT(e.what(), testing::HasSubstr(errMsg));
+        }
+        catch (std::exception const& e)
+        {
+            FAIL() << "Expected TllmException with " << errMsg << " got " << e.what();
+        }
+    }
+
+    {
+        // Validate output len truncation w/o draft tokens
+        texec::Request execReq(inputTokens, maxNewTokens);
+        tb::LlmRequest llmReq(requestId, execReq);
+        llmReq.validate(10, 60, 0);
+        EXPECT_EQ(llmReq.mMaxNewTokens, 60 - inputTokens.size());
+    }
+    {
+        // Validate output len truncation w draft tokens
+        texec::Request execReq(inputTokens, maxNewTokens);
+        tb::LlmRequest llmReq(requestId, execReq);
+        llmReq.validate(10, 60, 2);
+        EXPECT_EQ(llmReq.mMaxNewTokens, 60 - inputTokens.size() - 2);
+    }
+}
+
+TEST_F(LlmRequestTest, pause)
+{
+
+    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
+    tr::SizeType32 maxNewTokens(66);
+    tb::LlmRequest::RequestIdType requestId{77};
+
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
+
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+
+    EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 5);
+    // maxInput is larger then num tokens
+    llmReq.pause(12);
+    EXPECT_EQ(llmReq.mPromptLen, 10);
+    EXPECT_EQ(llmReq.mMaxNewTokens, 61);
+    EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+    EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 0);
+
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    llmReq.addNewToken(1, 0);
+    EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 4);
+
+    llmReq.pause(12);
+
+    // max Input is now smaller than num tokens
+    EXPECT_EQ(llmReq.mPromptLen, 12);
+    EXPECT_EQ(llmReq.mMaxNewTokens, 59);
+    EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+    EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 0);
+}
+
+TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
+{
+    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
+    tr::SizeType32 maxNewTokens(60);
+    tb::LlmRequest::RequestIdType requestId{77};
+
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
+
+    EXPECT_EQ(llmReq.mPromptLen, 5);
+
+    tr::SizeType32 vocabSizePadded = 32000;
+    nvinfer1::DataType logitsDataType = nvinfer1::DataType::kFLOAT;
+
+    // Test the allocation of context logits
+    EXPECT_EQ(llmReq.getContextLogitsHost(), nullptr);
+    llmReq.allocContextLogitsHost(vocabSizePadded, logitsDataType);
+    auto contextLogitsHostShape = llmReq.getContextLogitsHost()->getShape();
+    EXPECT_EQ(contextLogitsHostShape.nbDims, 2);
+    EXPECT_EQ(contextLogitsHostShape.d[0], 5);
+    EXPECT_EQ(contextLogitsHostShape.d[1], vocabSizePadded);
+
+    // Test the allocation of generation logits
+    EXPECT_EQ(llmReq.getGenerationLogitsHost(), nullptr);
+    llmReq.allocGenerationLogitsHost(vocabSizePadded, logitsDataType);
+    auto generationLogitsHostShape = llmReq.getGenerationLogitsHost()->getShape();
+    EXPECT_EQ(generationLogitsHostShape.nbDims, 3);
+    EXPECT_EQ(generationLogitsHostShape.d[0], 1);
+    EXPECT_EQ(generationLogitsHostShape.d[1], maxNewTokens);
+    EXPECT_EQ(generationLogitsHostShape.d[2], vocabSizePadded);
+
+    // Test the allocation of target model's accepted token logits
+    // Set draft token
+    EXPECT_EQ(llmReq.getNumDraftTokens(), 0);
+    auto draftTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{7, 8, 9});
+    llmReq.setDraftTokens(draftTokens);
+    EXPECT_EQ(llmReq.getNumDraftTokens(), 3);
+    // Clean the generation logits
+    llmReq.setGenerationLogitsHost(nullptr);
+    EXPECT_EQ(llmReq.getGenerationLogitsHost(), nullptr);
+    llmReq.allocTargetModelAcceptedTokenLogitsHost(vocabSizePadded, logitsDataType);
+    auto targetModelAcceptedTokenLogitShape = llmReq.getGenerationLogitsHost()->getShape();
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.nbDims, 2);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[0], 4);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[1], vocabSizePadded);
+}
+
+using ParamType = std::tuple<bool, bool>;
+
+std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
+{
+    auto const streaming = std::get<0>(info.param);
+    auto const excludeInputFromOutput = std::get<1>(info.param);
+    std::string name = "llmRequestTest";
+    if (streaming)
+    {
+        name += "Streaming";
+    }
+    if (excludeInputFromOutput)
+    {
+        name += "ExclInput";
+    }
+    return name;
+}
+
+class ParamTest : public LlmRequestTest, public ::testing::WithParamInterface<ParamType>
+{
+};
+
+TEST_P(ParamTest, createResponse)
+{
+    bool streaming = std::get<0>(GetParam());
+    bool excludeInputFromOutput = std::get<1>(GetParam());
+
+    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
+    tr::SizeType32 maxNewTokens(66);
+    tb::LlmRequest::RequestIdType requestId{77};
+
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), streaming);
+    llmReq.setExcludeInputFromOutput(excludeInputFromOutput);
+
+    {
+        auto response = llmReq.createResponse();
+        EXPECT_FALSE(response);
+    }
+
+    tr::SizeType32 numNewTokens = 5;
+
+    for (int i = 0; i < numNewTokens - 1; ++i)
+    {
+        llmReq.addNewToken(1, 0);
+        llmReq.mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+        auto response = llmReq.createResponse();
+        EXPECT_TRUE(streaming == response.has_value());
+        if (streaming)
+        {
+            EXPECT_EQ(response.value().getRequestId(), requestId);
+            auto result = response.value().getResult();
+            EXPECT_EQ(result.outputTokenIds.size(), 1);
+            EXPECT_EQ(result.outputTokenIds.at(0).size(), 1);
+            EXPECT_EQ(result.outputTokenIds.at(0).at(0), 1);
+        }
+    }
+
+    llmReq.addNewToken(1, 0);
+    llmReq.mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+
+    auto response = llmReq.createResponse();
+    EXPECT_TRUE(response);
+    EXPECT_FALSE(response.value().hasError());
+    EXPECT_EQ(response.value().getRequestId(), requestId);
+    auto result = response.value().getResult();
+    EXPECT_EQ(result.outputTokenIds.size(), 1);
+
+    if (!streaming)
+    {
+        if (excludeInputFromOutput)
+        {
+            EXPECT_THAT(result.outputTokenIds.at(0), testing::ElementsAre(1, 1, 1, 1, 1));
+        }
+        else
+        {
+            EXPECT_THAT(result.outputTokenIds.at(0), testing::ElementsAre(1, 2, 3, 4, 5, 1, 1, 1, 1, 1));
+        }
+    }
+    else
+    {
+        EXPECT_EQ(result.outputTokenIds.at(0).at(0), 1);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(ExecutorTest, ParamTest,
+    testing::Combine(testing::Values(false, true), testing::Values(false, true)), generateTestName);

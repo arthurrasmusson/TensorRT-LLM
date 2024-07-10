@@ -1,0 +1,119 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#pragma once
+
+#include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/modelConfig.h"
+#include "tensorrt_llm/runtime/tllmRuntime.h"
+#include "tensorrt_llm/runtime/worldConfig.h"
+
+namespace tensorrt_llm::batch_manager
+{
+
+class EncoderBuffers
+{
+public:
+    using SizeType32 = tensorrt_llm::runtime::SizeType32;
+    using ITensor = tensorrt_llm::runtime::ITensor;
+    using TensorPtr = runtime::ITensor::SharedPtr;
+    using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
+    using ModelConfig = runtime::ModelConfig;
+    using WorldConfig = runtime::WorldConfig;
+    using TllmRuntime = runtime::TllmRuntime;
+
+    TensorPtr inputIds;
+    TensorPtr positionIds = nullptr;
+    TensorPtr tokenTypeIds = nullptr;
+
+    TensorPtr inputLengths;   // [numEncoderRequests]
+    TensorPtr maxInputLength; // [maxInputLengthInBatch]
+
+    // intermediate states in pipeline parallelism
+    TensorPtr hiddenStates; // [numTokens, hiddenSize]
+
+    // encoder output
+    TensorPtr encoderOutput; // [numEncoderTokens, hiddenSize]
+
+    // output buffer owned by llmRequest, such that it's per-request output buffer
+    // encoderBuffers class can init and reshape each buffer, without maintaining a list/set of inflight buffers
+    // TODO in progress: to support BS>1 encoder, need (1) internal scratch space tensors to save the contiguous
+    // batched output (2) copy from CONTIGUOUS scratch tensor to individual request's DISCRETE output tensor after
+    // execution To standardize the implementation, for both BS=1 and BS>1, we use internal buffer to store BS=1/BS>1
+    // results, and copy to request's external buffers. For BS=1, this introduces a redundancy copy, but ok for now.
+
+    EncoderBuffers() = default;
+    EncoderBuffers(SizeType32 maxBatchSize, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        TllmRuntime const& runtime);
+
+    std::pair<EncoderBuffers::TensorMap const&, EncoderBuffers::TensorMap&> prepareIO(RequestVector const& requests,
+        ModelConfig const& modelConfig, WorldConfig const& worldConfig, TllmRuntime const& runtime);
+
+    void rearrangeOutputs(RequestVector const& requests, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        TllmRuntime const& runtime);
+
+private:
+    SizeType32 numRequests{};
+    SizeType32 numTokens{};
+    SizeType32 maxInputLengthInBatch{}; // max input length in a batch
+    SizeType32 contextIndex{};          // TRT context index
+
+    // prefilled with deterministic values to avoid runtime creation
+    std::vector<SizeType32> positionIdsReserved;
+    std::vector<SizeType32> tokenTypeIdsReserved;
+
+    // engine I/O
+    TensorMap inputMap;
+    TensorMap outputMap;
+
+    void init(SizeType32 maxBatchSize, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        TllmRuntime const& runtime);
+
+    //! @brief pre-allocate max buffer sizes during init
+    void initBufferSizes(SizeType32 maxBatchSize, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        TllmRuntime const& runtime);
+
+    //! @brief update actual buffer usage of requests during runtime
+    void updateBufferSizes(RequestVector const& requests, ModelConfig const& modelConfig,
+        WorldConfig const& worldConfig, TllmRuntime const& runtime);
+
+    void reshape(TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig);
+
+    void setFromInputs(RequestVector const& requests, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        TllmRuntime const& runtime);
+
+    void fillIOMaps(ModelConfig const& modelConfig, WorldConfig const& worldConfig);
+
+    // additional members that are Encoder-Decoder specific
+private:
+    TensorPtr encoderOutputReserved; // [1, hiddenSize], dummy tensor for gen phase
+    TensorPtr crossKvCacheGen;       // [1]
+    SizeType32 hiddenSize;           // full hidden size (after multiplying tensor parallelism)
+
+public:
+    void create(SizeType32 maxBatchSize, ModelConfig const& modelConfig, TllmRuntime const& runtime);
+
+    void setMaxBufferSizes(SizeType32 maxBatchSize, runtime::ModelConfig const& modelConfig);
+
+    void setBufferSizes(RequestVector const& contextRequests, RequestVector const& genRequests);
+
+    void reshape();
+
+    void fill(
+        RequestVector const& ctxRequests, RequestVector const& genRequests, runtime::BufferManager const& manager);
+
+    void insertInputTensors(TensorMap& inputMap);
+};
+
+} // namespace tensorrt_llm::batch_manager

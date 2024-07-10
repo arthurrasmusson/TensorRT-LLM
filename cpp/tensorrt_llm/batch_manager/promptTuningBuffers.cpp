@@ -1,0 +1,145 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#include "promptTuningBuffers.h"
+
+#include "tensorrt_llm/batch_manager/llmRequest.h"
+
+namespace tensorrt_llm::batch_manager
+{
+
+void PromptTuningBuffers::create(SizeType32 maxBatchSize, runtime::BufferManager const& manager,
+    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
+{
+    auto maxPromptEmbeddingTableSize = modelConfig.getMaxPromptEmbeddingTableSize();
+    auto const hiddenSize = modelConfig.getHiddenSize() * worldConfig.getTensorParallelism();
+
+    // vocabSize and mMaxPromptVocabSize
+    mPromptTuningParams.vocabSize = manager.gpu(runtime::ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
+    mMaxPromptVocabSize = maxPromptEmbeddingTableSize / maxBatchSize;
+
+    auto promptVocabSizeHost
+        = runtime::BufferManager::pinned(runtime::ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
+    auto promptVocabSizeHostData = runtime::bufferCast<SizeType32>(*promptVocabSizeHost);
+    promptVocabSizeHostData[0] = mMaxPromptVocabSize;
+    manager.copy(*promptVocabSizeHost, *mPromptTuningParams.vocabSize);
+
+    // embeddingTable
+    mPromptTuningParams.embeddingTable = manager.gpu(
+        runtime::ITensor::makeShape({maxPromptEmbeddingTableSize, hiddenSize}), modelConfig.getDataType());
+
+    // tasks
+    mPromptTuningParams.tasks = manager.emptyTensor(runtime::MemoryType::kGPU, nvinfer1::DataType::kINT32);
+}
+
+void PromptTuningBuffers::validate(
+    std::optional<TensorPtr> const& optReqPromptEmbeddingTable, std::optional<SizeType32> const& optReqPromptVocabSize)
+{
+    // Need to copy request embeddingTable to promptEmbeddingTable
+    if (optReqPromptEmbeddingTable.has_value())
+    {
+
+        auto reqPromptEmbeddingTable = optReqPromptEmbeddingTable.value();
+        auto reqPromptVocabSize = optReqPromptVocabSize.value();
+
+        if (reqPromptVocabSize > mMaxPromptVocabSize)
+        {
+            std::string errStr = "Prompt vocab size" + std::to_string(reqPromptVocabSize)
+                + " is larger than max prompt vocab size of " + std::to_string(mMaxPromptVocabSize)
+                + ". Max prompt vocab size is computed from max_prompt_embedding_table_size / max_batch_size. ";
+            TLLM_LOG_ERROR(errStr);
+            throw std::runtime_error(errStr);
+        }
+        else
+        {
+            // Check that type matches model weights
+            if (reqPromptEmbeddingTable->getDataType() != mPromptTuningParams.embeddingTable->getDataType())
+            {
+                std::string errStr = "Request embedding table data type doesn't match model weight data type.";
+                TLLM_LOG_ERROR(errStr);
+                throw std::runtime_error(errStr);
+            }
+
+            if (reqPromptEmbeddingTable->getShape().d[1] != reqPromptVocabSize)
+            {
+                std::string errStr
+                    = "First dimension of request embedding table is expected to be equal to prompt vocab size";
+                TLLM_LOG_ERROR(errStr);
+                throw std::runtime_error(errStr);
+            }
+        }
+    }
+}
+
+void PromptTuningBuffers::fill(RequestVector const& contextRequests, RequestVector const& genRequests,
+    runtime::BufferManager const& manager, bool packed)
+{
+    manager.setZero(*mPromptTuningParams.embeddingTable);
+
+    auto const numContextRequests = static_cast<SizeType32>(contextRequests.size());
+
+    std::vector<SizeType32> reqBeamWidths;
+    std::vector<SizeType32> reqPromptLengths;
+    mPromptTuningParams.promptTuningEnabled.clear();
+
+    SizeType32 batchIdx{0};
+    for (auto const& requests : {contextRequests, genRequests})
+    {
+        for (auto const& llmReq : requests)
+        {
+            reqBeamWidths.push_back(llmReq->mSamplingConfig.beamWidth);
+            if (batchIdx < numContextRequests)
+            {
+                reqPromptLengths.push_back(llmReq->mPromptLen);
+            }
+            auto optReqPromptEmbeddingTable = llmReq->getPromptEmbeddingTable();
+            auto const optReqPromptVocabSize = llmReq->getPromptVocabSize();
+            mPromptTuningParams.promptTuningEnabled.push_back(optReqPromptEmbeddingTable.has_value());
+
+            // If context request & has embedding table, validate it
+            if (optReqPromptEmbeddingTable.has_value())
+            {
+                // If a context request, validate prompt tensors and move to GPU
+                if (batchIdx < numContextRequests)
+                {
+                    // Move to GPU
+                    llmReq->movePromptEmbeddingTableToGpu(manager);
+                    optReqPromptEmbeddingTable = llmReq->getPromptEmbeddingTable();
+
+                    // Validate the table, prompt_vocab_size
+                    validate(optReqPromptEmbeddingTable, optReqPromptVocabSize);
+                }
+
+                auto const reqPromptEmbeddingTable = optReqPromptEmbeddingTable.value();
+                auto const reqPromptVocabSize = optReqPromptVocabSize.value();
+
+                // TODO: Use invokeCopyBatch to avoid multiple bs1 copies
+                // Copy into large prompt embedding table
+                TensorPtr reqPromptEmbeddingTableView = runtime::ITensor::view(reqPromptEmbeddingTable);
+                reqPromptEmbeddingTableView->squeeze(0);
+                auto const promptEmbeddingTableSlice = runtime::ITensor::slice(
+                    mPromptTuningParams.embeddingTable, batchIdx * mMaxPromptVocabSize, reqPromptVocabSize);
+                manager.copy(*reqPromptEmbeddingTable, *promptEmbeddingTableSlice);
+            }
+            ++batchIdx;
+        }
+    }
+
+    auto const batchSize = batchIdx;
+    TensorPtr tasksHost = runtime::BufferManager::pinned(ITensor::makeShape({batchSize}), nvinfer1::DataType::kINT32);
+    auto* tasksHostPtr = runtime::bufferCast<SizeType32>(*tasksHost);
+    std::iota(tasksHostPtr, tasksHostPtr + batchSize, 0);
+    mPromptTuningParams.fillTasksTensor(
+        tasksHost, batchSize, numContextRequests, reqBeamWidths, reqPromptLengths, manager, packed);
+}
+
+} // namespace tensorrt_llm::batch_manager
