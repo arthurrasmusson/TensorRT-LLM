@@ -20,9 +20,11 @@
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/namedTensor.h"
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/cudaProfilerUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/stlUtils.h"
 #include "tensorrt_llm/common/stringUtils.h"
+#include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/loraUtils.h"
@@ -134,54 +136,6 @@ std::optional<GptManager::TensorPtr> getOptionalTensor(GptManager::TensorPtr con
 
     return tensorPtr;
 }
-
-} // namespace
-
-namespace
-{
-
-std::unordered_set<std::string> split(char const* s)
-{
-    std::unordered_set<std::string> values;
-    std::string val;
-    if (s != nullptr)
-    {
-        std::stringstream valStream(s);
-        while (std::getline(valStream, val, ','))
-        {
-            values.insert(val);
-        }
-    }
-    return values;
-}
-
-std::pair<std::unordered_set<std::int32_t>, std::unordered_set<std::int32_t>> populateIterationIndexes()
-{
-    auto values = split(std::getenv("TLLM_GPTM_PROFILE_START_STOP"));
-    std::unordered_set<std::int32_t> startSet;
-    std::unordered_set<std::int32_t> endSet;
-    for (std::string const& value : values)
-    {
-        size_t dashIdx = value.find("-");
-        if (dashIdx != std::string::npos)
-        {
-            uint32_t start = static_cast<uint32_t>(std::stoul(value.substr(0, dashIdx)));
-            startSet.insert(start);
-            uint32_t end = static_cast<uint32_t>(std::stoul(value.substr(dashIdx + 1)));
-            endSet.insert(end);
-        }
-        else
-        {
-            uint32_t i = static_cast<uint32_t>(std::stoul(value));
-            startSet.insert(i);
-            endSet.insert(i);
-        }
-    }
-
-    return std::make_pair(startSet, endSet);
-}
-
-auto const [kProfileIterIdxs, kStopIterIdxs] = populateIterationIndexes();
 
 } // namespace
 
@@ -548,18 +502,7 @@ BatchManagerErrorCode_t GptManager::returnBatchManagerStats()
     NVTX3_SCOPED_RANGE(returnBatchManagerStats);
     nlohmann::json statsJson;
     // Timestamp
-    auto now = std::chrono::system_clock::now();
-    auto now_t = std::chrono::system_clock::to_time_t(now);
-    auto tm = *std::localtime(&now_t);
-
-    auto epoch_to_now = now.time_since_epoch();
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(epoch_to_now);
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(epoch_to_now - seconds);
-
-    std::ostringstream stream;
-    stream << std::put_time(&tm, "%m-%d-%Y %H:%M:%S");
-    stream << "." << std::setfill('0') << std::setw(6) << us.count();
-    statsJson["Timestamp"] = stream.str();
+    statsJson["Timestamp"] = tensorrt_llm::common::getCurrentTimestamp();
     // Iteration counter
     statsJson["Iteration Counter"] = mIterationCounter;
     // Active request count
@@ -671,7 +614,7 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
         auto& llmReq = *(*it);
         auto const& requestId = llmReq.mRequestId;
         // Treat V1 as non-streaming until we integrate with onTokenGenerated callback
-        bool const isStreaming = llmReq.mIsStreaming && mTrtGptModel->getModelType() != TrtGptModelType::V1;
+        bool const isStreaming = llmReq.isStreaming() && mTrtGptModel->getModelType() != TrtGptModelType::V1;
         if (llmReq.isGenerationCompleteState() || (isStreaming && llmReq.isGenerationInProgressState()))
         {
             // Call response callback
@@ -699,7 +642,7 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
             {
                 auto const tokens = llmReq.getTokens(beam);
                 // Number of tokens to be sent
-                auto nbTokens = isStreaming ? (tokenPos - llmReq.getMaxSentTokenPos())
+                auto nbTokens = isStreaming ? (tokenPos + 1 - llmReq.getMaxSentTokenLen())
                                             : static_cast<runtime::SizeType32>(tokens.size());
                 // Take accepted draft tokens into account when streaming
                 auto const numAcceptedTokens = std::max(0, llmReq.getNumTokensPerIteration() - 1);
@@ -745,7 +688,7 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
             if (llmReq.getReturnContextLogits())
             {
                 TLLM_CHECK_WITH_INFO(
-                    !llmReq.mIsStreaming, "Return context logits is not supported with streaming mode");
+                    !llmReq.isStreaming(), "Return context logits is not supported with streaming mode");
 
                 TensorPtr const& contextLogitsHost = llmReq.getContextLogitsHost();
                 auto contextLogitsShape = contextLogitsHost->getShape();
@@ -768,7 +711,7 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
             if (llmReq.getReturnGenerationLogits())
             {
                 TLLM_CHECK_WITH_INFO(
-                    !llmReq.mIsStreaming, "Return generation logits is not supported with streaming mode");
+                    !llmReq.isStreaming(), "Return generation logits is not supported with streaming mode");
 
                 TensorPtr const& generationLogitsHost = llmReq.getGenerationLogitsHost();
                 auto generationLogitsShape = generationLogitsHost->getShape();
@@ -828,10 +771,10 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
             output_tensors.emplace_back(logProbsTensor, kLogProbsTensorName);
             output_tensors.emplace_back(cumLogProbsTensor, kCumLogProbsTensorName);
 
-            if (llmReq.isGenerationCompleteState() || (isStreaming && tokenPos > llmReq.getMaxSentTokenPos()))
+            if (llmReq.isGenerationCompleteState() || (isStreaming && tokenPos + 1 > llmReq.getMaxSentTokenLen()))
             {
                 mSendResponseCb(static_cast<uint64_t>(requestId), output_tensors, isFinalResponse, "");
-                llmReq.setMaxSentTokenPos(tokenPos);
+                llmReq.setMaxSentTokenLen(tokenPos + 1);
             }
             if (isFinalResponse)
             {
@@ -857,10 +800,13 @@ void GptManager::decoupled_execution_loop()
 {
     // TODO: Implement the watchdog cleanly
     // int32_t watchdog = 0;
+    auto const [profileIterIdxs, stopIterIdxs] = tensorrt_llm::common::populateIterationIndexes(
+        kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
+
     while (!shutdown_requested_ || !mActiveRequests.empty())
     {
-        auto const profileIter = !kProfileIterIdxs.empty() && (kProfileIterIdxs.count(mIterationCounter) > 0);
-        auto const stopIter = !kStopIterIdxs.empty() && (kStopIterIdxs.count(mIterationCounter) > 0);
+        auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(mIterationCounter) > 0);
+        auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(mIterationCounter) > 0);
 
         BatchManagerErrorCode_t status;
 

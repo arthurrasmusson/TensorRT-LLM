@@ -23,11 +23,12 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streamin
     std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
     std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
     std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-    std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds)
+    std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
+    std::optional<IdType> clientId, bool returnAllGeneratedTokens)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig,
         endId, padId, std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
-        std::move(logitsPostProcessorName), std::move(encoderInputTokenIds)))
+        std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens))
 {
 }
 
@@ -126,6 +127,16 @@ std::optional<VecTokens> Request::getEncoderInputTokenIds() const
     return mImpl->getEncoderInputTokenIds();
 }
 
+std::optional<IdType> Request::getClientId() const
+{
+    return mImpl->getClientId();
+}
+
+bool Request::getReturnAllGeneratedTokens() const
+{
+    return mImpl->getReturnAllGeneratedTokens();
+}
+
 void Request::setStreaming(bool streaming)
 {
     return mImpl->setStreaming(streaming);
@@ -189,6 +200,16 @@ void Request::setLogitsPostProcessorName(std::string const& logitsPostProcessorN
 void Request::setEncoderInputTokenIds(VecTokens const& encoderInputTokenIds)
 {
     return mImpl->setEncoderInputTokenIds(encoderInputTokenIds);
+}
+
+void Request::setClientId(IdType clientId)
+{
+    return mImpl->setClientId(clientId);
+}
+
+void Request::setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)
+{
+    return mImpl->setReturnAllGeneratedTokens(returnAllGeneratedTokens);
 }
 
 } // namespace tensorrt_llm::executor

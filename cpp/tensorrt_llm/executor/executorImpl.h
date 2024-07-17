@@ -120,7 +120,8 @@ public:
 private:
     using RtTensorPtr = runtime::ITensor::SharedPtr;
     using CudaStreamPtr = runtime::BufferManager::CudaStreamPtr;
-    using LlmRequestLogitsPostProcessor = std::function<void(IdType, RtTensorPtr&, BeamTokens const&, CudaStreamPtr)>;
+    using LlmRequestLogitsPostProcessor
+        = std::function<void(IdType, RtTensorPtr&, BeamTokens const&, CudaStreamPtr, std::optional<IdType>)>;
 
     void initialize(ExecutorConfig const& executorConfig);
 
@@ -277,6 +278,9 @@ private:
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommPipelineParallel;
     std::unique_ptr<std::thread> mRequestWithIdWaitThread;
     std::unique_ptr<std::thread> mCancelledRequestsWaitThread;
+
+    inline static std::string const kPROFILE_START_STOP_ENV_VAR_NAME = "TLLM_PROFILE_START_STOP";
+    inline static std::string const kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME = "TLLM_GPTM_PROFILE_START_STOP";
 };
 
 } // namespace tensorrt_llm::executor

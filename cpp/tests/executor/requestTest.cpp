@@ -62,6 +62,14 @@ TEST(RequestTest, validInputs)
             EXPECT_EQ(request.getPromptTuningConfig().value().getEmbeddingTable().getShape()[0], vocabSize);
             EXPECT_EQ(request.getPromptTuningConfig().value().getEmbeddingTable().getShape()[1], hiddenSize);
         }
+        {
+            auto request = Request({1, 1, 2}, 1);
+            IdType clientId = 1234;
+            request.setClientId(clientId);
+
+            EXPECT_TRUE(request.getClientId());
+            EXPECT_EQ(request.getClientId().value(), clientId);
+        }
     }
 }
 
@@ -142,7 +150,7 @@ TEST(RequestTest, serializeDeserialize)
 {
     auto request = Request({1, 2, 3, 4}, 11, true, SamplingConfig(), OutputConfig(), 112, 113,
         std::list<VecTokens>{{1, 2, 3}, {2, 3, 4}}, std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
-        std::nullopt, std::nullopt, "Processor");
+        std::nullopt, std::nullopt, "Processor", std::nullopt, 1234);
 
     auto serializedSize = Serialization::serializedSize(request);
     std::ostringstream os;
@@ -163,4 +171,5 @@ TEST(RequestTest, serializeDeserialize)
     EXPECT_TRUE(request.getLogitsPostProcessorName().has_value());
     EXPECT_TRUE(newRequest.getLogitsPostProcessorName().has_value());
     EXPECT_EQ(newRequest.getLogitsPostProcessorName().value(), request.getLogitsPostProcessorName().value());
+    EXPECT_EQ(newRequest.getClientId(), request.getClientId());
 }

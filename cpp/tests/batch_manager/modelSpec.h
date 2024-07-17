@@ -1,0 +1,306 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
+ */
+
+#pragma once
+
+#include "NvInfer.h"
+#include "tensorrt_llm/runtime/common.h"
+#include "tensorrt_llm/runtime/speculativeDecodingMode.h"
+
+#include <filesystem>
+#include <vector>
+
+namespace tensorrt_llm::testing
+{
+
+using tensorrt_llm::runtime::SizeType32;
+using tensorrt_llm::runtime::SpeculativeDecodingMode;
+
+enum class KVCacheType
+{
+    kDISABLED,
+    kPAGED,
+    kCONTINUOUS
+};
+
+enum class QuantMethod
+{
+    kNONE,
+    kSMOOTH_QUANT,
+};
+
+enum class OutputContentType
+{
+    kNONE,
+    kCONTEXT_LOGITS,
+    kGENERATION_LOGITS,
+    kLOG_PROBS,
+    kCUM_LOG_PROBS
+};
+
+class ModelSpec
+{
+public:
+    ModelSpec(std::string const& inputFile, nvinfer1::DataType dtype,
+        std::shared_ptr<ModelSpec> otherModelSpecToCompare = nullptr)
+        : mInputFile{std::move(inputFile)}
+        , mDataType{dtype}
+        , mOtherModelSpecToCompare(otherModelSpecToCompare)
+    {
+    }
+
+    ModelSpec& setInputFile(std::string const& inputFile)
+    {
+        mInputFile = inputFile;
+        return *this;
+    }
+
+    ModelSpec& useGptAttentionPlugin()
+    {
+        mUseGptAttentionPlugin = true;
+        return *this;
+    }
+
+    ModelSpec& usePackedInput()
+    {
+        mUsePackedInput = true;
+        return *this;
+    }
+
+    ModelSpec& setKVCacheType(KVCacheType kvCacheType)
+    {
+        mKVCacheType = kvCacheType;
+        return *this;
+    }
+
+    ModelSpec& useDecoderPerRequest()
+    {
+        mDecoderPerRequest = true;
+        return *this;
+    }
+
+    ModelSpec& useTensorParallelism(int tensorParallelism)
+    {
+        mTPSize = tensorParallelism;
+        return *this;
+    }
+
+    ModelSpec& usePipelineParallelism(int pipelineParallelism)
+    {
+        mPPSize = pipelineParallelism;
+        return *this;
+    }
+
+    ModelSpec& useRandomEndId()
+    {
+        mRandomEndId = true;
+        return *this;
+    }
+
+    ModelSpec& setDraftTokens(SizeType32 maxDraftTokens)
+    {
+        mMaxDraftTokens = maxDraftTokens;
+        return *this;
+    }
+
+    ModelSpec& useAcceptByLogits()
+    {
+        mAcceptDraftByLogits = true;
+        return *this;
+    }
+
+    ModelSpec& useMambaPlugin()
+    {
+        mUseMambaPlugin = true;
+        return *this;
+    }
+
+    ModelSpec& gatherLogits()
+    {
+        mGatherLogits = true;
+        return *this;
+    }
+
+    ModelSpec& returnAcceptedTokensLogits()
+    {
+        mReturnAcceptedTokensLogits = true;
+        return *this;
+    }
+
+    ModelSpec& replaceLogits()
+    {
+        mReplaceLogits = true;
+        return *this;
+    }
+
+    ModelSpec& returnLogProbs()
+    {
+        mReturnLogProbs = true;
+        return *this;
+    }
+
+    ModelSpec& smokeTest()
+    {
+        mSmokeTest = true;
+        return *this;
+    }
+
+    ModelSpec& useMedusa()
+    {
+        mSpecDecodingMode = SpeculativeDecodingMode::Medusa();
+        return *this;
+    }
+
+    ModelSpec& useLookaheadDecoding()
+    {
+        mSpecDecodingMode = SpeculativeDecodingMode::LookaheadDecoding();
+        return *this;
+    }
+
+    ModelSpec& useExplicitDraftTokensDecoding()
+    {
+        mSpecDecodingMode = SpeculativeDecodingMode::ExplicitDraftTokens();
+        return *this;
+    }
+
+    ModelSpec& useDraftTokensExternalDecoding()
+    {
+        mSpecDecodingMode = SpeculativeDecodingMode::DraftTokensExternal();
+        return *this;
+    }
+
+    [[nodiscard]] bool useLogits() const
+    {
+        return mGatherLogits || mReplaceLogits;
+    }
+
+    ModelSpec& useMultipleProfiles()
+    {
+        mUseMultipleProfiles = true;
+        return *this;
+    }
+
+    ModelSpec& setBatchSizes(std::vector<SizeType32> batchSizes)
+    {
+        mBatchSizes = std::move(batchSizes);
+        return *this;
+    }
+
+    ModelSpec& setMaxInputLength(SizeType32 maxInputLength)
+    {
+        mMaxInputLength = maxInputLength;
+        return *this;
+    }
+
+    ModelSpec& setMaxOutputLength(SizeType32 maxOutputLength)
+    {
+        mMaxOutputLength = maxOutputLength;
+        return *this;
+    }
+
+    ModelSpec& setQuantMethod(QuantMethod quantMethod)
+    {
+        mQuantMethod = quantMethod;
+        return *this;
+    }
+
+    ModelSpec& useLoraPlugin()
+    {
+        mUseLoraPlugin = true;
+        return *this;
+    }
+
+    ModelSpec& collectGenerationLogitsFile()
+    {
+        mCollectGenerationLogits = true;
+        return *this;
+    }
+
+    ModelSpec& collectContextLogitsFile()
+    {
+        mCollectContextLogits = true;
+        return *this;
+    }
+
+    ModelSpec& collectCumLogProbsFile()
+    {
+        mCollectCumLogProbs = true;
+        return *this;
+    }
+
+    ModelSpec& collectLogProbsFile()
+    {
+        mCollectLogProbs = true;
+        return *this;
+    }
+
+    // Computed properties
+    [[nodiscard]] std::string getModelPath() const;
+
+    [[nodiscard]] std::string getResultsFileInternal(
+        OutputContentType outputContentType = OutputContentType::kNONE) const;
+
+    [[nodiscard]] std::string getResultsFile() const;
+    [[nodiscard]] std::string getGenerationLogitsFile() const;
+
+    [[nodiscard]] std::string getContextLogitsFile() const;
+
+    [[nodiscard]] std::string getCumLogProbsFile() const;
+
+    [[nodiscard]] std::string getLogProbsFile() const;
+
+    [[nodiscard]] std::string getDtypeString() const;
+
+    [[nodiscard]] std::string getQuantMethodString() const;
+
+    [[nodiscard]] std::string getKVCacheTypeString() const;
+
+    [[nodiscard]] std::string getSpeculativeDecodingModeString() const;
+
+    std::string mInputFile;
+    nvinfer1::DataType mDataType;
+
+    bool mUseGptAttentionPlugin{false};
+    bool mUsePackedInput{false};
+    KVCacheType mKVCacheType{KVCacheType::kCONTINUOUS};
+    bool mDecoderPerRequest{false};
+    int mPPSize{1};
+    int mTPSize{1};
+    bool mRandomEndId{false};
+    int mMaxDraftTokens{0};
+    bool mAcceptDraftByLogits{false};
+    bool mUseMambaPlugin{false};
+    bool mGatherLogits{false};
+    bool mReplaceLogits{false};
+    bool mReturnLogProbs{false};
+    bool mSmokeTest{false};
+    bool mUseMultipleProfiles{false};
+    bool mReturnAcceptedTokensLogits{false};
+    int mMaxInputLength{0};
+    int mMaxOutputLength{0};
+    bool mUseLoraPlugin{false};
+
+    // Flags to store whether model spec wants collect these outputs, you could call getXXXFile() if you need the name.
+    bool mCollectGenerationLogits{false};
+    bool mCollectContextLogits{false};
+    bool mCollectCumLogProbs{false};
+    bool mCollectLogProbs{false};
+    QuantMethod mQuantMethod{QuantMethod::kNONE};
+
+    SpeculativeDecodingMode mSpecDecodingMode{SpeculativeDecodingMode::None()};
+    std::vector<SizeType32> mBatchSizes{1, 2, 8};
+
+    // Sometimes, we need to compare with another model spec for golden results.
+    std::shared_ptr<ModelSpec> mOtherModelSpecToCompare{nullptr};
+};
+
+}; // namespace tensorrt_llm::testing

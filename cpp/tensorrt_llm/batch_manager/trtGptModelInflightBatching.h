@@ -174,7 +174,7 @@ private:
     TokenPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::unique_ptr<DecoderStepAsyncSend> decoderSync(
         ScheduledRequests const& scheduledRequests, TokenPtr const& decoderToken);
-    void postProcessRequest(LlmRequest& llmReq, SizeType32 bid);
+    void postProcessRequest(LlmRequest& llmReq, SizeType32 bid, std::vector<SizeType32> const& numDroppedTokens);
     void getDecoderSlotHostOutputs(
         SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig);
     void rewindKVCacheBlocks(SizeType32 numSequences);

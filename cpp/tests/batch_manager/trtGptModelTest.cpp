@@ -15,6 +15,7 @@
 
 using ::testing::ElementsAre;
 
+#include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/trtGptModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelInflightBatching.h"
 #include "tensorrt_llm/batch_manager/trtGptModelV1.h"
@@ -30,6 +31,10 @@ using ::testing::ElementsAre;
 
 using namespace tensorrt_llm::runtime;
 namespace fs = std::filesystem;
+using tensorrt_llm::testing::ModelSpec;
+using tensorrt_llm::testing::KVCacheType;
+using tensorrt_llm::testing::QuantMethod;
+using tensorrt_llm::testing::OutputContentType;
 
 using TensorPtr = ITensor::SharedPtr;
 
@@ -38,9 +43,6 @@ namespace
 auto const TEST_RESOURCE_PATH = fs::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
 auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
 auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_DIR = "fp16-plugin-packed-paged";
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_LORA_DIR = "fp16-plugin-packed-paged-lora";
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR = "fp16-plugin-packed-paged-gather";
 } // namespace
 
 namespace tensorrt_llm::batch_manager
@@ -56,8 +58,15 @@ protected:
     }
 
     TrtGptModelTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
     {
+    }
+
+    static ModelSpec& GetModelSpec()
+    {
+        static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
+        return modelSpec;
     }
 
     void SetUp() override
@@ -139,8 +148,15 @@ class TrtGptModelLoraTest : public TrtGptModelTest
 {
 protected:
     TrtGptModelLoraTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_LORA_DIR / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
     {
+    }
+
+    static ModelSpec& GetModelSpec()
+    {
+        static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED).useLoraPlugin();
+        return modelSpec;
     }
 };
 
@@ -902,8 +918,15 @@ class TrtGptModelLogitsTest : public TrtGptModelTest
 {
 protected:
     TrtGptModelLogitsTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
     {
+    }
+
+    static ModelSpec& GetModelSpec()
+    {
+        static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED).gatherLogits();
+        return modelSpec;
     }
 };
 

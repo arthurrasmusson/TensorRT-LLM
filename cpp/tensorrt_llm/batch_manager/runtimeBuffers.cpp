@@ -53,8 +53,15 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
+    auto const maxBatchTokens = getNumTokens();
     reshape(runtime, modelConfig, worldConfig);
-    inputsIds->reshape(ITensor::makeShape({getNumTokens()}));
+    inputsIds->reshape(ITensor::makeShape({maxBatchTokens}));
+    if (worldConfig.isPipelineParallel())
+    {
+        auto const hiddenSize = modelConfig.getHiddenSize() * worldConfig.getTensorParallelism();
+        auto const hiddenStatesShape = ITensor::makeShape({maxBatchTokens, hiddenSize});
+        hiddenStates->reshape(hiddenStatesShape);
+    }
 }
 
 void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig)
@@ -384,7 +391,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto* logitsIdsHostPtr = bufferCast<SizeType32>(*logitsIdsHost);
     std::vector<SizeType32> seqSlotsVec;
     auto* remappingSeqSlotIndices = bufferCast<SizeType32>(*seqSlotRemappingHost);
-    bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
+    bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kChatGlm;
+    bool const isGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
 
     // sequence length fill common loop
     {
@@ -527,6 +535,31 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 positionIdsHostRow2.resize(totalInputSize + inputLength);
                 positionIdsHostRow2.back() = 1;
             }
+            else if (isGlm)
+            {
+                // iterate over inputIds to find mask id position
+                auto start = inputHost.begin() + totalInputSize;
+                auto end = start + inputLength;
+                auto it
+                    = std::find_if(start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
+                if (it != end)
+                {
+                    llmReq->mMaskPosition = std::distance(start, it);
+                }
+                else
+                {
+                    // glm-10b requires mask in input sentence
+                    TLLM_THROW("no mask in GLM-10B input sentence!");
+                }
+
+                // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
+                positionIdsHost.resize(totalInputSize + inputLength);
+                std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                positionIdsHost.back() = std::distance(start, it);
+
+                positionIdsHostRow2.resize(totalInputSize + inputLength);
+                positionIdsHostRow2.back() = 1;
+            }
             else // GPT / ChatGLM2-6B / ChatGLM3-6B
             {
                 positionIdsHost.resize(totalInputSize + inputLength);
@@ -601,6 +634,11 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                     if (isChatGlm) // ChatGLM-6B
                     {
                         positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
+                        positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                    }
+                    else if (isGlm)
+                    {
+                        positionIdsHost.push_back(llmReq->mMaskPosition);
                         positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
                     }
                     else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
@@ -679,7 +717,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         }
     }
 
-    if (isChatGlm)
+    if (isChatGlm || isGlm)
     {
         positionIdsHost.reserve(totalInputSize * 2);
         positionIdsHost.insert(positionIdsHost.end(), positionIdsHostRow2.begin(), positionIdsHostRow2.end());
@@ -721,7 +759,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         manager.copy(*lastTokenIdsHost, *lastTokenIdsDevice);
         if (transformerBuffers)
         {
-            transformerBuffers->copyPositionIds(runtime, positionIdsHost, isChatGlm);
+            transformerBuffers->copyPositionIds(runtime, positionIdsHost, isChatGlm || isGlm);
         }
         if (rnnStateBuffers)
         {

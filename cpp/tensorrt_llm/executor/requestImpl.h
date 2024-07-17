@@ -33,7 +33,8 @@ public:
         std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
         std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-        std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds)
+        std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
+        std::optional<IdType> clientId, bool returnAllGeneratedTokens)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -49,6 +50,8 @@ public:
         , mLoraConfig(std::move(loraConfig))
         , mLogitsPostProcessorName(std::move(logitsPostProcessorName))
         , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
+        , mClientId(clientId)
+        , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
     {
         validate();
     }
@@ -142,6 +145,16 @@ public:
         return mEncoderInputTokenIds;
     }
 
+    std::optional<IdType> getClientId() const
+    {
+        return mClientId;
+    }
+
+    [[nodiscard]] bool getReturnAllGeneratedTokens() const
+    {
+        return mReturnAllGeneratedTokens;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -207,6 +220,16 @@ public:
         mEncoderInputTokenIds = encoderInputTokenIds;
     }
 
+    void setClientId(IdType clientId)
+    {
+        mClientId = clientId;
+    }
+
+    void setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)
+    {
+        mReturnAllGeneratedTokens = returnAllGeneratedTokens;
+    }
+
 private:
     void validate()
     {
@@ -242,6 +265,8 @@ private:
         lambda(mLoraConfig);
         lambda(mLogitsPostProcessorName);
         lambda(mEncoderInputTokenIds);
+        lambda(mClientId);
+        lambda(mReturnAllGeneratedTokens);
     }
 
     VecTokens mInputTokenIds;
@@ -259,6 +284,8 @@ private:
     std::optional<LoraConfig> mLoraConfig;
     std::optional<std::string> mLogitsPostProcessorName;
     std::optional<VecTokens> mEncoderInputTokenIds;
+    std::optional<IdType> mClientId;
+    bool mReturnAllGeneratedTokens;
 };
 
 } // namespace tensorrt_llm::executor

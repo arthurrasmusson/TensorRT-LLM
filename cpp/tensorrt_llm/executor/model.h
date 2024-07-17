@@ -72,7 +72,8 @@ public:
     using LogitsPostProcessorBatched = std::function<void(std::vector<batch_manager::LlmRequest::RequestIdType> const&,
         std::vector<batch_manager::LlmRequest::TensorPtr>&,
         std::vector<std::reference_wrapper<batch_manager::LlmRequest::BeamTokens const>> const&,
-        runtime::BufferManager::CudaStreamPtr const&)>;
+        runtime::BufferManager::CudaStreamPtr const&,
+        std::vector<std::optional<batch_manager::LlmRequest::RequestIdType>> const&)>;
 
     virtual void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched)
         = 0;

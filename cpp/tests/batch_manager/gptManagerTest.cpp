@@ -20,6 +20,7 @@
 using ::testing::_;
 using ::testing::Invoke;
 
+#include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/GptManager.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/inferenceRequest.h"
@@ -57,9 +58,14 @@ namespace tr = tensorrt_llm::runtime;
 namespace texec = tensorrt_llm::executor;
 namespace fs = std::filesystem;
 using SizeType32 = tr::SizeType32;
+using tensorrt_llm::testing::ModelSpec;
+using tensorrt_llm::testing::KVCacheType;
+using tensorrt_llm::testing::QuantMethod;
+using tensorrt_llm::testing::OutputContentType;
 
 namespace
 {
+auto constexpr INPUT_FILE = "input_tokens.npy";
 auto const TEST_RESOURCE_PATH = fs::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
 auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
 auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
@@ -71,11 +77,7 @@ auto const GPT_DATA_PATH = DATA_PATH / "gpt2";
 auto const CHATGLM_DATA_PATH = DATA_PATH / "chatglm-6b";
 auto const CHATGLM2_DATA_PATH = DATA_PATH / "chatglm2-6b";
 auto const CHATGLM3_DATA_PATH = DATA_PATH / "chatglm3-6b";
-auto const FP16_GPT_ATTENTION_PACKED_DIR = "fp16-plugin-packed";
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_DIR = FP16_GPT_ATTENTION_PACKED_DIR + std::string("-paged");
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR = "fp16-plugin-packed-paged-gather";
-auto const FP16_PLUGIN_PACKED_RESULT_FILE = "output_tokens_fp16_plugin_packed_tp1_pp1.npy";
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_FILE = "output_tokens_fp16_plugin_packed_paged_tp1_pp1.npy";
+
 } // namespace
 
 class TritonStub
@@ -199,7 +201,9 @@ TEST_F(GptManagerTest, BasicValidationTest)
 {
     std::atomic<int> callCount = 0;
     {
-        fs::path dataPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_DIR / "tp1-pp1-gpu";
+        ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -315,7 +319,9 @@ TEST_F(GptManagerTest, ZeroOutputLength)
 {
     std::atomic<int> callCount = 0;
     {
-        fs::path dataPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_DIR / "tp1-pp1-gpu";
+        ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -374,7 +380,9 @@ TEST_F(GptManagerTest, ErrorHandlingLargePrompt)
 {
     std::atomic<int> callCount = 0;
     {
-        fs::path dataPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_DIR / "tp1-pp1-gpu";
+        ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -434,7 +442,9 @@ TEST_F(GptManagerTest, ErrorHandlingForwardFails)
     std::atomic<int> callCount = 0;
     int sendResponseCallbackCount = 0;
     {
-        fs::path dataPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_DIR / "tp1-pp1-gpu";
+        ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -949,20 +959,25 @@ TEST_P(ParamTest, Test)
     nvinfer1::DataType dtype;
     fs::path inputFile, resultsFile;
     tr::SizeType32 vocabSizePadded, padId;
+    ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+    modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
+
     if (versionChatglm == 0) // gpt
     {
         if (returnContextLogits || returnGenerationLogits)
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
+            ModelSpec gatherModelSpec(modelSpec);
+            gatherModelSpec.gatherLogits();
+            modelPath = GPT_MODEL_PATH / gatherModelSpec.getModelPath() / "tp1-pp1-gpu";
         }
         else
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
         }
         dtype = nvinfer1::DataType::kHALF;
-        inputFile = DATA_PATH / "input_tokens.npy";
+        inputFile = DATA_PATH / modelSpec.mInputFile;
         resultsFile = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth))
-            / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
+            / modelSpec.getResultsFile();
         vocabSizePadded = 50257;
         padId = 50256; // the same as endId
     }
@@ -970,31 +985,35 @@ TEST_P(ParamTest, Test)
     {
         if (versionChatglm == 1) // chatglm-6b
         {
-            modelPath = CHATGLM_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
-            inputFile = DATA_PATH / "input_tokens_chatglm-6b.npy";
+            modelSpec.setInputFile("input_tokens_chatglm-6b.npy");
+            modelPath = CHATGLM_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            inputFile = DATA_PATH / modelSpec.mInputFile;
             resultsFile = CHATGLM_DATA_PATH;
             vocabSizePadded = 130528;
             padId = 3;                // endId = 130005;
         }
         else if (versionChatglm == 2) // chatglm2-6b
         {
-            modelPath = CHATGLM2_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
-            inputFile = DATA_PATH / "input_tokens_chatglm2-6b.npy";
+            modelSpec.setInputFile("input_tokens_chatglm2-6b.npy");
+            modelPath = CHATGLM2_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            inputFile = DATA_PATH / modelSpec.mInputFile;
+            ;
             resultsFile = CHATGLM2_DATA_PATH;
             vocabSizePadded = 65024;
             padId = 0; // endId = 2;
         }
         else           // chatglm3-6b
         {
-            modelPath = CHATGLM3_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
-            inputFile = DATA_PATH / "input_tokens_chatglm3-6b.npy";
+            modelSpec.setInputFile("input_tokens_chatglm3-6b.npy");
+            modelPath = CHATGLM3_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            inputFile = DATA_PATH / modelSpec.mInputFile;
             resultsFile = CHATGLM3_DATA_PATH;
             vocabSizePadded = 65024;
             padId = 0; // endId = 2;
         }
         dtype = nvinfer1::DataType::kFLOAT;
         resultsFile = resultsFile / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth))
-            / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
+            / modelSpec.getResultsFile();
     }
 
     runTest(modelPath, modelType, dtype, beamWidth, vocabSizePadded, padId, inputFile, resultsFile, mLogger,
@@ -1028,11 +1047,16 @@ INSTANTIATE_TEST_SUITE_P(Glm3ManagerTestsChat, ParamTest,
 
 TEST_F(GptManagerTest, EarlyStopping)
 {
-    auto const modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
     auto constexpr dtype = nvinfer1::DataType::kHALF;
     tr::SizeType32 constexpr beamWidth{1};
-    fs::path inputFile{DATA_PATH / "input_tokens.npy"};
-    fs::path resultsFile{GPT_DATA_PATH / "sampling" / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE};
+
+    ModelSpec modelSpec{"input_tokens.npy", dtype};
+    modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
+
+    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+    fs::path inputFile{DATA_PATH / modelSpec.mInputFile};
+
+    fs::path resultsFile{GPT_DATA_PATH / "sampling" / modelSpec.getResultsFile()};
     SizeType32 padId = 50256;
 
     TritonStubBatchingTestBS1 tritonStubBatchingTestBS1(inputFile, resultsFile, padId);
@@ -1127,12 +1151,15 @@ TEST_F(GptManagerTest, EarlyStopping)
 
 TEST_F(GptManagerTest, LogitsPostProcessor)
 {
-    auto const modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
     auto constexpr dtype = nvinfer1::DataType::kHALF;
+    ModelSpec modelSpec{"input_tokens.npy", dtype};
+    modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
+    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+
     int constexpr sentinels[] = {42, 29};
     tr::SizeType32 constexpr beamWidth{1};
-    fs::path inputFile{DATA_PATH / "input_tokens.npy"};
-    fs::path resultsFile{GPT_DATA_PATH / "sampling" / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE};
+    fs::path inputFile{DATA_PATH / modelSpec.mInputFile};
+    fs::path resultsFile{GPT_DATA_PATH / "sampling" / modelSpec.getResultsFile()};
     SizeType32 padId = 50256;
 
     TritonStubBatchingTestBS1 tritonStubBatchingTestBS1(inputFile, resultsFile, padId);
@@ -1145,7 +1172,8 @@ TEST_F(GptManagerTest, LogitsPostProcessor)
 
     LlmRequest::LogitsPostProcessor logitsCb
         = [&step, &sentinels](uint64_t rId, tensorrt_llm::runtime::ITensor::SharedPtr& logits,
-              LlmRequest::BeamTokens const& tokens, tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr)
+              LlmRequest::BeamTokens const& tokens, tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr,
+              std::optional<uint64_t> cId)
     {
         auto tensorAten = tensorrt_llm::runtime::Torch::tensor(logits);
         auto mask = at::full_like(tensorAten, c10::Scalar(-HUGE_VALF), {at::kCPU});

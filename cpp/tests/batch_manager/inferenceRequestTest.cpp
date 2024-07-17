@@ -73,7 +73,7 @@ TEST(InferenceRequestLogitsPostProcTest, SerializeWithLogitsPostProcessor)
 {
     LlmRequest::LogitsPostProcessor logitsCb
         = [&](uint64_t rId, tensorrt_llm::runtime::ITensor::SharedPtr& logits, LlmRequest::BeamTokens const& tokens,
-              tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr) {};
+              tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr, std::optional<uint64_t> cId) {};
 
     auto request = InferenceRequest(12345);
     request.setLogitsPostProcessor(logitsCb);

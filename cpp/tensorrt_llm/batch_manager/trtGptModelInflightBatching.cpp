@@ -42,6 +42,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 using namespace tensorrt_llm::runtime;
 namespace tc = tensorrt_llm::common;
@@ -1021,7 +1022,8 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::postProcessRequest(LlmRequest& llmReq, SizeType32 bid)
+void TrtGptModelInflightBatching::postProcessRequest(
+    LlmRequest& llmReq, SizeType32 bid, std::vector<SizeType32> const& numDroppedTokens)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const seqSlot = llmReq.mSeqSlot.value();
@@ -1049,20 +1051,19 @@ void TrtGptModelInflightBatching::postProcessRequest(LlmRequest& llmReq, SizeTyp
             = llmReq.getGenerationLogitsHost(); // [beamWidth, mMaxNewTokens, vocabSizePadded]
         for (int beam = 0; beam < reqBeamWidth; beam++)
         {
-            SizeType32 numGenerationToken = llmReq.getNumTokens(beam) - llmReq.mPromptLen;
-            // endId is not included in numGenerationToken, so add 1 if we terminated early by reaching the endId.
-            SizeType32 hostOffset
-                = numGenerationToken - fragmentSize + ((numGenerationToken != llmReq.mMaxNewTokens) ? 1 : 0);
+            auto const numGenerationToken = llmReq.getNumTokens(beam) - llmReq.mPromptLen;
+            auto const beamFragmentSize = fragmentSize - numDroppedTokens.at(beam);
+            SizeType32 hostOffset = numGenerationToken - beamFragmentSize;
             TensorPtr beamHostTensorPtr = ITensor::slice(generationLogitsHost, beam, 1);
-            beamHostTensorPtr->squeeze(0);                                     // [mMaxNewTokens, vocabSizePadded]
-            TensorPtr curTokenHostTensorPtr
-                = ITensor::slice(beamHostTensorPtr, hostOffset, fragmentSize); // [fragmentSize, vocabSizePadded]
+            beamHostTensorPtr->squeeze(0);                        // [mMaxNewTokens, vocabSizePadded]
+            TensorPtr curTokenHostTensorPtr = ITensor::slice(
+                beamHostTensorPtr, hostOffset, beamFragmentSize); // [beamFragmentSize, vocabSizePadded]
 
             TensorPtr beamDeviceTensorPtr
                 = ITensor::slice(transposeBufferPtr, beam, 1); // [1, GENERATION_LOGITS_BUFFER_LENGTH, vocabSize]
             beamDeviceTensorPtr->squeeze(0);                   // [GENERATION_LOGITS_BUFFER_LENGTH, vocabSizePadded]
             beamDeviceTensorPtr
-                = ITensor::slice(beamDeviceTensorPtr, 0, fragmentSize); // [fragmentSize, vocabSizePadded]
+                = ITensor::slice(beamDeviceTensorPtr, 0, beamFragmentSize); // [beamFragmentSize, vocabSizePadded]
 
             bufferManager.copy(*beamDeviceTensorPtr, *curTokenHostTensorPtr);
         }
@@ -1388,7 +1389,7 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
                 "Only speculative decoding with external draft tokens supports returning generation logits");
 
             // Push into fragments vector
-            llmReq->addGenerationFragments(logitsView);
+            llmReq->addGenerationLogitsFragment(logitsView);
             TLLM_CHECK(llmReq->getGenerationLogitsFragmentsSize() <= GENERATION_LOGITS_BUFFER_LENGTH);
             // Copy back to host for every GENERATION_LOGITS_BUFFER_LENGTH steps to mitigate GPU memory pressure
             if (llmReq->getGenerationLogitsFragmentsSize() == GENERATION_LOGITS_BUFFER_LENGTH)
@@ -1449,14 +1450,15 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
             {
                 auto& logits = mDecoderBuffers->logits.at(llmReq->mSeqSlot.value());
                 llmReq->mLogitsPostProcessor.value()(
-                    llmReq->mRequestId, logits, llmReq->getTokens(), mRuntime->getStreamPtr());
+                    llmReq->mRequestId, logits, llmReq->getTokens(), mRuntime->getStreamPtr(), llmReq->mClientId);
             }
         }
     }
 
-    std::vector<batch_manager::LlmRequest::RequestIdType> reqIdsVec;
-    std::vector<batch_manager::LlmRequest::TensorPtr> logitsVec;
-    std::vector<std::reference_wrapper<batch_manager::LlmRequest::BeamTokens const>> beamTokensVec;
+    std::vector<LlmRequest::RequestIdType> reqIdsVec;
+    std::vector<LlmRequest::TensorPtr> logitsVec;
+    std::vector<std::reference_wrapper<LlmRequest::BeamTokens const>> beamTokensVec;
+    std::vector<std::optional<LlmRequest::RequestIdType>> clientIdsVec;
 
     for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
     {
@@ -1470,12 +1472,14 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
                 logitsVec.push_back(logits);
 
                 beamTokensVec.push_back(llmReq->getTokens());
+                clientIdsVec.push_back(llmReq->mClientId);
             }
         }
     }
     if (reqIdsVec.size())
     {
-        mLogitsPostProcessorBatched.value()(reqIdsVec, logitsVec, beamTokensVec, mRuntime->getStreamPtr());
+        mLogitsPostProcessorBatched.value()(
+            reqIdsVec, logitsVec, beamTokensVec, mRuntime->getStreamPtr(), clientIdsVec);
     }
 
     auto const active = computeActiveVec(scheduledRequests);
@@ -1732,32 +1736,32 @@ std::unique_ptr<DecoderStepAsyncSend> TrtGptModelInflightBatching::decoderSync(
                 llmReq->setGenerationLogitsHost(acceptedTokensLogitsHost);
             }
 
+            std::vector<SizeType32> numDroppedTokens(reqBeamWidth);
             for (SizeType32 beam = 0; beam < reqBeamWidth; ++beam)
             {
                 auto const seqLen = sequenceLengthsHostData[seqSlot * getMaxBeamWidth() + beam];
-                for (SizeType32 step = 0; step < numGeneratedTokens; ++step)
+                // The content of newOutputTokens might not be accurate in the case where
+                // the sequence has finished early due to end token, so only add new tokens
+                // to llmReq if decoder seq length is greater than current number of tokens
+                auto const numNewTokens = std::min(numGeneratedTokens, seqLen - llmReq->getNumTokens(beam));
+                numDroppedTokens[beam] = numGeneratedTokens - numNewTokens;
+                for (SizeType32 step = 0; step < numNewTokens; ++step)
                 {
-                    // The content of newOutputTokens might not be accurate in the case where
-                    // the sequence has finished early due to end token, so only add new token
-                    // to llmReq if decoder seq length is greater than current number of tokens
-                    if (seqLen > llmReq->getNumTokens(beam))
+                    auto const newTokenIdx = tc::flat_index(hostNewOutputTokensShape.d, step, seqSlot, beam);
+                    auto const newToken = hostNewOutputTokensData[newTokenIdx];
+                    llmReq->addNewToken(newToken, beam);
+
+                    if (llmReq->returnLogProbs())
                     {
-                        auto const newTokenIdx = tc::flat_index(hostNewOutputTokensShape.d, step, seqSlot, beam);
-                        auto const newToken = hostNewOutputTokensData[newTokenIdx];
-                        llmReq->addNewToken(newToken, beam);
+                        auto const cumLogProb = cumLogProbsPtr[seqSlot * getMaxBeamWidth() + beam];
+                        llmReq->setCumLogProb(cumLogProb, beam);
 
-                        if (llmReq->returnLogProbs())
-                        {
-                            auto const cumLogProb = cumLogProbsPtr[seqSlot * getMaxBeamWidth() + beam];
-                            llmReq->setCumLogProb(cumLogProb, beam);
-
-                            auto const beginLogProbsOffset = reqBeamWidth == 1 ? llmReq->mPromptLen : 0;
-                            SizeType32 offset
-                                = (seqSlot * getMaxBeamWidth() + beam) * getMaxSequenceLen() + beginLogProbsOffset;
-                            auto const generatedLength = seqLen - llmReq->mPromptLen;
-                            std::vector<float> logProbs(logProbsPtr + offset, logProbsPtr + offset + generatedLength);
-                            llmReq->setLogProbs(logProbs, beam);
-                        }
+                        auto const beginLogProbsOffset = reqBeamWidth == 1 ? llmReq->mPromptLen : 0;
+                        SizeType32 offset
+                            = (seqSlot * getMaxBeamWidth() + beam) * getMaxSequenceLen() + beginLogProbsOffset;
+                        auto const generatedLength = seqLen - llmReq->mPromptLen;
+                        std::vector<float> logProbs(logProbsPtr + offset, logProbsPtr + offset + generatedLength);
+                        llmReq->setLogProbs(logProbs, beam);
                     }
                 }
             }
@@ -1806,7 +1810,7 @@ std::unique_ptr<DecoderStepAsyncSend> TrtGptModelInflightBatching::decoderSync(
             if (decoderFinishedPtr[seqSlot] != 0U || mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
                 || (mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal() && llmReq->hasDraftTokens()))
             {
-                postProcessRequest(*llmReq, batchIdx);
+                postProcessRequest(*llmReq, batchIdx, numDroppedTokens);
                 if (!mWorldConfig.isPipelineParallel() || !mWorldConfig.isLastPipelineParallelRank())
                 {
                     llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;

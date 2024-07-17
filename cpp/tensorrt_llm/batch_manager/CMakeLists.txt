@@ -14,16 +14,19 @@ set(BATCH_MANAGER_STATIC_TARGET ${BATCH_MANAGER_TARGET_NAME}_static)
 set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(SRCS
+    cacheTransceiver.cpp
     capacityScheduler.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp
     GptManager.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
+    kvCacheUtils.cpp
     lookaheadDecodingBuffers.cpp
     loraBuffers.cpp
     medusaBuffers.cpp
     microBatchScheduler.cpp
+    mpiDataTransceiver.cpp
     namedTensor.cpp
     peftCacheManager.cpp
     promptTuningBuffers.cpp

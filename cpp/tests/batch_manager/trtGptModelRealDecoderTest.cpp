@@ -13,6 +13,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/trtGptModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
 #include "tensorrt_llm/common/assert.h"
@@ -36,6 +37,10 @@ using namespace tensorrt_llm::batch_manager;
 namespace fs = std::filesystem;
 namespace tc = tensorrt_llm::common;
 namespace texec = tensorrt_llm::executor;
+using tensorrt_llm::testing::ModelSpec;
+using tensorrt_llm::testing::KVCacheType;
+using tensorrt_llm::testing::QuantMethod;
+using tensorrt_llm::testing::OutputContentType;
 
 namespace
 {
@@ -51,48 +56,19 @@ auto constexpr LLAMA_MODEL_DIR = "llama-7b-hf";
 auto constexpr MEDUSA_MODEL_DIR = "vicuna-7b-v1.3";
 auto constexpr MAMBA_MODEL_DIR = "mamba-2.8b-hf";
 auto constexpr RECURRENTGEMMA_MODEL_DIR = "recurrentgemma-2b";
-auto constexpr EXPLICIT_DRAFT_MODEL_DIR = "vicuna-explicit_draft";
+auto constexpr EXPLICIT_DRAFT_MODEL_DIR = "vicuna_redrafter";
 auto constexpr CHATGLM_MODEL_DIR = "chatglm-6b";
-
-auto constexpr FP16_GPT_ATTENTION_PACKED_DIR = "fp16-plugin-packed";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_DIR = "fp16-plugin-packed-paged";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR = "fp16-plugin-packed-paged-draft-tokens";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_NPROFILES_DIR = "fp16-plugin-packed-paged-nprofiles";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_LA_DECODING_DIR = "fp16-plugin-packed-paged-la-decoding";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_SQ_DIR = "fp16-plugin-packed-paged-sq";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_IN128_DIR = "fp16-plugin-packed-paged-in128";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR = "fp16-plugin-packed-paged-gather";
-auto constexpr FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR
-    = "fp16-plugin-packed-paged-return-accepted-tokens-logits";
+auto constexpr GLM_MODEL_DIR = "glm-10b";
 
 auto constexpr FP8_GPT_ATTENTION_PLUGIN_IFB_PACKED_PATH = "fp8-plugin";
 
 auto constexpr INPUT_FILE = "input_tokens.npy";
+auto constexpr INPUT_VICUNA_FILE = "input_vicuna.npy";
 auto constexpr LONG_INPUT_FILE = "input_tokens_long.npy";
 auto constexpr CHATGLM_INPUT_FILE = "input_tokens_chatglm-6b.npy";
+auto constexpr GLM_INPUT_FILE = "input_tokens_glm-10b.npy";
 
 // Expected outputs need to be generated using cpp/tests/resources/scripts/generate_expected_gpt_output.py.
-auto constexpr FP16_PLUGIN_PACKED_RESULT_FILE = "output_tokens_fp16_plugin_packed_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_RESULT_FILE = "output_tokens_fp16_plugin_packed_paged_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_SQ_RESULT_FILE = "output_tokens_fp16_plugin_packed_paged_sq_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_LONG_RESULT_FILE = "output_tokens_long_fp16_plugin_packed_paged_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_LONG_INPUT_RESULT_FILE
-    = "output_tokens_long_input_fp16_plugin_packed_paged_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE
-    = "output_tokens_fp16_plugin_packed_paged_gather_tp1_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE
-    = "output_tokens_fp16_plugin_packed_paged_gather_tp1_pp1_logits_generation.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE
-    = "output_tokens_fp16_plugin_packed_paged_gather_tp1_pp1_logits_context.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE
-    = "output_tokens_fp16_plugin_packed_paged_tp1_pp1_cum_log_probs.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE = "output_tokens_fp16_plugin_packed_paged_tp1_pp1_log_probs.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE = "output_tokens_fp16_plugin_packed_paged_tp1_pp4.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE = "output_tokens_fp16_plugin_packed_paged_tp4_pp1.npy";
-auto constexpr FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE = "output_tokens_fp16_plugin_packed_paged_tp2_pp2.npy";
-
-auto constexpr FP8_PLUGIN_RESULT_FILE = "output_tokens_fp8_plugin_tp1_pp1.npy";
-
 inline bool almostEqual(float a, float b, float atol = 1e-2, float rtol = 1e-3)
 {
     // Params: a = value to compare and b = reference
@@ -122,166 +98,15 @@ struct ModelParams
     ModelIds ids;
 };
 
-class ModelSpec
+struct BeamResult
 {
-public:
-    ModelSpec(fs::path modelPath, fs::path inputFile, fs::path resultsFile, nvinfer1::DataType dtype,
-        fs::path generationLogitsFile = "", fs::path contextLogitsFile = "", fs::path cumLogProbsFile = "",
-        fs::path logProbsFile = "")
-        : mModelPath{std::move(modelPath)}
-        , mInputFile{std::move(inputFile)}
-        , mResultsFile{std::move(resultsFile)}
-        , mDataType{dtype}
-        , mGenerationLogitsFile{std::move(generationLogitsFile)}
-        , mContextLogitsFile{std::move(contextLogitsFile)}
-        , mCumLogProbsFile{std::move(cumLogProbsFile)}
-        , mLogProbsFile{std::move(logProbsFile)}
-        , mBatchSizes{1, 2, 8}
-    {
-    }
-
-    ModelSpec& useGptAttentionPlugin()
-    {
-        mUseGptAttentionPlugin = true;
-        return *this;
-    }
-
-    ModelSpec& usePackedInput()
-    {
-        mUsePackedInput = true;
-        return *this;
-    }
-
-    ModelSpec& usePagedKvCache()
-    {
-        mUsePagedKvCache = true;
-        return *this;
-    }
-
-    ModelSpec& useDecoderPerRequest()
-    {
-        mDecoderPerRequest = true;
-        return *this;
-    }
-
-    ModelSpec& useTensorParallelism(int tensorParallelism)
-    {
-        mTPSize = tensorParallelism;
-        return *this;
-    }
-
-    ModelSpec& usePipelineParallelism(int pipelineParallelism)
-    {
-        mPPSize = pipelineParallelism;
-        return *this;
-    }
-
-    ModelSpec& useRandomEndId()
-    {
-        mRandomEndId = true;
-        return *this;
-    }
-
-    ModelSpec& setDraftTokens(SizeType32 maxDraftTokens)
-    {
-        mSpecDecodingMode = SpeculativeDecodingMode::DraftTokensExternal();
-        mMaxDraftTokens = maxDraftTokens;
-        return *this;
-    }
-
-    ModelSpec& useAcceptByLogits()
-    {
-        mAcceptDraftByLogits = true;
-        return *this;
-    }
-
-    ModelSpec& gatherLogits()
-    {
-        mGatherLogits = true;
-        return *this;
-    }
-
-    ModelSpec& returnAcceptedTokensLogits()
-    {
-        mReturnAcceptedTokensLogits = true;
-        return *this;
-    }
-
-    ModelSpec& replaceLogits()
-    {
-        mReplaceLogits = true;
-        return *this;
-    }
-
-    ModelSpec& returnLogProbs()
-    {
-        mReturnLogProbs = true;
-        return *this;
-    }
-
-    ModelSpec& smokeTest()
-    {
-        mSmokeTest = true;
-        return *this;
-    }
-
-    ModelSpec& useMedusa()
-    {
-        mSpecDecodingMode = SpeculativeDecodingMode::Medusa();
-        return *this;
-    }
-
-    ModelSpec& useLookaheadDecoding()
-    {
-        mSpecDecodingMode = SpeculativeDecodingMode::LookaheadDecoding();
-        return *this;
-    }
-
-    ModelSpec& useExplicitDraftTokensDecoding()
-    {
-        mSpecDecodingMode = SpeculativeDecodingMode::ExplicitDraftTokens();
-        return *this;
-    }
-
-    [[nodiscard]] bool useLogits() const
-    {
-        return mGatherLogits || mReplaceLogits;
-    }
-
-    ModelSpec& setBatchSizes(std::vector<SizeType32> batchSizes)
-    {
-        mBatchSizes = std::move(batchSizes);
-        return *this;
-    }
-
-    fs::path mModelPath;
-    fs::path mInputFile;
-    fs::path mResultsFile;
-    nvinfer1::DataType mDataType;
-    fs::path mGenerationLogitsFile;
-    fs::path mContextLogitsFile;
-    fs::path mCumLogProbsFile;
-    fs::path mLogProbsFile;
-    bool mUseGptAttentionPlugin{false};
-    bool mUsePackedInput{false};
-    bool mUsePagedKvCache{false};
-    bool mDecoderPerRequest{false};
-    int mPPSize{1};
-    int mTPSize{1};
-    bool mRandomEndId{false};
-    int mMaxDraftTokens{0};
-    bool mAcceptDraftByLogits{false};
-    bool mGatherLogits{false};
-    bool mReplaceLogits{false};
-    bool mReturnLogProbs{false};
-    bool mSmokeTest{false};
-    bool mReturnAcceptedTokensLogits{false};
-    SpeculativeDecodingMode mSpecDecodingMode{SpeculativeDecodingMode::None()};
-    std::vector<SizeType32> mBatchSizes;
+    SizeType32 beamWidth;
+    fs::path resultsFile;
+    std::pair<fs::path, fs::path> logitsFiles;
+    std::pair<fs::path, fs::path> logProbsFiles;
 };
 
-using BeamResults
-    = std::vector<std::tuple<SizeType32, fs::path, std::pair<fs::path, fs::path>, std::pair<fs::path, fs::path>>>;
+using BeamResults = std::vector<BeamResult>;
 
 } // namespace
 
@@ -404,7 +229,7 @@ void verifyOutput(RequestList const& finishedRequestList,
     std::unordered_map<SizeType32, TestData> const& beamWidthTestData, std::vector<SizeType32> const& givenInputLengths,
     SizeType32 nbGivenInputs, ModelSpec const& modelSpec)
 {
-    auto const checkRawLogits = modelSpec.mGatherLogits;
+    auto const checkRawLogits = modelSpec.mOtherModelSpecToCompare ? false : modelSpec.mGatherLogits;
     auto const smokeTest = modelSpec.mSmokeTest;
     auto const returnLogProbs = modelSpec.mReturnLogProbs;
     auto const checkAcceptedTokenLogits = modelSpec.mReturnAcceptedTokensLogits;
@@ -577,7 +402,7 @@ std::tuple<std::vector<SizeType32>, std::unordered_map<SizeType32, TestData>> lo
                     auto const endIdRow = std::rand() % nbGivenInputs;
                     auto const endIdBeam = std::rand() % beamWidth;
                     // We skip 1st token because minLength is 1
-                    auto const endIdCol = givenInputLengths[endIdRow] + 1 + std::rand() % (maxNewTokens - 1);
+                    auto const endIdCol = givenInputLengths[endIdRow] + 1 + std::rand() % std::max(maxNewTokens - 1, 1);
                     auto const endIdIndex = tc::flat_index2((endIdRow * beamWidth + endIdBeam), endIdCol, maxSeqLen);
                     skippedTokenIndex
                         = tc::flat_index2((endIdRow * beamWidth + endIdBeam), givenInputLengths[endIdRow], maxSeqLen);
@@ -924,7 +749,7 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
                 LlmRequest::LogitsPostProcessor logitsCb
                     = [&testData](uint64_t rId, tensorrt_llm::runtime::ITensor::SharedPtr& logits,
                           LlmRequest::BeamTokens const& tokens,
-                          tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr)
+                          tensorrt_llm::runtime::BufferManager::CudaStreamPtr streamPtr, std::optional<uint64_t> cId)
                 {
                     auto const expectedGenerationLogits = testData.expectedGenerationLogits[rId];
                     auto const expectedContextLogits = testData.expectedContextLogits[rId];
@@ -1057,7 +882,21 @@ using ParamType = std::tuple<ModelParams, ModelSpec, TrtGptModelType, TrtGptMode
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
 {
     auto const modelSpec = std::get<1>(info.param);
-    std::string name{modelSpec.mDataType == nvinfer1::DataType::kFLOAT ? "Float" : "Half"};
+    std::string name;
+    switch (modelSpec.mDataType)
+    {
+    case nvinfer1::DataType::kFLOAT: name.append("Float"); break;
+    case nvinfer1::DataType::kHALF: name.append("Half"); break;
+    case nvinfer1::DataType::kINT8: name.append("Int8"); break;
+    case nvinfer1::DataType::kINT32: name.append("Int32");
+    case nvinfer1::DataType::kBOOL: name.append("Bool"); break;
+    case nvinfer1::DataType::kUINT8: name.append("UInt8"); break;
+    case nvinfer1::DataType::kFP8: name.append("Float8"); break;
+    case nvinfer1::DataType::kBF16: name.append("BFloat16"); break;
+    case nvinfer1::DataType::kINT4: name.append("Int4"); break;
+    default: throw std::runtime_error("Unsupported DataType"); break;
+    }
+
     auto const modelType = std::get<2>(info.param);
     switch (modelType)
     {
@@ -1066,7 +905,7 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     case TrtGptModelType::InflightFusedBatching: name.append("FusedIbModel"); break;
     default: name.append("DefaultModel"); break;
     }
-    if (modelSpec.mUsePagedKvCache)
+    if (modelSpec.mKVCacheType == KVCacheType::kPAGED)
     {
         name.append("PagedKvCache");
     }
@@ -1162,7 +1001,7 @@ TEST_P(ParamTest, Test)
     std::ostringstream gpuSizePath;
     gpuSizePath << "tp" << modelSpec.mTPSize << "-pp" << modelSpec.mPPSize << "-gpu";
 
-    auto const modelPath{ENGINE_PATH / modelDir / modelSpec.mModelPath / gpuSizePath.str()};
+    auto const modelPath{ENGINE_PATH / modelDir / modelSpec.getModelPath() / gpuSizePath.str()};
 
     auto const inputPath = DATA_PATH / modelSpec.mInputFile;
 
@@ -1173,15 +1012,15 @@ TEST_P(ParamTest, Test)
         fs::path resultsPath
             = DATA_PATH / modelDir / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         fs::path generationLogitsPath
-            = modelSpec.mGenerationLogitsFile.empty() ? "" : (resultsPath / modelSpec.mGenerationLogitsFile).string();
+            = modelSpec.mCollectGenerationLogits ? (resultsPath / modelSpec.getGenerationLogitsFile()).string() : "";
         fs::path contextLogitsPath
-            = modelSpec.mContextLogitsFile.empty() ? "" : (resultsPath / modelSpec.mContextLogitsFile).string();
+            = modelSpec.mCollectContextLogits ? (resultsPath / modelSpec.getContextLogitsFile()).string() : "";
         fs::path cumLogProbsPath
-            = modelSpec.mCumLogProbsFile.empty() ? "" : (resultsPath / modelSpec.mCumLogProbsFile).string();
-        fs::path logProbsPath = modelSpec.mLogProbsFile.empty() ? "" : (resultsPath / modelSpec.mLogProbsFile).string();
+            = modelSpec.mCollectCumLogProbs ? (resultsPath / modelSpec.getCumLogProbsFile()).string() : "";
+        fs::path logProbsPath = modelSpec.mCollectLogProbs ? (resultsPath / modelSpec.getLogProbsFile()).string() : "";
 
-        beamResults.emplace_back(std::make_tuple(beamWidth, (resultsPath / modelSpec.mResultsFile).string(),
-            std::make_pair(generationLogitsPath, contextLogitsPath), std::make_pair(cumLogProbsPath, logProbsPath)));
+        beamResults.emplace_back(BeamResult{beamWidth, (resultsPath / modelSpec.getResultsFile()).string(),
+            std::make_pair(generationLogitsPath, contextLogitsPath), std::make_pair(cumLogProbsPath, logProbsPath)});
 
         if (modelSpec.mRandomEndId && beamWidth > 1)
         {
@@ -1192,7 +1031,8 @@ TEST_P(ParamTest, Test)
     auto const modelType = std::get<2>(GetParam());
     auto const testType = std::get<3>(GetParam());
 
-    if (modelType != TrtGptModelType::V1 && !(modelSpec.mUsePackedInput && modelSpec.mUsePagedKvCache))
+    if (modelType != TrtGptModelType::V1
+        && !(modelSpec.mUsePackedInput && modelSpec.mKVCacheType == KVCacheType::kPAGED))
     {
         GTEST_SKIP() << "Inflight batching requires packed input and paged KV cache.";
     }
@@ -1242,21 +1082,54 @@ TEST_P(ParamTest, Test)
 
 auto constexpr gptModelParams = ModelParams{GPT_MODEL_DIR, {50256, 50256}};
 
+std::shared_ptr<ModelSpec> getGptDraftTestsCompareModelSpec()
+{
+    ModelSpec* pModelSpec = new ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF};
+    pModelSpec->useGptAttentionPlugin();
+    pModelSpec->gatherLogits();
+    pModelSpec->usePackedInput();
+    pModelSpec->setKVCacheType(KVCacheType::kPAGED);
+    std::shared_ptr<ModelSpec> ret(pModelSpec);
+
+    return ret;
+}
+
+std::shared_ptr<ModelSpec> getMedusaTestsCompareModelSpec()
+{
+    ModelSpec* pModelSpec = new ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF};
+    pModelSpec->useGptAttentionPlugin();
+    pModelSpec->usePackedInput();
+    pModelSpec->setKVCacheType(KVCacheType::kPAGED);
+    pModelSpec->setMaxOutputLength(128);
+    std::shared_ptr<ModelSpec> ret(pModelSpec);
+
+    return ret;
+}
+
+std::shared_ptr<ModelSpec> getGptChunkedContextTestsCompareModelSpec()
+{
+    ModelSpec* pModelSpec = new ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF};
+    pModelSpec->useGptAttentionPlugin();
+    pModelSpec->usePackedInput();
+    pModelSpec->setKVCacheType(KVCacheType::kPAGED);
+    pModelSpec->setMaxInputLength(128);
+    std::shared_ptr<ModelSpec> ret(pModelSpec);
+
+    return ret;
+}
+
 INSTANTIATE_TEST_SUITE_P(GptV1Tests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{
-                FP16_GPT_ATTENTION_PACKED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_RESULT_FILE, nvinfer1::DataType::kHALF}
-                .usePackedInput(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kCONTINUOUS),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useRandomEndId()
 
                 ),
@@ -1278,17 +1151,13 @@ INSTANTIATE_TEST_SUITE_P(GptTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()
-                .useRandomEndId()
-
-                ),
+                .setKVCacheType(KVCacheType::kPAGED)
+                .useRandomEndId()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1305,10 +1174,11 @@ INSTANTIATE_TEST_SUITE_P(GptTests, ParamTest,
 
 INSTANTIATE_TEST_SUITE_P(GptNProfilesTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
-        testing::Values(ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_NPROFILES_DIR, INPUT_FILE,
-            FP16_PLUGIN_PACKED_PAGED_RESULT_FILE, nvinfer1::DataType::kHALF}
+        testing::Values(ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                            .useGptAttentionPlugin()
                             .usePackedInput()
-                            .usePagedKvCache()
+                            .setKVCacheType(KVCacheType::kPAGED)
+                            .useMultipleProfiles()
                             .useRandomEndId()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(TrtGptModelIfbTestType::BULK),
@@ -1325,12 +1195,11 @@ INSTANTIATE_TEST_SUITE_P(GptNProfilesTests, ParamTest,
 
 INSTANTIATE_TEST_SUITE_P(GptSqTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
-        testing::Values(
-            //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_SQ_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_SQ_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()),
+        testing::Values(ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                            .useGptAttentionPlugin()
+                            .usePackedInput()
+                            .setKVCacheType(KVCacheType::kPAGED)
+                            .setQuantMethod(QuantMethod::kSMOOTH_QUANT)),
         testing::Values(TrtGptModelType::InflightBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1351,12 +1220,11 @@ INSTANTIATE_TEST_SUITE_P(DISABLED_GptChunkedContextTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_IN128_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_LONG_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF, getGptChunkedContextTestsCompareModelSpec()}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
-
-                ),
+                .setKVCacheType(KVCacheType::kPAGED)
+                .setMaxInputLength(128)),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(TrtGptModelIfbTestType::BULK),
         testing::Values(
@@ -1373,14 +1241,16 @@ INSTANTIATE_TEST_SUITE_P(GptChunkedLongContextTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_IN128_DIR, LONG_INPUT_FILE,
-                FP16_PLUGIN_PACKED_PAGED_LONG_INPUT_RESULT_FILE, nvinfer1::DataType::kHALF}
+            ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR, LONG_INPUT_FILE,
-                FP16_PLUGIN_PACKED_PAGED_LONG_INPUT_RESULT_FILE, nvinfer1::DataType::kHALF}
+                .setKVCacheType(KVCacheType::kPAGED)
+                .setMaxInputLength(128),
+            ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
+                .useDraftTokensExternalDecoding()
                 .setDraftTokens(5)),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
@@ -1399,23 +1269,27 @@ INSTANTIATE_TEST_SUITE_P(GptDraftTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR, INPUT_FILE,
-                FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE, nvinfer1::DataType::kHALF,
-                FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE, FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF, getGptDraftTestsCompareModelSpec()}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useRandomEndId()
+                .useDraftTokensExternalDecoding()
                 .setDraftTokens(5)
-                .replaceLogits(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR, INPUT_FILE,
-                FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE, nvinfer1::DataType::kHALF,
-                FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE, FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE}
+                .replaceLogits()
+                .collectGenerationLogitsFile()
+                .collectContextLogitsFile(),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF, getGptDraftTestsCompareModelSpec()}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useRandomEndId()
+                .useDraftTokensExternalDecoding()
                 .setDraftTokens(5)
                 .useAcceptByLogits()
-                .replaceLogits()),
+                .replaceLogits()
+                .collectGenerationLogitsFile()
+                .collectContextLogitsFile()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1429,14 +1303,17 @@ INSTANTIATE_TEST_SUITE_P(GptDraftTests, ParamTest,
 
 INSTANTIATE_TEST_SUITE_P(GptReturnAcceptedTokenLogitsTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
-        testing::Values(ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR, INPUT_FILE,
-            FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE, nvinfer1::DataType::kHALF,
-            FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE, FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE}
+        testing::Values(ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF, getGptDraftTestsCompareModelSpec()}
+                            .useGptAttentionPlugin()
                             .usePackedInput()
-                            .usePagedKvCache()
+                            .setKVCacheType(KVCacheType::kPAGED)
+                            .useDraftTokensExternalDecoding()
+                            .gatherLogits()
                             .setDraftTokens(5)
                             .useAcceptByLogits()
-                            .returnAcceptedTokensLogits()),
+                            .returnAcceptedTokensLogits()
+                            .collectGenerationLogitsFile()
+                            .collectContextLogitsFile()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1453,13 +1330,14 @@ INSTANTIATE_TEST_SUITE_P(GptLogitsTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             // modelSpec
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR, INPUT_FILE,
-                FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE, nvinfer1::DataType::kHALF,
-                FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE, FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .gatherLogits()
-                .useRandomEndId()),
+                .useRandomEndId()
+                .collectGenerationLogitsFile()
+                .collectContextLogitsFile()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching), // modelType
         testing::Values(TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT,
             TrtGptModelIfbTestType::RANDOM),                                                        // testType
@@ -1475,12 +1353,13 @@ INSTANTIATE_TEST_SUITE_P(GptLogProbsTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             // modelSpec
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF, "", "", FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE,
-                FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
-                .returnLogProbs()),
+                .setKVCacheType(KVCacheType::kPAGED)
+                .returnLogProbs()
+                .collectCumLogProbsFile()
+                .collectLogProbsFile()),
         testing::Values(TrtGptModelType::InflightFusedBatching), // modelType
         testing::Values(TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT,
             TrtGptModelIfbTestType::RANDOM),                     // testType
@@ -1496,13 +1375,10 @@ INSTANTIATE_TEST_SUITE_P(GptjTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{GPTJ_MODEL_DIR, {50256, 50256}}),
         testing::Values(
             //
-            ModelSpec{
-                FP16_GPT_ATTENTION_PACKED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_RESULT_FILE, nvinfer1::DataType::kHALF}
-                .usePackedInput(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kCONTINUOUS),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED)
 
                 ),
         testing::Values(TrtGptModelType::V1, TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
@@ -1522,13 +1398,14 @@ INSTANTIATE_TEST_SUITE_P(GptjTests, ParamTest,
 
 INSTANTIATE_TEST_SUITE_P(MambaTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{MAMBA_MODEL_DIR, {0, 1}}),
-        testing::Values(ModelSpec{FP16_GPT_ATTENTION_PACKED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_RESULT_FILE,
-                            nvinfer1::DataType::kHALF}
-                            .usePackedInput(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()),
+        testing::Values(
+            //
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
+                .setKVCacheType(KVCacheType::kCONTINUOUS)
+                .usePackedInput(),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED)),
         testing::Values(TrtGptModelType::V1, TrtGptModelType::InflightBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1542,10 +1419,9 @@ INSTANTIATE_TEST_SUITE_P(MambaTests, ParamTest,
 
 INSTANTIATE_TEST_SUITE_P(RecurrentGemmaTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{RECURRENTGEMMA_MODEL_DIR, {0, 1}}),
-        testing::Values(ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-            nvinfer1::DataType::kHALF}
-                            .usePackedInput()
-                            .usePagedKvCache()),
+        testing::Values(
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED)),
         testing::Values(TrtGptModelType::InflightBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1561,24 +1437,22 @@ INSTANTIATE_TEST_SUITE_P(LlamaTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{LLAMA_MODEL_DIR, {2, 2}}),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache(),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE,
-                nvinfer1::DataType::kHALF}
-                .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .usePipelineParallelism(4),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useTensorParallelism(4),
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .usePipelineParallelism(2)
                 .useTensorParallelism(2)
 
@@ -1601,10 +1475,30 @@ INSTANTIATE_TEST_SUITE_P(ChatGlmTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{CHATGLM_MODEL_DIR, {130005, 3}}),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, CHATGLM_INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{CHATGLM_INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()),
+                .setKVCacheType(KVCacheType::kPAGED)),
+        testing::Values(TrtGptModelType::InflightFusedBatching),
+        testing::Values(
+            TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
+        testing::Values(BeamConfig{1, {1}}),
+        testing::Values(std::nullopt), // maxTokensInPagedKvCache
+        testing::Values(std::nullopt), // freeGpuMemoryFraction
+        testing::Values(false),        // enableTrtOverlap
+        testing::Values(false)         // enableChunkedContext
+        ),
+    generateTestName);
+
+// ChatGlm0Tests is for glm-10b.
+INSTANTIATE_TEST_SUITE_P(ChatGlm0Tests, ParamTest,
+    testing::Combine(testing::Values(ModelParams{GLM_MODEL_DIR, {50258, 50256}}),
+        testing::Values(
+            //
+            ModelSpec{GLM_INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
+                .usePackedInput()
+                .setKVCacheType(KVCacheType::kPAGED)),
         testing::Values(TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1622,10 +1516,10 @@ INSTANTIATE_TEST_SUITE_P(MedusaTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{MEDUSA_MODEL_DIR, {2, 2}}),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_LONG_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_VICUNA_FILE, nvinfer1::DataType::kHALF, getMedusaTestsCompareModelSpec()}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useMedusa()
                 .setBatchSizes({8})),
         testing::Values(TrtGptModelType::InflightFusedBatching), testing::Values(TrtGptModelIfbTestType::BULK),
@@ -1643,10 +1537,10 @@ INSTANTIATE_TEST_SUITE_P(DISABLED_GptLookaheadDecodingTests, ParamTest,
     testing::Combine(testing::Values(gptModelParams),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_LA_DECODING_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useRandomEndId()
                 .useLookaheadDecoding()
                 .smokeTest()),
@@ -1662,18 +1556,17 @@ INSTANTIATE_TEST_SUITE_P(DISABLED_GptLookaheadDecodingTests, ParamTest,
 
     generateTestName);
 
-// TODO(rkobus): enable tests
-INSTANTIATE_TEST_SUITE_P(DISABLED_GptExplicitDraftTokensDecodingTests, ParamTest,
+// TODO: enable after Drafter checkpoint is public
+INSTANTIATE_TEST_SUITE_P(DISABLED_ExplicitDraftTokensDecodingTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{EXPLICIT_DRAFT_MODEL_DIR, {2, 2}}),
         testing::Values(
             //
-            ModelSpec{FP16_GPT_ATTENTION_PACKED_PAGED_DIR, INPUT_FILE, FP16_PLUGIN_PACKED_PAGED_RESULT_FILE,
-                nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_VICUNA_FILE, nvinfer1::DataType::kHALF}
+                .useGptAttentionPlugin()
                 .usePackedInput()
-                .usePagedKvCache()
+                .setKVCacheType(KVCacheType::kPAGED)
                 .useExplicitDraftTokensDecoding()
-                .smokeTest()
-                .setBatchSizes({1})),
+                .setBatchSizes({8})),
         testing::Values(TrtGptModelType::InflightFusedBatching), testing::Values(TrtGptModelIfbTestType::BULK),
         testing::Values(BeamConfig{1, {1}}), // beamConfig
         testing::Values(std::nullopt),       // maxTokensInPagedKvCache
@@ -1690,10 +1583,10 @@ INSTANTIATE_TEST_SUITE_P(GptjFP8Tests, ParamTest,
     testing::Combine(testing::Values(ModelParams{GPTJ_MODEL_DIR, {50256, 50256}}),
         testing::Values(
             //
-            ModelSpec{
-                FP8_GPT_ATTENTION_PLUGIN_IFB_PACKED_PATH, INPUT_FILE, FP8_PLUGIN_RESULT_FILE, nvinfer1::DataType::kHALF}
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kFP8}.useGptAttentionPlugin().usePackedInput().setKVCacheType(
+                KVCacheType::kPAGED)
 
-            ),
+                ),
         testing::Values(TrtGptModelType::V1, TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),

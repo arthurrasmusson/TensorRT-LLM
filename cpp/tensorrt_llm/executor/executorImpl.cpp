@@ -15,19 +15,29 @@
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/cudaProfilerUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
 #include "tensorrt_llm/executor/types.h"
+#include "tensorrt_llm/executor/version.h"
 #include "tensorrt_llm/runtime/loraCache.h"
 #include "tensorrt_llm/runtime/memoryCounters.h"
 
+#include <cuda_profiler_api.h>
 #include <utility>
 
 namespace tensorrt_llm::executor
 {
+
+/// @brief Version of TRT-LLM as defined in tensorrt_llm/version.py
+char const* version() noexcept
+{
+    return kTensorRtLlmVersion;
+}
 
 class CancelledRequestsAsyncSend
 {
@@ -250,8 +260,9 @@ Executor::Impl::Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr
     auto const& worldConfig = model->getWorldConfig();
     auto const tp = worldConfig.getTensorParallelism();
     auto const pp = worldConfig.getPipelineParallelism();
-    initializeCommAndWorkers(tp, pp, executorConfig);
-    if (encoderModel.has_value())
+    auto const modelType = encoderModel.has_value() ? ModelType::kENCODER_DECODER : ModelType::kDECODER_ONLY;
+    initializeCommAndWorkers(tp, pp, executorConfig, modelType);
+    if (modelType == ModelType::kENCODER_DECODER)
     {
         mEncoderModel = encoderModel.value();
     }
@@ -332,6 +343,13 @@ std::shared_ptr<Model> Executor::Impl::createEncoderModel(runtime::RawEngine con
 void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
     std::optional<ModelType> modelType, std::optional<std::filesystem::path> const& modelPath)
 {
+    if (modelType.has_value() && modelType.value() == ModelType::kENCODER_DECODER)
+    {
+        TLLM_CHECK_WITH_INFO(pp == 1,
+            "Encoder-Decoder C++ runtime doesn't support Pipeline Parallelism currently. Please switch to Python "
+            "runtime for PP mode, if necessary.");
+    }
+
     tensorrt_llm::mpi::initialize(tensorrt_llm::mpi::MpiThreadSupport::THREAD_MULTIPLE);
 
     auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
@@ -510,7 +528,8 @@ void Executor::Impl::initializeLogitsPostProcessorBatched(ExecutorConfig const& 
                   std::vector<batch_manager::LlmRequest::RequestIdType> const& reqIdsVec,
                   std::vector<batch_manager::LlmRequest::TensorPtr>& logitsVec,
                   std::vector<std::reference_wrapper<batch_manager::LlmRequest::BeamTokens const>> const& beamTokensVec,
-                  CudaStreamPtr const& cudaStreamPtr)
+                  CudaStreamPtr const& cudaStreamPtr,
+                  std::vector<std::optional<batch_manager::LlmRequest::RequestIdType>> const& clientIdsVec)
         {
             std::vector<Tensor> cbLogitsVec;
             cbLogitsVec.reserve(logitsVec.size());
@@ -519,7 +538,7 @@ void Executor::Impl::initializeLogitsPostProcessorBatched(ExecutorConfig const& 
                 cbLogitsVec.emplace_back(executor::detail::ofITensor(logits));
             }
 
-            cb(reqIdsVec, cbLogitsVec, beamTokensVec, cudaStreamPtr);
+            cb(reqIdsVec, cbLogitsVec, beamTokensVec, cudaStreamPtr, clientIdsVec);
         };
     }
 }
@@ -937,9 +956,9 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
                 reqWithId.id, std::move(reqWithId.req), logitsPostProcessor, applyLogitsPostProcessorBatched);
 
             // If static batching and streaming, disable streaming and exclude input
-            if (mBatchingType == BatchingType::kSTATIC && newReq->mIsStreaming)
+            if (mBatchingType == BatchingType::kSTATIC && newReq->isStreaming())
             {
-                newReq->mIsStreaming = false;
+                newReq->setStreaming(false);
                 newReq->setExcludeInputFromOutput(true);
             }
 
@@ -952,7 +971,7 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
             // tokens that have been streamed out. In this case, resuming generation may result in different completion
             // for locations whose tokens have already been returned. There is no way to protect against this, so
             // disallowing.
-            if (newReq->mIsStreaming && !mIsSchedulerGuaranteedNoEvict && !mIsChunkedContext)
+            if (newReq->isStreaming() && !mIsSchedulerGuaranteedNoEvict && !mIsChunkedContext)
             {
                 auto maxReqSeqLen = newReq->mPromptLen + newReq->mMaxNewTokens;
                 TLLM_CHECK_WITH_INFO(maxReqSeqLen <= mModel->getMaxInputLen(),
@@ -1092,11 +1111,8 @@ IterationStats Executor::Impl::getCurrentIterationStats(
 {
     IterationStats stats;
     // Timestamp
-    auto const currentTime = std::time(nullptr);
-    auto const timeData = *std::localtime(&currentTime);
-    std::ostringstream stream;
-    stream << std::put_time(&timeData, "%m-%d-%Y %H:%M:%S");
-    stats.timestamp = stream.str();
+    stats.timestamp = tensorrt_llm::common::getCurrentTimestamp();
+
     // Iteration counter
     stats.iter = iterCounter;
     stats.iterLatencyMS = iterLatencyMS;
@@ -1361,6 +1377,9 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(RequestList& ac
 
 void Executor::Impl::executionLoop()
 {
+    auto const [profileIterIdxs, stopIterIdxs] = tensorrt_llm::common::populateIterationIndexes(
+        kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
+
     IterationType iterCounter{0};
     double iterLatencyMS{0};
     std::chrono::time_point<std::chrono::steady_clock> iterStart;
@@ -1368,6 +1387,8 @@ void Executor::Impl::executionLoop()
     RequestList activeRequests;
     while (!mShutdown || !activeRequests.empty())
     {
+        auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
+        auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
         RequestList finishedRequests;
         if (!activeRequests.empty())
         {
@@ -1375,11 +1396,19 @@ void Executor::Impl::executionLoop()
             terminateCancelledRequests(activeRequests);
             finishedRequests = populateNewResponses(activeRequests);
             iterEnd = std::chrono::steady_clock::now();
+            if (stopIter)
+            {
+                cudaProfilerStop();
+            }
             iterLatencyMS = std::chrono::duration<double, std::milli>(iterEnd - iterStart).count();
         }
 
         if (!mShutdown)
         {
+            if (profileIter)
+            {
+                cudaProfilerStart();
+            }
             iterStart = std::chrono::steady_clock::now();
             auto newRequests = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()));
 
@@ -1648,11 +1677,11 @@ Executor::Impl::LlmRequestLogitsPostProcessor Executor::Impl::getLogitsPostProce
     TLLM_CHECK_WITH_INFO(
         postProcIt != mLogitsPostProcessorMap.end(), "LogitsPostProcessor %s not found.", name.c_str());
     auto executorLogitsPostProcessor = postProcIt->second;
-    return [executorLogitsPostProcessor](
-               IdType reqId, RtTensorPtr& logits, BeamTokens const& beamTokens, CudaStreamPtr cudaStreamPtr)
+    return [executorLogitsPostProcessor](IdType reqId, RtTensorPtr& logits, BeamTokens const& beamTokens,
+               CudaStreamPtr cudaStreamPtr, std::optional<IdType> clientId)
     {
         auto logitsTensor = executor::detail::ofITensor(logits);
-        executorLogitsPostProcessor(reqId, logitsTensor, beamTokens, cudaStreamPtr);
+        executorLogitsPostProcessor(reqId, logitsTensor, beamTokens, cudaStreamPtr, clientId);
     };
 }
 

@@ -13,18 +13,20 @@
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-#include <chrono>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <thread>
 
-using ::testing::_;
-using ::testing::Invoke;
+#include <string>
+#include <vector>
 
 namespace tr = tensorrt_llm::runtime;
 namespace tc = tensorrt_llm::common;
 namespace texec = tensorrt_llm::executor;
 namespace tb = tensorrt_llm::batch_manager;
+
+using VecTokens = tb::LlmRequest::VecTokens;
+using SizeType32 = tb::LlmRequest::SizeType32;
 
 class LlmRequestTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
 {
@@ -36,8 +38,8 @@ protected:
 
 TEST_F(LlmRequestTest, fromExecutorRequest)
 {
-    texec::VecTokens inputTokens{1, 2, 3, 4, 5};
-    texec::SizeType32 maxNewTokens(66);
+    VecTokens inputTokens{1, 2, 3, 4, 5};
+    SizeType32 maxNewTokens(66);
     texec::IdType requestId{77};
     {
         texec::Request execReq(inputTokens, maxNewTokens);
@@ -46,7 +48,7 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getTokens().at(0), inputTokens);
         EXPECT_EQ(llmReq.mMaxNewTokens, maxNewTokens);
         EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
-        EXPECT_EQ(llmReq.getMaxSentTokenPos(), inputTokens.size() - 1);
+        EXPECT_EQ(llmReq.getMaxSentTokenLen(), inputTokens.size());
         EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
         EXPECT_FALSE(llmReq.mSeqSlot);
         // No speculative decoding config, draft tokens should be empty
@@ -61,10 +63,10 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
     // Embedding bias
     {
         texec::Request execReq(inputTokens, maxNewTokens);
-        texec::SizeType32 vocabSize = 100;
+        SizeType32 vocabSize = 100;
         // Try adding embedding bias
         auto embeddingBias = texec::Tensor::cpu(texec::DataType::kFP32, {vocabSize});
-        execReq.setEmbeddingBias(std::move(embeddingBias));
+        execReq.setEmbeddingBias(embeddingBias);
         tb::LlmRequest llmReq(requestId, execReq);
         EXPECT_TRUE(llmReq.getEmbeddingBias().has_value());
         EXPECT_EQ(llmReq.getEmbeddingBias().value()->getShape().nbDims, 2);
@@ -75,10 +77,10 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
     // bad/stop words
     {
         texec::Request execReq(inputTokens, maxNewTokens);
-        texec::SizeType32 vocabSize = 100;
+        SizeType32 vocabSize = 100;
         // Try adding embedding bias
-        std::list<texec::VecTokens> badWords{{1, 2, 3}, {4, 5}, {9}};
-        std::list<texec::VecTokens> stopWords{{1, 3}, {4}};
+        std::list<VecTokens> badWords{{1, 2, 3}, {4, 5}, {9}};
+        std::list<VecTokens> stopWords{{1, 3}, {4}};
         execReq.setBadWords(badWords);
         execReq.setStopWords(stopWords);
         tb::LlmRequest llmReq(requestId, execReq);
@@ -126,8 +128,8 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
     // Prompt tuning
     {
         texec::Request execReq(inputTokens, maxNewTokens);
-        texec::SizeType32 vocabSize = 100;
-        texec::SizeType32 hiddenSize = 64;
+        SizeType32 vocabSize = 100;
+        SizeType32 hiddenSize = 64;
         auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {vocabSize, hiddenSize});
         texec::PromptTuningConfig config(embeddingTable);
         execReq.setPromptTuningConfig(config);
@@ -146,8 +148,8 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
 
 TEST_F(LlmRequestTest, invalidExecRequest)
 {
-    texec::VecTokens inputTokens{1, 2, 3, 4, 5};
-    texec::SizeType32 maxNewTokens(66);
+    VecTokens inputTokens{1, 2, 3, 4, 5};
+    SizeType32 maxNewTokens(66);
     texec::IdType requestId{77};
 
     // Input is too long
@@ -160,7 +162,7 @@ TEST_F(LlmRequestTest, invalidExecRequest)
 
             llmReq.validate(2, 1000, 0);
         };
-        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "exceeds maximum input"));
+        lambdaErrMsgs.emplace_back(lambda, "exceeds maximum input");
     }
     // Invalid beam width
     {
@@ -172,7 +174,7 @@ TEST_F(LlmRequestTest, invalidExecRequest)
 
             llmReq.validate(500, 1000, 0);
         };
-        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "beamWidth > 0"));
+        lambdaErrMsgs.emplace_back(lambda, "beamWidth > 0");
     }
     // Invalid input draft len
     {
@@ -184,7 +186,7 @@ TEST_F(LlmRequestTest, invalidExecRequest)
 
             llmReq.validate(500, 1000, 1);
         };
-        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "exceeds maximum draft"));
+        lambdaErrMsgs.emplace_back(lambda, "exceeds maximum draft");
     }
 
     // Invalid ptable shape
@@ -197,7 +199,7 @@ TEST_F(LlmRequestTest, invalidExecRequest)
             execReq.setPromptTuningConfig(config);
             tb::LlmRequest llmReq(requestId, execReq);
         };
-        lambdaErrMsgs.emplace_back(std::make_pair(lambda, "Expected prompt embedding table to have shape"));
+        lambdaErrMsgs.emplace_back(lambda, "Expected prompt embedding table to have shape");
     }
 
     for (auto& lambdaErrMsg : lambdaErrMsgs)
@@ -238,8 +240,8 @@ TEST_F(LlmRequestTest, invalidExecRequest)
 TEST_F(LlmRequestTest, pause)
 {
 
-    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
-    tr::SizeType32 maxNewTokens(66);
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
+    SizeType32 maxNewTokens(66);
     tb::LlmRequest::RequestIdType requestId{77};
 
     tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
@@ -275,15 +277,15 @@ TEST_F(LlmRequestTest, pause)
 
 TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
 {
-    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
-    tr::SizeType32 maxNewTokens(60);
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
+    SizeType32 maxNewTokens(60);
     tb::LlmRequest::RequestIdType requestId{77};
 
     tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
 
     EXPECT_EQ(llmReq.mPromptLen, 5);
 
-    tr::SizeType32 vocabSizePadded = 32000;
+    SizeType32 vocabSizePadded = 32000;
     nvinfer1::DataType logitsDataType = nvinfer1::DataType::kFLOAT;
 
     // Test the allocation of context logits
@@ -306,7 +308,7 @@ TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
     // Test the allocation of target model's accepted token logits
     // Set draft token
     EXPECT_EQ(llmReq.getNumDraftTokens(), 0);
-    auto draftTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{7, 8, 9});
+    auto draftTokens = std::make_shared<VecTokens>(VecTokens{7, 8, 9});
     llmReq.setDraftTokens(draftTokens);
     EXPECT_EQ(llmReq.getNumDraftTokens(), 3);
     // Clean the generation logits
@@ -319,12 +321,15 @@ TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
     EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[1], vocabSizePadded);
 }
 
-using ParamType = std::tuple<bool, bool>;
+using ParamType = std::tuple<bool, bool, bool, SizeType32, SizeType32>;
 
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
 {
     auto const streaming = std::get<0>(info.param);
     auto const excludeInputFromOutput = std::get<1>(info.param);
+    auto const returnAllGeneratedTokens = std::get<2>(info.param);
+    auto const beamWdith = std::get<3>(info.param);
+    auto const tokensPerIteration = std::get<4>(info.param);
     std::string name = "llmRequestTest";
     if (streaming)
     {
@@ -334,6 +339,12 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     {
         name += "ExclInput";
     }
+    if (returnAllGeneratedTokens)
+    {
+        name += "RetAllTokens";
+    }
+    name += "Bw" + std::to_string(beamWdith);
+    name += "TokensPerIt" + std::to_string(tokensPerIteration);
     return name;
 }
 
@@ -343,40 +354,76 @@ class ParamTest : public LlmRequestTest, public ::testing::WithParamInterface<Pa
 
 TEST_P(ParamTest, createResponse)
 {
-    bool streaming = std::get<0>(GetParam());
-    bool excludeInputFromOutput = std::get<1>(GetParam());
+    bool const streaming{std::get<0>(GetParam())};
+    bool const excludeInputFromOutput{std::get<1>(GetParam())};
+    bool const returnAllGeneratedTokens{std::get<2>(GetParam())};
+    SizeType32 const beamWidth{std::get<3>(GetParam())};
+    SizeType32 const tokensPerIteration{std::get<4>(GetParam())};
 
-    auto inputTokens = std::make_shared<tb::LlmRequest::VecTokens>(tb::LlmRequest::VecTokens{1, 2, 3, 4, 5});
-    tr::SizeType32 maxNewTokens(66);
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
+    SizeType32 maxNewTokens(66);
     tb::LlmRequest::RequestIdType requestId{77};
 
-    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), streaming);
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(beamWidth), streaming);
     llmReq.setExcludeInputFromOutput(excludeInputFromOutput);
+    if (streaming && beamWidth > 1 && !returnAllGeneratedTokens)
+    {
+        EXPECT_THROW(llmReq.setReturnAllGeneratedTokens(returnAllGeneratedTokens), tensorrt_llm::common::TllmException);
+        return;
+    }
+    llmReq.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
 
     {
         auto response = llmReq.createResponse();
         EXPECT_FALSE(response);
     }
 
-    tr::SizeType32 numNewTokens = 5;
+    SizeType32 constexpr numIterations{5};
+    texec::TokenIdType constexpr newToken{1};
 
-    for (int i = 0; i < numNewTokens - 1; ++i)
+    for (int i = 0; i < numIterations - 1; ++i)
     {
-        llmReq.addNewToken(1, 0);
+        for (int j = 0; j < tokensPerIteration; ++j)
+        {
+            llmReq.addNewTokens(VecTokens(beamWidth, newToken));
+        }
         llmReq.mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
         auto response = llmReq.createResponse();
         EXPECT_TRUE(streaming == response.has_value());
-        if (streaming)
+
+        for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
         {
-            EXPECT_EQ(response.value().getRequestId(), requestId);
-            auto result = response.value().getResult();
-            EXPECT_EQ(result.outputTokenIds.size(), 1);
-            EXPECT_EQ(result.outputTokenIds.at(0).size(), 1);
-            EXPECT_EQ(result.outputTokenIds.at(0).at(0), 1);
+            if (streaming)
+            {
+                EXPECT_EQ(response.value().getRequestId(), requestId);
+                auto result = response.value().getResult();
+                EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
+                auto const& beamTokens = result.outputTokenIds.at(beamIdx);
+                if (returnAllGeneratedTokens)
+                {
+                    auto const expectedSize = (i + 1) * tokensPerIteration;
+                    EXPECT_EQ(beamTokens.size(), expectedSize);
+                    VecTokens expectedTokens(expectedSize, newToken);
+                    EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                }
+                else
+                {
+                    auto const expectedSize = tokensPerIteration;
+                    EXPECT_EQ(beamTokens.size(), expectedSize);
+                    VecTokens expectedTokens(expectedSize, newToken);
+                    EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                }
+            }
         }
+
+        response = llmReq.createResponse();
+        EXPECT_FALSE(response);
     }
 
-    llmReq.addNewToken(1, 0);
+    for (int j = 0; j < tokensPerIteration; ++j)
+    {
+        llmReq.addNewTokens(VecTokens(beamWidth, newToken));
+    }
     llmReq.mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
 
     auto response = llmReq.createResponse();
@@ -384,24 +431,50 @@ TEST_P(ParamTest, createResponse)
     EXPECT_FALSE(response.value().hasError());
     EXPECT_EQ(response.value().getRequestId(), requestId);
     auto result = response.value().getResult();
-    EXPECT_EQ(result.outputTokenIds.size(), 1);
+    EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
 
-    if (!streaming)
+    auto const numNewTokens = numIterations * tokensPerIteration;
+    for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
     {
-        if (excludeInputFromOutput)
+        auto const& beamTokens = result.outputTokenIds.at(beamIdx);
+
+        if (!streaming)
         {
-            EXPECT_THAT(result.outputTokenIds.at(0), testing::ElementsAre(1, 1, 1, 1, 1));
+            if (excludeInputFromOutput)
+            {
+                EXPECT_EQ(beamTokens.size(), numNewTokens);
+                VecTokens expectedTokens(numNewTokens, newToken);
+                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+            }
+            else
+            {
+                auto const expectedSize = inputTokens->size() + numNewTokens;
+                EXPECT_EQ(beamTokens.size(), expectedSize);
+                VecTokens expectedTokens(*inputTokens);
+                expectedTokens.resize(expectedSize, newToken);
+                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+            }
         }
         else
         {
-            EXPECT_THAT(result.outputTokenIds.at(0), testing::ElementsAre(1, 2, 3, 4, 5, 1, 1, 1, 1, 1));
+            if (returnAllGeneratedTokens)
+            {
+                EXPECT_EQ(beamTokens.size(), numNewTokens);
+                VecTokens expectedTokens(numNewTokens, newToken);
+                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+            }
+            else
+            {
+                auto const expectedSize = tokensPerIteration;
+                EXPECT_EQ(beamTokens.size(), expectedSize);
+                VecTokens expectedTokens(expectedSize, newToken);
+                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+            }
         }
-    }
-    else
-    {
-        EXPECT_EQ(result.outputTokenIds.at(0).at(0), 1);
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(ExecutorTest, ParamTest,
-    testing::Combine(testing::Values(false, true), testing::Values(false, true)), generateTestName);
+INSTANTIATE_TEST_SUITE_P(LlmRequestTest, ParamTest,
+    testing::Combine(testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
+        testing::Values(1, 2), testing::Values(1, 3)),
+    generateTestName);

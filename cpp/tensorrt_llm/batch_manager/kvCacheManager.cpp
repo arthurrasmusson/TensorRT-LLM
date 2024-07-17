@@ -63,6 +63,9 @@ std::list<std::vector<T>> chopVectorIntoBlocks(
 
 } // namespace
 
+namespace tensorrt_llm::batch_manager::kv_cache_manager
+{
+
 KVCacheBlock::KVCacheBlock(IdType blockId, tk::KVCacheIndex blockIdx)
     : mBlockId(blockId)
     , mMemoryPoolBlockIndex{blockIdx}
@@ -1192,3 +1195,12 @@ void KVCacheManager::rewindKVCache(SizeType32 seqSlotIdx, SizeType32 rewindLengt
         removeToken(seqSlotIdx);
     }
 }
+
+GenerationRequest const& KVCacheManager::getSequence(SizeType32 seqSlotIdx) const
+{
+    auto reqPtr = mSequences.at(seqSlotIdx);
+    TLLM_CHECK(reqPtr);
+    return *reqPtr;
+}
+
+} // namespace tensorrt_llm::batch_manager::kv_cache_manager

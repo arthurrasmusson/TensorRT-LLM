@@ -213,11 +213,13 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto loraConfig = su::deserialize<std::optional<LoraConfig>>(is);
     auto logitsPostProcessorName = su::deserialize<std::optional<std::string>>(is);
     auto encoderInputTokenIds = su::deserialize<std::optional<VecTokens>>(is);
+    auto clientId = su::deserialize<std::optional<IdType>>(is);
+    auto returnAllGeneratedTokens = su::deserialize<bool>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(badWords), std::move(stopWords), std::move(embeddingBias), std::move(externalDraftTokensConfig),
         std::move(pTuningConfig), std::move(loraConfig), std::move(logitsPostProcessorName),
-        std::move(encoderInputTokenIds));
+        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
