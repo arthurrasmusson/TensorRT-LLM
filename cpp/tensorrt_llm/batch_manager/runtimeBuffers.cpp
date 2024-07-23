@@ -38,18 +38,18 @@ namespace tensorrt_llm::batch_manager
 {
 
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, TensorPtr allReduceWorkspace, TllmRuntime const& runtime, ModelConfig const& modelConfig,
-    WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
+    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TensorPtr allReduceWorkspace, TllmRuntime const& runtime,
+    ModelConfig const& modelConfig, WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
     std::optional<SizeType32> maxNumTokens)
     : mAllReduceWorkspace{std::move(allReduceWorkspace)}
 {
-    if (worldConfig.isTensorParallel() && modelConfig.useCustomAllReduce())
+    if (worldConfig.isTensorParallel())
     {
         TLLM_CHECK(mAllReduceWorkspace);
     }
 
-    create(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, runtime, modelConfig, worldConfig,
-        decodingConfig);
+    create(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, multiBlockModeVal, runtime, modelConfig,
+        worldConfig, decodingConfig);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
@@ -69,6 +69,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(runtimeBuffersReshape);
 
+    auto const numRequests = getNumRequests();
     auto const numSequences = getNumSequences();
 
     if (worldConfig.isLastPipelineParallelRank())
@@ -104,7 +105,6 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     contextLengthsHost->reshape(ITensor::makeShape({numSequences}));
     contextLengthsDevice->reshape(ITensor::makeShape({numSequences}));
     decoderInputLengthsHost->reshape(ITensor::makeShape({numSequences}));
-    inputLengthsHost->reshape(ITensor::makeShape({numSequences}));
     sequenceLengthsHost->reshape(ITensor::makeShape({numSequences}));
     sequenceLengthsDevice->reshape(ITensor::makeShape({numSequences}));
 
@@ -150,23 +150,25 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         explicitDraftTokensBuffers->reshape(numContextRequests, numGenRequests, modelConfig);
     }
 
-    seqSlotRemappingHost->reshape(ITensor::makeShape({numSequences}));
-    seqSlotRemappingDevice->reshape(ITensor::makeShape({numSequences}));
+    seqSlots->reshape(ITensor::makeShape({numRequests}));
+    sortedSeqSlots->reshape(ITensor::makeShape({numRequests}));
+    seqSlotRemappingHost->reshape(ITensor::makeShape({numRequests}));
+    seqSlotRemappingDevice->reshape(ITensor::makeShape({numRequests}));
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig)
+    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TllmRuntime const& runtime, ModelConfig const& modelConfig,
+    WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
 
     if (modelConfig.isTransformerBased())
     {
-        transformerBuffers.emplace(
-            maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, runtime, modelConfig, worldConfig);
+        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, multiBlockModeVal,
+            runtime, modelConfig, worldConfig);
     }
     if (modelConfig.isRnnBased())
     {
@@ -192,7 +194,6 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, Si
     contextLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     contextLengthsDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     decoderInputLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
-    inputLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     sequenceLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     sequenceLengthsDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
@@ -382,15 +383,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     std::vector<SizeType32> positionIdsHostRow2;
     auto* hostRequestTypes = bufferCast<SizeType32>(*requestTypes);
     auto* contextLengthsHostPtr = bufferCast<SizeType32>(*contextLengthsHost);
-    auto* inputLengthsHostPtr = bufferCast<SizeType32>(*inputLengthsHost);
     auto* decoderInputLengthsHostPtr = bufferCast<SizeType32>(*decoderInputLengthsHost);
     auto* sequenceLengthsHostPtr = bufferCast<SizeType32>(*sequenceLengthsHost);
     auto* pastKeyValueLengthsPtr
         = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths) : nullptr;
     SizeType32 totalNumLogits{0};
     auto* logitsIdsHostPtr = bufferCast<SizeType32>(*logitsIdsHost);
-    std::vector<SizeType32> seqSlotsVec;
-    auto* remappingSeqSlotIndices = bufferCast<SizeType32>(*seqSlotRemappingHost);
     bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kChatGlm;
     bool const isGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
 
@@ -405,21 +403,18 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             for (auto const& llmReq : requests)
             {
-                auto const sequenceLen = llmReq->mPromptLen + llmReq->getMaxNumGeneratedTokens();
+                auto const currentSequenceLen = llmReq->mPromptLen + llmReq->getMaxNumGeneratedTokens();
                 // Get position of the current sequence in the KV cache
                 auto const seqSlot = llmReq->mSeqSlot.value();
                 seqSlotIndices[batchIdx] = seqSlot;
-                remappingSeqSlotIndices[batchIdx] = batchIdx;
-                fillValuesPtr[batchIdx] = sequenceLen;
+                fillValuesPtr[batchIdx] = currentSequenceLen;
                 ++batchIdx;
             }
         }
-        auto const batchSize = batchIdx;
-        auto const seqSlotsView = ITensor::slice(seqSlots, 0, batchSize);
-        runtime::kernels::invokeFillBatch<std::int32_t>(
-            *decoderBuffers.sequenceLengths, *seqSlotsView, maxBeamWidth, *fillValues, stream);
 
-        seqSlotsVec = std::vector<SizeType32>(seqSlotIndices, seqSlotIndices + batchSize);
+        TLLM_CHECK(seqSlots->getSize() == static_cast<std::size_t>(batchIdx));
+        runtime::kernels::invokeFillBatch<SizeType32>(
+            *decoderBuffers.sequenceLengths, *seqSlots, maxBeamWidth, *fillValues, stream);
     }
 
     // context preparation loop
@@ -432,6 +427,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         for (auto const& llmReq : contextRequests)
         {
             TLLM_CHECK_WITH_INFO(llmReq->isContextInitState(), "The request should be in context phase.");
+            SizeType32 constexpr requestType{0};
+            hostRequestTypes[batchIdx] = requestType;
+
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
             // Get position of the current sequence in the KV cache
             auto const seqSlot = llmReq->mSeqSlot.value();
@@ -496,33 +494,30 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             }
 
             decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
+            decoderInputLengthsHostPtr[batchIdx] = llmReq->mPromptLen;
+
             prepopulatedPromptLen = std::max(0, prepopulatedPromptLen - llmReq->getContextCurrentPosition());
             auto inputLength = (llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize())
                 - prepopulatedPromptLen;
             auto const beginCompute = llmReq->getContextCurrentPosition() + prepopulatedPromptLen;
             auto const endCompute = beginCompute + inputLength;
             inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute, reqTokens.begin() + endCompute);
-            if (pastKeyValueLengthsPtr)
-            {
-                pastKeyValueLengthsPtr[batchIdx] = endCompute;
-            }
-            hostRequestTypes[batchIdx] = 0;
-            decoderInputLengthsHostPtr[batchIdx] = llmReq->mPromptLen;
+
             logitsIdsHostPtr[totalNumLogits++] = inputLength;
             numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? inputLength : 1;
 
             if (llmReq->isFullContextRequest() || llmReq->isLastContextChunk())
             {
                 inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                if (pastKeyValueLengthsPtr)
-                {
-                    pastKeyValueLengthsPtr[batchIdx] += draftLength;
-                }
                 inputLength += draftLength;
                 std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
                 totalNumLogits += draftLength;
-                inputLengthsHostPtr[batchIdx] = llmReq->getContextCurrentPosition() + inputLength;
                 decoderInputHost.insert(decoderInputHost.end(), draftTokens->begin(), draftTokens->end());
+            }
+
+            if (pastKeyValueLengthsPtr)
+            {
+                pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
             }
 
             if (isChatGlm) // ChatGLM-6B
@@ -584,13 +579,13 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             contextQLength = std::max(0, contextQLength - prepopulatedPromptLen);
             contextLengthsHostPtr[batchIdx] = contextQLength;
             sequenceLengthsHostPtr[batchIdx] = sequenceLen;
-            if (rnnStateBuffers)
-            {
-                auto& rnnStateManager = *rnnStateManagerPtr;
-                rnnStateManager.fillSlotMapping(*rnnStateBuffers->slotMappingHost, batchIdx, seqSlot, reqBeamWidth);
-            }
 
             ++batchIdx;
+        }
+
+        if (rnnStateBuffers)
+        {
+            rnnStateBuffers->fillSlotMappings(contextRequests, rnnStateManagerPtr);
         }
 
         if (transformerBuffers && maxBeamWidth > 1)
@@ -610,6 +605,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         for (auto const& llmReq : genRequests)
         {
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+
+            SizeType32 constexpr requestType{1};
+            std::fill_n(hostRequestTypes + numSequences, reqBeamWidth, requestType);
 
             // Get position of the current sequence in the KV cache
             auto const seqSlot = llmReq->mSeqSlot.value();
@@ -655,11 +653,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 }
             }
 
-            SizeType32 requestType = 1;
             SizeType32 pastKeyValueLength = sequenceLen - 1;
 
-            std::fill_n(hostRequestTypes + numSequences, reqBeamWidth, requestType);
-            std::fill_n(inputLengthsHostPtr + numSequences, reqBeamWidth, draftLength + 1);
             std::fill_n(decoderInputLengthsHostPtr + numSequences, reqBeamWidth, draftLength + 1);
             if (pastKeyValueLengthsPtr)
             {
@@ -708,12 +703,17 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         }
         if (modelConfig.getSpeculativeDecodingMode().needsKVCacheRewind())
         {
-            std::sort(remappingSeqSlotIndices, remappingSeqSlotIndices + numSequences,
-                [&seqSlotsVec](SizeType32 a, SizeType32 b) { return seqSlotsVec[a] < seqSlotsVec[b]; });
-            manager.copy(*seqSlots, *sortedSeqSlots);
-            auto* sortedSeqSlotIndices = bufferCast<SizeType32>(*sortedSeqSlots);
-            std::sort(sortedSeqSlotIndices, sortedSeqSlotIndices + numSequences);
+            auto remappingSeqSlotIndices = BufferRange<SizeType32>(*seqSlotRemappingHost);
+            auto const* seqSlotIndices = bufferCast<SizeType32>(*seqSlots);
+
+            std::iota(remappingSeqSlotIndices.begin(), remappingSeqSlotIndices.end(), 0);
+            std::sort(remappingSeqSlotIndices.begin(), remappingSeqSlotIndices.end(),
+                [&seqSlotIndices](SizeType32 a, SizeType32 b) { return seqSlotIndices[a] < seqSlotIndices[b]; });
             manager.copy(*seqSlotRemappingHost, *seqSlotRemappingDevice);
+
+            manager.copy(*seqSlots, *sortedSeqSlots);
+            auto sortedSeqSlotIndices = BufferRange<SizeType32>(*sortedSeqSlots);
+            std::sort(sortedSeqSlotIndices.begin(), sortedSeqSlotIndices.end());
         }
     }
 
@@ -862,7 +862,7 @@ void RuntimeBuffers::fillIOMaps(
     inputMap.insert_or_assign("host_context_lengths", contextLengthsHost);
     inputMap.insert_or_assign("sequence_length", sequenceLengthsDevice);
 
-    if (modelConfig.useCustomAllReduce() && worldConfig.isTensorParallel())
+    if (worldConfig.isTensorParallel())
     {
         inputMap.insert_or_assign("all_reduce_workspace", mAllReduceWorkspace);
     }

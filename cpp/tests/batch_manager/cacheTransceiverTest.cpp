@@ -73,11 +73,13 @@ public:
     {
         ON_CALL(*this, getRank).WillByDefault(Return(0));
         ON_CALL(*this, getSize).WillByDefault(Return(2));
-        ON_CALL(*this, recvRequestId).WillByDefault(Return(0));
+        ON_CALL(*this, recvRequestId(testing::An<SizeType32>())).WillByDefault(Return(0));
+        ON_CALL(*this, recvRequestId()).WillByDefault(Return(std::pair<int, LlmRequest::RequestIdType>{1, 0}));
     }
 
     MOCK_METHOD(void, sendRequestId, (const LlmRequest::RequestIdType, const SizeType32), (const, override));
     MOCK_METHOD(LlmRequest::RequestIdType, recvRequestId, (const SizeType32), (const, override));
+    MOCK_METHOD((std::pair<int, LlmRequest::RequestIdType>), recvRequestId, (), (const, override));
     MOCK_METHOD(void, sendBuffer, (tr::IBuffer const&, int), (const, override));
     MOCK_METHOD(void, recvBuffer, (tr::IBuffer&, int), (const, override));
     MOCK_METHOD(void, setCudaDevice, (), (const, override));
@@ -113,7 +115,7 @@ public:
             , mSelfContext{std::make_unique<DataContext>(std::vector<SizeType32>{0})}
         {
             std::generate_n(std::back_inserter(mPeerContexts), numPeerContexts,
-                [] { return std::make_unique<DataContext>(std::vector<SizeType32>{0}); });
+                [] { return std::make_unique<DataContext>(std::vector<SizeType32>{1}); });
             std::generate_n(
                 std::back_inserter(mSenders), numTransceiver, [] { return std::make_unique<MockDataSender>(); });
             std::generate_n(
@@ -161,7 +163,7 @@ TEST_F(MockTransceiverTest, MpiResponderBasic)
     EXPECT_CALL(*params.mSenders.front(), inquireSupport).WillOnce(Return(true));
     EXPECT_CALL(*params.mSenders.front(), send).WillOnce(Return());
     EXPECT_CALL(*params.mComm, setCudaDevice).WillOnce(Return());
-    EXPECT_CALL(*params.mComm, recvRequestId).WillOnce(Return(0));
+    EXPECT_CALL(*params.mComm, recvRequestId()).WillOnce(Return(std::pair<int, LlmRequest::RequestIdType>{1, 0}));
     auto responder = makeResponder(std::move(params));
     auto future = responder.respondAndSendAsync(makeLlmRequest(0));
     future.get();
@@ -177,7 +179,8 @@ TEST_F(MockTransceiverTest, MpiRequesterBasic)
     EXPECT_CALL(*params.mComm, sendRequestId).WillOnce(Return());
     auto requester = makeRequester(std::move(params));
     auto llmRequest = makeLlmRequest(0);
-    auto future = requester.requestAndReceiveAsync(llmRequest, DataContext{{1}});
+    auto context = DataContext{{1}};
+    auto future = requester.requestAndReceiveAsync(llmRequest, context);
     future.get();
 }
 

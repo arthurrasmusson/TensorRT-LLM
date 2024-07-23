@@ -38,6 +38,29 @@ void RnnStateBuffers::reshape(SizeType32 numSequences)
     slotMappingDevice->reshape(ITensor::makeShape({numSequences}));
 }
 
+void RnnStateBuffers::fillSlotMappings(
+    RequestVector const& contextRequests, rnn_state_manager::RnnStateManager* rnnStateManager)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    NVTX3_SCOPED_RANGE(rnnStateBuffersFillSlotMappings);
+
+    SizeType32 batchIdx{0};
+    for (auto const& llmReq : contextRequests)
+    {
+        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+        rnnStateManager->fillSlotMapping(*slotMappingHost, batchIdx, seqSlot, reqBeamWidth);
+        ++batchIdx;
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void RnnStateBuffers::copySlotMappingH2D(runtime::TllmRuntime const& runtime)
+{
+    auto const& manager = runtime.getBufferManager();
+    manager.copy(*slotMappingHost, *slotMappingDevice);
+}
+
 void RnnStateBuffers::getBuffers(rnn_state_manager::RnnStateManager* rnnStateManager, TensorMap& inputBuffers,
     ModelConfig const& modelConfig, WorldConfig const& worldConfig) const
 {
@@ -48,12 +71,6 @@ void RnnStateBuffers::getBuffers(rnn_state_manager::RnnStateManager* rnnStateMan
     rnnStateManager->getPtrBuffers(inputBuffers, modelConfig, worldConfig);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
-void RnnStateBuffers::copySlotMappingH2D(runtime::TllmRuntime const& runtime)
-{
-    auto const& manager = runtime.getBufferManager();
-    manager.copy(*slotMappingHost, *slotMappingDevice);
 }
 
 } // namespace tensorrt_llm::batch_manager

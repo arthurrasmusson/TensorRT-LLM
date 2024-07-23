@@ -33,22 +33,11 @@ public:
 
     virtual ~MpiComm() = default;
 
-    virtual void sendRequestId(const LlmRequest::RequestIdType requestId, const SizeType32 responderRank) const
-    {
-        MpiId id{MpiId::REQUEST_SEND};
-        mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, kMPI_ID_TAG);
-        mComm->send(std::addressof(requestId), 1, mpi::MpiType::kUINT64, responderRank, kMPI_ID_TAG);
-    }
+    virtual void sendRequestId(const LlmRequest::RequestIdType requestId, const SizeType32 responderRank) const;
 
-    [[nodiscard]] virtual LlmRequest::RequestIdType recvRequestId(const SizeType32 requesterRank) const
-    {
-        MpiId id;
-        LlmRequest::RequestIdType requestId;
-        mComm->recv(std::addressof(id), 1, mpi::MpiType::kUINT64, requesterRank, kMPI_ID_TAG);
-        TLLM_CHECK(id == MpiId::REQUEST_SEND);
-        mComm->recv(std::addressof(requestId), 1, mpi::MpiType::kUINT64, requesterRank, kMPI_ID_TAG);
-        return requestId;
-    }
+    [[nodiscard]] virtual std::pair<int, LlmRequest::RequestIdType> recvRequestId() const;
+
+    [[nodiscard]] virtual LlmRequest::RequestIdType recvRequestId(const SizeType32 requesterRank) const;
 
     virtual void sendBuffer(runtime::IBuffer const& buf, int dest) const
     {
@@ -155,7 +144,7 @@ private:
 
     void terminate();
 
-    [[nodiscard]] RequestIdType recvRequestId();
+    [[nodiscard]] std::pair<RequestIdType, RequestHandler const*> recvRequestId();
 
     void send(std::map<RequestIdType, Response>::iterator it);
 
@@ -163,12 +152,17 @@ private:
 
     [[nodiscard]] bool isSending() const
     {
-        return mCurrentRequestId.has_value();
+        return mCurrentRequest.has_value();
     }
 
     [[nodiscard]] RequestIdType getCurrentRequestId() const
     {
-        return mCurrentRequestId.value();
+        return mCurrentRequest.value().first;
+    }
+
+    [[nodiscard]] RequestHandler const* getCurrentHandler() const
+    {
+        return mCurrentRequest.value().second;
     }
 
     [[nodiscard]] std::map<RequestIdType, Response>::iterator getCurrentResponse();
@@ -176,14 +170,14 @@ private:
     MpiComm const* mComm{};
     std::vector<std::unique_ptr<DataSender>> mSenders;
     std::vector<std::unique_ptr<RequestHandler>> mRequestHandlers;
-    std::optional<RequestIdType> mCurrentRequestId;
+    std::map<int, RequestHandler const*> mRankToHandler;
+    std::optional<std::pair<RequestIdType, RequestHandler const*>> mCurrentRequest;
     std::map<RequestIdType, Response> mReadyResponses;
 
-    std::mutex mResponderMutex;
-    std::atomic<bool> mAnyReady{false};
+    std::mutex mResponderMutex, mCondMutex;
+    std::atomic<bool> mAnyReady{false}, mTerminate{false};
     std::condition_variable mResponderCv;
     std::future<void> mResponseFuture;
-    std::atomic<bool> mTerminate{false};
 };
 
 class MpiRequester final : public DataRequester

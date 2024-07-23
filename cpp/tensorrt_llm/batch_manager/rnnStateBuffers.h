@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -44,10 +45,12 @@ public:
 
     void reshape(SizeType32 numSequences);
 
-    void getBuffers(rnn_state_manager::RnnStateManager* rnnStateManager, TensorMap& inputBuffers,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig) const;
+    void fillSlotMappings(RequestVector const& contextRequests, rnn_state_manager::RnnStateManager* rnnStateManager);
 
     void copySlotMappingH2D(runtime::TllmRuntime const& runtime);
+
+    void getBuffers(rnn_state_manager::RnnStateManager* rnnStateManager, TensorMap& inputBuffers,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig) const;
 };
 
 } // namespace tensorrt_llm::batch_manager

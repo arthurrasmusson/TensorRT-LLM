@@ -24,7 +24,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
     std::optional<LogitsPostProcessorMap> logitsPostProcessorMap,
     std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched, std::optional<DecodingConfig> decodingConfig,
-    float gpuWeightPercent)
+    float gpuWeightPercent, std::optional<SizeType32> maxQueueSize, bool multiBlockMode)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -41,6 +41,8 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mLogitsPostProcessorBatched(std::move(logitsPostProcessorBatched))
     , mDecodingConfig(std::move(decodingConfig))
     , mGpuWeightsPercent(gpuWeightPercent)
+    , mMaxQueueSize(std::move(maxQueueSize))
+    , mMultiBlockMode(multiBlockMode)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -127,6 +129,16 @@ float ExecutorConfig::getGpuWeightsPercent() const
     return mGpuWeightsPercent;
 }
 
+std::optional<SizeType32> ExecutorConfig::getMaxQueueSize() const
+{
+    return mMaxQueueSize;
+}
+
+bool ExecutorConfig::getMultiBlockMode() const
+{
+    return mMultiBlockMode;
+}
+
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
 {
     mMaxBeamWidth = maxBeamWidth;
@@ -210,6 +222,16 @@ void ExecutorConfig::setDecodingConfig(DecodingConfig const& decodingConfig)
 void ExecutorConfig::setGpuWeightsPercent(float const& gpuWeightsPercent)
 {
     mGpuWeightsPercent = gpuWeightsPercent;
+}
+
+void ExecutorConfig::setMaxQueueSize(std::optional<SizeType32> const& maxQueueSize)
+{
+    mMaxQueueSize = maxQueueSize;
+}
+
+void ExecutorConfig::setMultiBlockMode(bool const multiBlockMode)
+{
+    mMultiBlockMode = multiBlockMode;
 }
 
 } // namespace tensorrt_llm::executor

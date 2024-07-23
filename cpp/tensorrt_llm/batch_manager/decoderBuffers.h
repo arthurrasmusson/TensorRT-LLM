@@ -101,7 +101,7 @@ public:
         TensorPtr nextDraftTokensLengthsHost;   // [mMaxNumRequests]
         TensorPtr acceptedLengthsCumSumDevice;  // [mMaxNumRequests+1]
         TensorPtr acceptedPackedPathsDevice;    // [mMaxNumRequests * maxAcceptedTokens]
-        std::vector<std::vector<runtime::ITensor::SharedConstPtr>>
+        std::vector<std::vector<runtime::ITensor::SharedPtr>>
             predictedDraftLogits;               // [mMaxNumRequests][mMaxNumHeads][maxDraftTokens + 1, vocabSize]
 
         void create(SizeType32 maxNumSequences, SizeType32 maxTokensPerStep, runtime::TllmRuntime const& runtime,

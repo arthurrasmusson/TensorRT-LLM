@@ -26,8 +26,8 @@ namespace tensorrt_llm::batch_manager
 {
 
 TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-    runtime::WorldConfig const& worldConfig)
+    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,
+    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -66,6 +66,12 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
     sinkTokenLengths = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
     bufferCast<SizeType32>(*sinkTokenLengths)[0] = sinkTokenLen;
+
+    SizeType32 perfKnobSize = 16;
+    runtimePerfKnobsHost = BufferManager::cpu(ITensor::makeShape({perfKnobSize}), nvinfer1::DataType::kINT64);
+    auto runtimePerfKnobsHostPtr = bufferCast<int64_t>(*runtimePerfKnobsHost);
+    std::fill_n(runtimePerfKnobsHostPtr, perfKnobSize, -1);
+    runtimePerfKnobsHostPtr[0] = multiBlockModeVal;
 }
 
 void TransformerBuffers::reshape(SizeType32 numSequences)
@@ -130,15 +136,15 @@ void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 ma
     }
 }
 
-void TransformerBuffers::setKvPoolPointers(kv_cache_manager::KVCacheManager& kvCacheManager, KvCacheType kvCacheType)
+void TransformerBuffers::setKvPoolPointers(kv_cache_manager::KVCacheManager& kvCacheManager)
 {
-    if (kvCacheType == KvCacheType::kSELF)
-    {
-        kvCacheBlockPoolPointers = kvCacheManager.getBlockPoolPointers();
-    }
-    else if (kvCacheType == KvCacheType::kCROSS)
+    if (kvCacheManager.isCrossKv())
     {
         crossKvCacheBlockPoolPointers = kvCacheManager.getBlockPoolPointers();
+    }
+    else
+    {
+        kvCacheBlockPoolPointers = kvCacheManager.getBlockPoolPointers();
     }
 }
 
@@ -156,6 +162,7 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     inputBuffers.insert_or_assign("kv_cache_block_offsets", kvCacheBlockOffsetsDevice);
     inputBuffers.insert_or_assign("host_kv_cache_block_offsets", kvCacheBlockOffsetsHost);
     inputBuffers.insert_or_assign("host_kv_cache_pool_pointers", kvCacheBlockPoolPointers);
+    inputBuffers.insert_or_assign("host_runtime_perf_knobs", runtimePerfKnobsHost);
 
     if (crossKvCacheBlockPoolPointers)
     {

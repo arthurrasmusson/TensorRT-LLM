@@ -103,6 +103,12 @@ public:
     }
 
 private:
+    bool isEqual(DataContext const& obj) const override
+    {
+        auto const& v = dynamic_cast<CacheContext const&>(obj);
+        return DataContext::isEqual(obj) && mConfig == v.mConfig;
+    }
+
     CacheConfig mConfig;
 };
 

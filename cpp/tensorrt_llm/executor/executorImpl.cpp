@@ -280,6 +280,8 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     mIsSchedulerGuaranteedNoEvict = (executorConfig.getSchedulerConfig().getCapacitySchedulerPolicy()
         == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT);
     mIsChunkedContext = executorConfig.getEnableChunkedContext();
+    mMaxQueueSize = executorConfig.getMaxQueueSize();
+    mSendQueue.setMaxQueueSize(mMaxQueueSize);
 
     mLastReqId = 1;
     mLogitsPostProcessorMap = executorConfig.getLogitsPostProcessorMap().value_or(LogitsPostProcessorMap{});
@@ -292,19 +294,19 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
 
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
     int32_t const worldSize = worldComm.getSize();
-    if (worldSize > 1)
-    {
-        auto const& worldConfig = mModel->getWorldConfig();
-        auto const& commSession = COMM_SESSION;
-        mCommTensorParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
-            commSession.split(worldConfig.getPipelineParallelRank(), worldConfig.getTensorParallelRank()));
-        mCommPipelineParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
-            commSession.split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
-    }
-
-    // If worker for this model, launch the execution thread
     if (mIsWorker)
     {
+        if (worldSize > 1)
+        {
+            auto const& worldConfig = mModel->getWorldConfig();
+            auto const& commSession = COMM_SESSION;
+            mCommTensorParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
+                commSession.split(worldConfig.getPipelineParallelRank(), worldConfig.getTensorParallelRank()));
+            mCommPipelineParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
+                commSession.split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
+        }
+
+        // Launch the execution thread
         mMaxNumActiveRequests = mModel->getMaxNumSequences();
         mExecutionThread = std::thread(&Impl::executionLoop, this);
     }
@@ -340,6 +342,63 @@ std::shared_ptr<Model> Executor::Impl::createEncoderModel(runtime::RawEngine con
         modelConfig, worldConfig, rawEngine, std::make_shared<runtime::TllmLogger>(), optionalParams);
 }
 
+void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelConfig const& parallelConfig)
+{
+#if ENABLE_MULTI_DEVICE
+    auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
+    int32_t const worldRank = worldComm.getRank();
+
+    auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
+    if (optOrchestratorConfig.value().getIsOrchestrator())
+    {
+        TLLM_CHECK_WITH_INFO(worldRank == 0, "Rank 0 must be orchestrator");
+    }
+
+    TLLM_CHECK_WITH_INFO(parallelConfig.getParticipantIds(),
+        "When not spawning processes in orchestrator mode, participant IDs must be provided");
+    auto participantIds = parallelConfig.getParticipantIds().value();
+
+    TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp,
+        "When specifying participantIds, participantIds size must be equal to tp*pp");
+
+    bool isLeader = (worldRank == participantIds.front());
+    bool isOrchestrator = (worldRank == 0);
+
+    // OrchLeaderComm rank 0 is orchestrator, rank 1 is leader
+    mOrchRank = 0;
+    mLeaderRank = 1;
+
+    // Create a leaderOrch comm
+    std::vector<int32_t> leaderOrchRanks{0, participantIds.front()};
+
+    MPI_Group worldGroup;
+    MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup));
+    int worldGroupRank;
+    MPI_Group_rank(worldGroup, &worldGroupRank);
+
+    int worldSize;
+    MPICHECK(MPI_Group_size(worldGroup, &worldSize));
+    TLLM_CHECK_WITH_INFO(participantIds.front() < worldSize, "Not enough ranks in world");
+
+    MPI_Group leaderOrchCommGroup;
+    MPICHECK(MPI_Group_incl(worldGroup, leaderOrchRanks.size(), leaderOrchRanks.data(), &leaderOrchCommGroup));
+    int leaderOrchGroupRank, leaderOrchGroupSize;
+    MPI_Group_rank(leaderOrchCommGroup, &leaderOrchGroupRank);
+    MPI_Group_size(leaderOrchCommGroup, &leaderOrchGroupSize);
+
+    if (isOrchestrator || isLeader)
+    {
+        MPI_Comm leaderOrchComm;
+        MPICHECK(MPI_Comm_create_group(MPI_COMM_WORLD, leaderOrchCommGroup, participantIds.front(), &leaderOrchComm));
+        mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(leaderOrchComm, false);
+    }
+    else
+    {
+        mOrchLeaderComm = nullptr;
+    }
+#endif // ENABLE_MULTI_DEVICE
+}
+
 void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
     std::optional<ModelType> modelType, std::optional<std::filesystem::path> const& modelPath)
 {
@@ -357,6 +416,12 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
 
     mCommMode = parallelConfig.getCommunicationMode();
     auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
+
+    // Need to create communicator between orchestrator and leader if not spawning processes in orchestrator mode
+    if (mCommMode == CommunicationMode::kORCHESTRATOR && !optOrchestratorConfig.value().getSpawnProcesses())
+    {
+        setOrchLeaderComm(tp, pp, parallelConfig);
+    }
 
     if (mCommMode == CommunicationMode::kORCHESTRATOR && optOrchestratorConfig.value().getIsOrchestrator())
     {
@@ -388,7 +453,7 @@ void Executor::Impl::validateParallelConfig(ParallelConfig const& parallelConfig
 }
 
 void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
-    ParallelConfig& parallelConfig, ModelType modelType, std::filesystem::path const& modelPath)
+    ParallelConfig parallelConfig, ModelType modelType, std::filesystem::path const& modelPath)
 {
 #if ENABLE_MULTI_DEVICE
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
@@ -401,41 +466,47 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
     mIsOrchestrator = true;
 
     // Verify that worldSize is 1
-    TLLM_CHECK_WITH_INFO(
-        worldSize == 1, "When using the orchestrator mode and isOrchestrator is true, expect MPI worldSize to be 1.");
+    if (orchestratorConfig.getSpawnProcesses())
+    {
+        TLLM_CHECK_WITH_INFO(worldSize == 1,
+            "When using the orchestrator mode and isOrchestrator is true, expect MPI worldSize to be 1.");
 
-    // Spawn the worker threads
-    auto workerExecPath = orchestratorConfig.getWorkerExecutablePath();
-    MPI_Comm intercomm;
-    MPI_Info mpiInfo;
-    MPI_Info_create(&mpiInfo);
-    MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY");
+        // Spawn the worker threads
+        auto workerExecPath = orchestratorConfig.getWorkerExecutablePath();
+        MPI_Comm intercomm;
+        MPI_Info mpiInfo;
+        MPI_Info_create(&mpiInfo);
+        MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY");
 
-    MPI_Comm_spawn(
-        workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp, mpiInfo, 0, MPI_COMM_SELF, &intercomm, MPI_ERRCODES_IGNORE);
+        MPI_Comm_spawn(
+            workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp, mpiInfo, 0, MPI_COMM_SELF, &intercomm, MPI_ERRCODES_IGNORE);
 
-    mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(intercomm, true);
+        mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(intercomm, true);
+        // With intercomm, leader is rank 0 in the local group
+        mLeaderRank = 0;
+        mOrchRank = 0;
 
-    // Copy the executor config, but set the orchestrator flag to false
-    auto newOrchConfig = OrchestratorConfig(false, orchestratorConfig.getWorkerExecutablePath());
-    parallelConfig.setOrchestratorConfig(newOrchConfig);
-    auto execConfig = executorConfig;
-    execConfig.setParallelConfig(parallelConfig);
+        // Copy the executor config, but set the orchestrator flag to false
+        auto newOrchConfig = OrchestratorConfig(false, orchestratorConfig.getWorkerExecutablePath());
+        parallelConfig.setOrchestratorConfig(newOrchConfig);
+        auto execConfig = executorConfig;
+        execConfig.setParallelConfig(parallelConfig);
 
-    // Serialize and send the executorConfig, the modelType and the modelPath
-    std::ostringstream oStream;
-    su::serialize(modelPath.string(), oStream);
-    su::serialize(modelType, oStream);
-    su::serialize(execConfig, oStream);
+        // Serialize and send the executorConfig, the modelType and the modelPath
+        std::ostringstream oStream;
+        su::serialize(modelPath.string(), oStream);
+        su::serialize(modelType, oStream);
+        su::serialize(execConfig, oStream);
 
-    auto str = oStream.str();
-    std::vector<char> buffer(str.begin(), str.end());
-    auto bufferSize = static_cast<int64_t>(buffer.size());
-    mOrchLeaderComm->bcast(&bufferSize, 1, mpi::MpiType::kINT64, MPI_ROOT);
-    mOrchLeaderComm->bcast(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, MPI_ROOT);
+        auto str = oStream.str();
+        std::vector<char> buffer(str.begin(), str.end());
+        auto bufferSize = static_cast<int64_t>(buffer.size());
+        mOrchLeaderComm->bcast(&bufferSize, 1, mpi::MpiType::kINT64, MPI_ROOT);
+        mOrchLeaderComm->bcast(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, MPI_ROOT);
 
-    // Wait for workers to have created their executor instance
-    MPI_Barrier(intercomm);
+        // Wait for workers to have created their executor instance
+        MPI_Barrier(intercomm);
+    }
 
     // Spawn the thread responsible for sending new requests to the leader of the model
     mOrchSendReqThread = std::thread(&Impl::orchSendReqThread, this);
@@ -452,7 +523,23 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     int32_t const worldSize = worldComm.getSize();
     int32_t const worldRank = worldComm.getRank();
 
-    mIsOrchestrator = false;
+    auto const& orchestratorConfig = parallelConfig.getOrchestratorConfig();
+    mIsOrchestrator = mCommMode == CommunicationMode::kORCHESTRATOR && orchestratorConfig.value().getIsOrchestrator();
+
+    TLLM_CHECK_WITH_INFO(mCommMode != CommunicationMode::kORCHESTRATOR || orchestratorConfig.has_value(),
+        "When using ORCHESTRATOR mode, orchestrator config must be set");
+
+    if (mCommMode == CommunicationMode::kORCHESTRATOR && !orchestratorConfig.value().getSpawnProcesses())
+    {
+        TLLM_CHECK_WITH_INFO(parallelConfig.getParticipantIds(),
+            "When not spawning processes in orchestrator mode, participant IDs must be provided");
+
+        // Check that rank 0 is reserved for the orchestrator
+        for (auto& participantId : parallelConfig.getParticipantIds().value())
+        {
+            TLLM_CHECK_WITH_INFO(participantId != 0, "Rank 0 is reserved for the orchestrator");
+        }
+    }
 
     // Participant ids
     std::vector<SizeType32> participantIds;
@@ -467,9 +554,11 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     }
     else
     {
-        if (mCommMode == CommunicationMode::kORCHESTRATOR)
+        if (mCommMode == CommunicationMode::kORCHESTRATOR && orchestratorConfig.value().getSpawnProcesses())
         {
-            TLLM_THROW("Participant ids should not be set when using CommunicationMode::kORCHESTRATOR");
+            TLLM_THROW(
+                "Participant ids should not be set when using CommunicationMode::kORCHESTRATOR with "
+                "spawnProcesses=true");
         }
         participantIds = parallelConfig.getParticipantIds().value();
         TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp,
@@ -487,25 +576,35 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     // Bool that indicates if current process is worker for this model or not
     auto participantIt = std::find(participantIds.begin(), participantIds.end(), worldRank);
     mIsWorker = participantIt != participantIds.end();
-
     // Bool that indicates if current ranks is leader for this model
     mIsLeader = (worldRank == participantIds.front());
 
 #if ENABLE_MULTI_DEVICE
-    // Create a commSession with the worker ranks for this model
-    auto const sessionColor = mIsWorker ? 1 : 0;
-    auto const sessionRank = std::distance(participantIds.begin(), participantIt);
-    // Create a session, but only assign to COMM_SESSION for ranks participating in this model
-    auto session = tensorrt_llm::mpi::MpiComm::world().split(sessionColor, static_cast<int>(sessionRank));
     if (mIsWorker)
     {
+        // Create a session, but only assign to COMM_SESSION for ranks participating in this model
+        MPI_Group worldGroup = MPI_GROUP_NULL;
+        MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup));
+        MPI_Group sessionGroup = MPI_GROUP_NULL;
+        MPICHECK(MPI_Group_incl(worldGroup, participantIds.size(), participantIds.data(), &sessionGroup));
+        MPI_Comm sessionComm = MPI_COMM_NULL;
+        MPICHECK(MPI_Comm_create_group(MPI_COMM_WORLD, sessionGroup, 1000 + participantIds.front(), &sessionComm));
+
+        auto session = tensorrt_llm::mpi::MpiComm(sessionComm, false);
         COMM_SESSION = std::move(session);
     }
 
     if (mIsLeader && mCommMode == CommunicationMode::kORCHESTRATOR)
     {
         auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
-        mOrchLeaderComm = optOrchestratorConfig.value().getOrchLeaderComm();
+        if (orchestratorConfig.has_value() && orchestratorConfig.value().getSpawnProcesses())
+        {
+            mOrchLeaderComm = optOrchestratorConfig.value().getOrchLeaderComm();
+        }
+        else
+        {
+            // mOrchLeaderComm has already been created
+        }
         TLLM_CHECK(mOrchLeaderComm.get() != nullptr);
 
         // Spawn the thread responsible for receiving new requests from the orchestrator
@@ -513,8 +612,6 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
 
         // Spawn the thread responsible for sending new responses to the orchestrator
         mLeaderSendThread = std::thread([&]() { this->leaderSendThread(mSendQueue, kMPI_ID_TAG, kMPI_DATA_TAG); });
-
-        // Spawn a separate thread for sending new stats
     }
 #endif // ENABLE_MULTI_DEVICE
 }
@@ -592,6 +689,14 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
     {
         {
             std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
+            if (mMaxQueueSize)
+            {
+                auto const maxQueueSize = mMaxQueueSize.value();
+                if (maxQueueSize > 0 && mQueuedRequests.size() >= static_cast<size_t>(maxQueueSize))
+                {
+                    TLLM_THROW("Maximum queue size of %d has been reached, please try again later", maxQueueSize);
+                }
+            }
             mQueuedRequests.insert(mQueuedRequests.end(), std::make_move_iterator(requestWithIds.begin()),
                 std::make_move_iterator(requestWithIds.end()));
         }
@@ -1370,7 +1475,10 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(RequestList& ac
         }
     }
 
-    enqueueNewResponses(std::move(newResponses));
+    if (!newResponses.empty())
+    {
+        enqueueNewResponses(std::move(newResponses));
+    }
 
     return finishedRequests;
 }
@@ -1473,7 +1581,7 @@ void Executor::Impl::orchSendReqThread()
 
         if (message.id == MpiId::TERMINATION)
         {
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, kMPI_ID_TAG);
+            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mLeaderRank, kMPI_ID_TAG);
             TLLM_LOG_INFO("Orchestrator sendReq thread exiting");
             break;
         }
@@ -1502,16 +1610,16 @@ void Executor::Impl::orchSendReqThread()
             }
             else
             {
-                mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, kMPI_ID_TAG);
-                mOrchLeaderComm->send(packed.data(), packed.size(), mpi::MpiType::kCHAR, 0, kMPI_DATA_TAG);
+                mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mLeaderRank, kMPI_ID_TAG);
+                mOrchLeaderComm->send(packed.data(), packed.size(), mpi::MpiType::kCHAR, mLeaderRank, kMPI_DATA_TAG);
             }
         }
         else if (message.id == MpiId::CANCEL_REQUEST)
         {
             auto& data = std::get<RequestIdsData>(message.data);
 
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, kMPI_ID_TAG);
-            mOrchLeaderComm->send(data.ids.data(), data.ids.size(), mpi::MpiType::kUINT64, 0, kMPI_DATA_TAG);
+            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mLeaderRank, kMPI_ID_TAG);
+            mOrchLeaderComm->send(data.ids.data(), data.ids.size(), mpi::MpiType::kUINT64, mLeaderRank, kMPI_DATA_TAG);
         }
         else
         {
@@ -1529,7 +1637,7 @@ void Executor::Impl::leaderRecvReqThread()
         // Blocking is okay: terminate message is expected to arrive here
         MPI_Message msg;
         MPI_Status status;
-        mOrchLeaderComm->mprobe(0, kMPI_ID_TAG, &msg, &status);
+        mOrchLeaderComm->mprobe(mOrchRank, kMPI_ID_TAG, &msg, &status);
 
         int32_t count;
         MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
@@ -1551,7 +1659,7 @@ void Executor::Impl::leaderRecvReqThread()
         }
         else if (mpiId == MpiId::PENDING_REQUEST)
         {
-            mOrchLeaderComm->mprobe(0, kMPI_DATA_TAG, &msg, &status);
+            mOrchLeaderComm->mprobe(mOrchRank, kMPI_DATA_TAG, &msg, &status);
             MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
             std::vector<char> buffer(count);
             MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status));
@@ -1568,7 +1676,7 @@ void Executor::Impl::leaderRecvReqThread()
         else if (mpiId == MpiId::CANCEL_REQUEST)
         {
             // Prepare receiving data
-            mOrchLeaderComm->mprobe(0, kMPI_DATA_TAG, &msg, &status);
+            mOrchLeaderComm->mprobe(mOrchRank, kMPI_DATA_TAG, &msg, &status);
             MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
             std::vector<uint64_t> cancelledReqIds(count);
             MPICHECK(MPI_Mrecv(cancelledReqIds.data(), count, MPI_UINT64_T, &msg, &status));
@@ -1594,7 +1702,7 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
 
         if (message.id == MpiId::TERMINATION)
         {
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, idTag);
+            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mOrchRank, idTag);
             TLLM_LOG_INFO("Leader sendThread exiting");
             break;
         }
@@ -1603,16 +1711,16 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
             auto& responseData = std::get<ResponseData>(message.data);
             TLLM_LOG_DEBUG("Leader sendResp thread sending %d responses", responseData.responses.size());
             auto buffer = Serialization::serialize(responseData.responses);
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, idTag);
-            mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, 0, dataTag);
+            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mOrchRank, idTag);
+            mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, mOrchRank, dataTag);
         }
         else if (message.id == MpiId::ITER_STATS)
         {
             auto& iterStatsData = std::get<IterStatsData>(message.data);
             TLLM_LOG_DEBUG("Leader sendResp thread sending iter stats");
             auto buffer = Serialization::serialize(iterStatsData.iterStats);
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, 0, idTag);
-            mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, 0, dataTag);
+            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mOrchRank, idTag);
+            mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, mOrchRank, dataTag);
         }
         else
         {
@@ -1629,7 +1737,7 @@ void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
     {
         MPI_Message msg;
         MPI_Status status;
-        mOrchLeaderComm->mprobe(0, idTag, &msg, &status);
+        mOrchLeaderComm->mprobe(mLeaderRank, idTag, &msg, &status);
 
         int32_t count;
         MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
@@ -1645,7 +1753,7 @@ void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
         }
         else if (mpiId == MpiId::RESPONSE || mpiId == MpiId::ITER_STATS)
         {
-            mOrchLeaderComm->mprobe(0, dataTag, &msg, &status);
+            mOrchLeaderComm->mprobe(mLeaderRank, dataTag, &msg, &status);
             MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
 
             std::vector<char> buffer(count);

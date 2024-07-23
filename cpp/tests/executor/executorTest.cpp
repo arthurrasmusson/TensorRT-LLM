@@ -28,6 +28,7 @@
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
+#include "tests/utils/common.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -40,6 +41,7 @@
 #include <numeric>
 #include <string>
 #include <thread>
+#include <vector>
 
 using ::testing::_;
 using ::testing::Invoke;
@@ -48,6 +50,7 @@ namespace tr = tensorrt_llm::runtime;
 namespace tb = tensorrt_llm::batch_manager;
 namespace tc = tensorrt_llm::common;
 
+using namespace tensorrt_llm::testing;
 using namespace tensorrt_llm::executor;
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
@@ -128,154 +131,47 @@ std::string getEncDecEnginePath(std::string const& modelName, SizeType32 tp, Siz
     return modelName + '/' + std::to_string(tp * pp) + "-gpu/float16";
 }
 
-inline bool almostEqual(float a, float b, float atol = 1e-2, float rtol = 1e-3)
+TestData loadTestData(BeamResult const& beamResults, ITensor const& givenInput, SizeType32 const maxBeamWidth,
+    tr::BufferManager& manager, OutputConfig const& outConfig, ModelIds const& modelIds)
 {
-    if (isnan(a) && isnan(b))
-    {
-        return true;
-    }
-    return fabs(a - b) <= (atol + rtol * fabs(b));
-}
+    auto const [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, modelIds.padId);
+    auto const& [beamWidth, resultsFile, contextLogitsFile, genLogitsFile, cumLogProbsFile, logProbsFile] = beamResults;
 
-struct TestData
-{
-    tr::ITensor::SharedPtr expectedOutputIds;
-    std::vector<SizeType32> expectedOutputLengths;
-    SizeType32 maxSeqLen;
-    std::vector<SizeType32> endIds;
-    std::vector<VecTokens> draftTokens;
-    std::vector<tr::ITensor::SharedPtr> draftLogits;
-    std::vector<SizeType32> acceptedDraftTokensLengths;
-    std::vector<tr::ITensor::SharedPtr> expectedGenerationLogits;
-    std::vector<tr::ITensor::SharedPtr> expectedContextLogits;
-    std::vector<tr::ITensor::SharedPtr> expectedCumLogProbs;
-    std::vector<tr::ITensor::SharedPtr> expectedLogProbs;
-};
+    TestData testData{nbGivenInputs, beamWidth};
+    testData.expectedOutputIds = tr::utils::loadNpy(manager, resultsFile.string(), tr::MemoryType::kCPU);
 
-struct BeamResult
-{
-    SizeType32 beamWidth;
-    fs::path resultsFile;
-    std::pair<fs::path, fs::path> logitsFiles;
-    std::pair<fs::path, fs::path> logProbsFiles;
-};
-
-std::tuple<std::vector<SizeType32>, SizeType32, SizeType32> getGivenInputLengths(
-    tr::ITensor const& givenInput, SizeType32 padId)
-{
-    auto const& inputShape = givenInput.getShape();
-    auto const nbGivenInputs = static_cast<SizeType32>(inputShape.d[0]);
-    auto const maxInputLength = static_cast<SizeType32>(inputShape.d[1]);
-    auto const* const givenInputData = tr::bufferCast<TokenIdType const>(givenInput);
-
-    std::vector<SizeType32> givenInputLengths(nbGivenInputs);
-    for (SizeType32 i = 0; i < nbGivenInputs; ++i)
-    {
-        auto const* const seqBegin = givenInputData + i * maxInputLength;
-        auto const* const it = std::find(seqBegin, seqBegin + maxInputLength, padId);
-        givenInputLengths[i] = std::distance(seqBegin, it);
-    }
-
-    return {givenInputLengths, nbGivenInputs, maxInputLength};
-}
-
-TestData loadTestData(BeamResult const& beamResults, tr::ITensor const& givenInput, SizeType32 const maxBeamWidth,
-    tr::BufferManager& manager, bool computeLogProbs, bool returnContextLogits, bool returnGenerationLogits,
-    SizeType32 padId, SizeType32 endId)
-{
-    // Map between beam width, and expected results for that beam width
-    std::unordered_map<SizeType32, TestData> beamWidthTestData;
-    std::vector<SizeType32> beamWidths;
-
-    auto const& [beamWidth, resultsFile, logitsFiles, logProbsFiles] = beamResults;
-    auto const& [contextLogitsFile, genLogitsFile] = logitsFiles;
-    auto const& [cumLogProbsFile, logProbsFile] = logProbsFiles;
-
-    auto expectedOutputs = tr::utils::loadNpy(manager, resultsFile.string(), tr::MemoryType::kCPU);
-
-    auto* const expectedOutputData = tr::bufferCast<TokenIdType>(*expectedOutputs);
-    auto const& outputShape = expectedOutputs->getShape();
+    auto const& outputShape = testData.expectedOutputIds->getShape();
     EXPECT_EQ(outputShape.nbDims, 2);
-    EXPECT_EQ(givenInput.getShape().d[0] * beamWidth, outputShape.d[0]);
-    auto const& inputShape = givenInput.getShape();
-    auto const maxSeqLen = static_cast<SizeType32>(outputShape.d[1]);
+    EXPECT_EQ(nbGivenInputs * beamWidth, outputShape.d[0]);
+    testData.maxSeqLen = static_cast<SizeType32>(outputShape.d[1]);
+    EXPECT_LE(maxInputLength, testData.maxSeqLen);
     EXPECT_LE(beamWidth, maxBeamWidth);
-    EXPECT_EQ(std::find(beamWidths.begin(), beamWidths.end(), beamWidth), beamWidths.end());
 
-    auto const [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, padId);
-    auto const maxNewTokens = maxSeqLen - maxInputLength;
+    auto const maxNewTokens = testData.maxSeqLen - maxInputLength;
 
-    std::vector<SizeType32> endIds;
-    std::vector<SizeType32> expectedLengths(nbGivenInputs * beamWidth);
+    testData.endIds.insert(testData.endIds.end(), nbGivenInputs, modelIds.endId);
 
-    endIds.insert(endIds.end(), nbGivenInputs, endId);
-
-    std::vector<VecTokens> draftTokens(nbGivenInputs);
-    std::vector<tr::ITensor::SharedPtr> draftLogits(nbGivenInputs);
-    std::vector<SizeType32> acceptedDraftTokensLengths(nbGivenInputs);
-    std::vector<tr::ITensor::SharedPtr> expectedGenerationLogits(nbGivenInputs);
-    std::vector<tr::ITensor::SharedPtr> expectedContextLogits(nbGivenInputs);
-    tr::ITensor::SharedPtr expectedGenerationLogitsPtr = nullptr;
-    tr::ITensor::SharedPtr expectedContextLogitsPtr = nullptr;
-    std::vector<tr::ITensor::SharedPtr> expectedCumLogProbs(nbGivenInputs);
-    std::vector<tr::ITensor::SharedPtr> expectedLogProbs(nbGivenInputs);
-    tr::ITensor::SharedPtr expectedCumLogProbsPtr = nullptr;
-    tr::ITensor::SharedPtr expectedLogProbsPtr = nullptr;
-
-    if (returnContextLogits && beamWidth == 1)
+    if (outConfig.returnContextLogits && beamWidth == 1)
     {
-        TLLM_CHECK_WITH_INFO(contextLogitsFile != "",
-            "Testing with gather or replace logits, but missing the expected context logits config in the "
-            "modelSpec.");
-        expectedContextLogitsPtr
-            = std::shared_ptr(tr::utils::loadNpy(manager, contextLogitsFile.string(), tr::MemoryType::kCPU));
+        testData.loadContextLogits(contextLogitsFile, givenInputLengths, manager);
     }
-    if (returnGenerationLogits && beamWidth == 1)
+    if (outConfig.returnGenerationLogits && beamWidth == 1)
     {
-        TLLM_CHECK_WITH_INFO(genLogitsFile != "",
-            "Testing with gather or replace logits, but missing the expected generation logits config in the "
-            "modelSpec.");
-        expectedGenerationLogitsPtr
-            = std::shared_ptr(tr::utils::loadNpy(manager, genLogitsFile.string(), tr::MemoryType::kCPU));
+        testData.loadGenerationLogits(genLogitsFile, manager);
     }
-    if (computeLogProbs && beamWidth == 1)
+    if (outConfig.returnLogProbs && beamWidth == 1)
     {
-        TLLM_CHECK_WITH_INFO(
-            cumLogProbsFile != "", "Testing return log probs, but missing the expected cum log probs results file");
-        expectedCumLogProbsPtr
-            = std::shared_ptr(tr::utils::loadNpy(manager, cumLogProbsFile.string(), tr::MemoryType::kCPU));
-
-        TLLM_CHECK_WITH_INFO(
-            logProbsFile != "", "Testing return log probs, but missing the expected log probs results file.");
-        expectedLogProbsPtr = std::shared_ptr(tr::utils::loadNpy(manager, logProbsFile.string(), tr::MemoryType::kCPU));
+        testData.loadLogProbs(cumLogProbsFile, logProbsFile, manager);
     }
 
-    int promptOffset = 0;
-    for (SizeType32 bi = 0; bi < nbGivenInputs; ++bi)
+    for (SizeType32 inputIdx = 0; inputIdx < nbGivenInputs; ++inputIdx)
     {
-        // Pick a different endId at random from one of the expected tokens
-        auto const endId = endIds[bi];
         for (SizeType32 beam = 0; beam < beamWidth; ++beam)
         {
-            SizeType32 expectedLen = givenInputLengths[bi] + maxNewTokens;
-            expectedLengths[bi * beamWidth + beam] = expectedLen;
-
-            if (computeLogProbs && beamWidth == 1)
-            {
-                auto expectedCumLogProbsBatchSlice = std::shared_ptr(tr::ITensor::slice(expectedCumLogProbsPtr, bi, 1));
-                expectedCumLogProbsBatchSlice->squeeze(0);               // bs
-                expectedCumLogProbs[bi] = expectedCumLogProbsBatchSlice; // shape: [beamWidth]
-
-                auto expectedLogProbsBatchSlice = std::shared_ptr(tr::ITensor::slice(expectedLogProbsPtr, bi, 1));
-                expectedLogProbsBatchSlice->squeeze(0);            // bs
-                expectedLogProbs[bi] = expectedLogProbsBatchSlice; // shape: [beamWidth, numOutputTokens]
-            }
+            SizeType32 expectedLen = givenInputLengths[inputIdx] + maxNewTokens;
+            testData.expectedOutputLengths[inputIdx * beamWidth + beam] = expectedLen;
         }
-        promptOffset += givenInputLengths[bi];
     }
-    TestData testData{std::move(expectedOutputs), expectedLengths, maxSeqLen, endIds, draftTokens, draftLogits,
-        acceptedDraftTokensLengths, expectedGenerationLogits, expectedContextLogits, expectedCumLogProbs,
-        expectedLogProbs};
 
     return testData;
 }
@@ -515,12 +411,11 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
-    auto constexpr padId = 50256;
-    auto constexpr endId = 50256;
+    ModelIds modelIds{50256, 50256};
 
     auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
     auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, padId);
+    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
     auto const* const givenInputData = tr::bufferCast<TokenIdType const>(*givenInput);
 
     auto const& inputShape = givenInput->getShape();
@@ -531,21 +426,17 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     auto const resultsPath
         = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
     beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-    beamResult.logitsFiles.first = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-    beamResult.logitsFiles.second = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
-
-    auto constexpr computeLogProbs = false;
-    auto constexpr returnContextLogits = false;
-    auto constexpr returnGenerationLogits = true;
-    // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, computeLogProbs, returnContextLogits,
-        returnGenerationLogits, padId, endId);
-    auto const maxSeqLen = testData.maxSeqLen;
+    beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
+    beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
 
     // Set return generation logits for this request
     OutputConfig outConfig;
     outConfig.returnGenerationLogits = true;
     outConfig.excludeInputFromOutput = true;
+
+    // Load expected outputs for each beam width value
+    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
+    auto const maxSeqLen = testData.maxSeqLen;
 
     // Load expected outputs and inputs
     std::vector<Request> requests;
@@ -558,7 +449,7 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     auto const* const seqBegin = givenInputData + reqIdx * maxInputLength;
 
     auto request = Request(VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming,
-        tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig, endId);
+        tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig, modelIds.endId);
     // copy request
     auto request2 = request;
 
@@ -1587,6 +1478,9 @@ TEST_P(ParamTest, GetNumResponsesReadyTest)
     EXPECT_EQ(numResponsesReady, numExpectedResponses);
 }
 
+namespace
+{
+
 struct FlakyTestInfo
 {
     // Pair of batch ID + beam which are flaky
@@ -1664,7 +1558,6 @@ void verifyLogProbs(bool computeLogProbs, TestData const& testData, bool streami
     std::optional<VecLogProbs> const& cumLogProbs, std::optional<std::vector<VecLogProbs>> const& logProbs,
     SizeType32 batchId, FlakyTestInfo flakyTestInfo)
 {
-
     auto expectedCumLogProbs = testData.expectedCumLogProbs[batchId];
     auto expectedLogProbs = testData.expectedLogProbs[batchId];
     auto const expectedOutputLengths = testData.expectedOutputLengths;
@@ -1729,8 +1622,7 @@ void verifyLogProbs(bool computeLogProbs, TestData const& testData, bool streami
     }
 }
 
-void validateContextLogitsShape(bool getContextLogits, bool streaming, bool excludeInputFromOutput,
-    SizeType32 inputLength, SizeType32 beamWidth, BeamTokens const& beamTokens,
+void validateContextLogitsShape(bool getContextLogits, SizeType32 inputLength,
     std::optional<Tensor> const& contextLogits, SizeType32 vocabSizePadded, SizeType32 batchId)
 {
     if (getContextLogits)
@@ -1764,80 +1656,18 @@ void validateGenerationLogitsShape(bool getGenLogits, bool streaming, bool exclu
     }
 }
 
-void runTest(fs::path const& modelPath, BatchingType batchingType, bool streaming, SizeType32 const vocabSizePadded,
-    BeamResult const& beamResult, bool computeLogProbs, bool excludeInputInOutput, int maxWaitMs,
-    bool returnContextLogits, bool returnGenerationLogits, bool useOrchestratorMode)
+void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& modelIds,
+    FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
+    OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs)
 {
     auto const beamWidth = beamResult.beamWidth;
-
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputInOutput;
-    outConfig.returnLogProbs = computeLogProbs;
-    outConfig.returnGenerationLogits = returnGenerationLogits;
-    outConfig.returnContextLogits = returnContextLogits;
-
-    // Note: we reduce memory fraction for cases that return context/generation logits which require more free
-    // memory
-    FloatType freeGpuMemoryFraction = 0.5;
-    KvCacheConfig kvCacheConfig(false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction);
-    auto executorConfig = ExecutorConfig(beamWidth);
-    executorConfig.setBatchingType(batchingType);
-    executorConfig.setKvCacheConfig(kvCacheConfig);
-    executorConfig.setNormalizeLogProbs(false);
-
-    std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
-    if (useOrchestratorMode)
-    {
-        orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
-    }
-    auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
-        useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt, std::nullopt,
-        orchestratorConfig);
-    executorConfig.setParallelConfig(parallelConfig);
-
-    auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
     std::unordered_map<IdType, SizeType32> reqIdToBatchId;
     std::unordered_map<SizeType32, BeamTokens> tokens;
 
-    // Load input data
-    fs::path inputPath{};
-    SizeType32 padId, endId;
-    bool isSpeculativeDecoding{false};
-    char versionChatglm{0};
-    ASSERT_TRUE(fs::exists(DATA_PATH));
-    // Tricky way to get information of ChatGLM models, avoiding to add more input argument
-    if (size_t index = modelPath.string().find("chatglm"); index != std::string::npos)
-    {
-        versionChatglm = modelPath.string()[index + 7];
-        std::string const vChatglmString = (versionChatglm == '-') ? std::string("") : std::string(1, versionChatglm);
-        inputPath = DATA_PATH / ("input_tokens_chatglm" + vChatglmString + "-6b.npy");
-        padId = (versionChatglm == '-') ? 3 : 0;
-        endId = (versionChatglm == '-') ? 130005 : 2;
-    }
-    else if (size_t index = modelPath.string().find("glm-10b"); index != std::string::npos)
-    {
-        inputPath = DATA_PATH / "input_tokens_glm-10b.npy";
-        padId = 50256;
-        endId = 50258;
-    }
-    else if (size_t index = modelPath.string().find("vicuna"); index != std::string::npos)
-    {
-        inputPath = DATA_PATH / "input_vicuna.npy";
-        padId = 2;
-        endId = 2;
-        isSpeculativeDecoding = true;
-    }
-    else
-    {
-        inputPath = DATA_PATH / "input_tokens.npy";
-        padId = 50256;
-        endId = 50256;
-    }
-
     auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
     auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, padId);
+    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
     auto const* const givenInputData = tr::bufferCast<TokenIdType const>(*givenInput);
 
     auto const& inputShape = givenInput->getShape();
@@ -1845,8 +1675,7 @@ void runTest(fs::path const& modelPath, BatchingType batchingType, bool streamin
     ASSERT_GT(inputShape.d[0], 0);
 
     // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, computeLogProbs, returnContextLogits,
-        returnGenerationLogits, padId, endId);
+    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
     auto const maxSeqLen = testData.maxSeqLen;
 
     // Load expected outputs and inputs
@@ -1885,14 +1714,6 @@ void runTest(fs::path const& modelPath, BatchingType batchingType, bool streamin
         int32_t numFinished = 0;
         int iter = 0;
         SizeType32 numResponses = 0;
-
-        // NOTE: This can be used to disable checks for certain prompt batch entries
-        FlakyTestInfo flakyTestInfo;
-        if (versionChatglm != 0)
-        {
-            flakyTestInfo.batchIdBeams.insert(std::make_pair(1, 0));
-        }
-
         while (numFinished < maxRequests && iter < maxWaitMs)
         {
             std::chrono::milliseconds waitTime(1);
@@ -1920,15 +1741,14 @@ void runTest(fs::path const& modelPath, BatchingType batchingType, bool streamin
 
                     auto& cumLogProbs = result.cumLogProbs;
                     auto& logProbs = result.logProbs;
-                    verifyLogProbs(computeLogProbs, testData, streaming, excludeInputInOutput,
+                    verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
                         givenInputLengths.at(batchId), beamWidth, tokens.at(batchId), cumLogProbs, logProbs, batchId,
                         flakyTestInfo);
-                    validateContextLogitsShape(returnContextLogits, streaming, excludeInputInOutput,
-                        givenInputLengths.at(batchId), beamWidth, tokens.at(batchId), contextLogits, vocabSizePadded,
-                        batchId);
-                    validateGenerationLogitsShape(returnGenerationLogits, streaming, excludeInputInOutput,
-                        givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId), beamWidth, tokens.at(batchId),
-                        genLogits, vocabSizePadded, batchId);
+                    validateContextLogitsShape(outConfig.returnContextLogits, givenInputLengths.at(batchId),
+                        contextLogits, vocabSizePadded, batchId);
+                    validateGenerationLogitsShape(outConfig.returnGenerationLogits, streaming,
+                        outConfig.excludeInputFromOutput, givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId),
+                        beamWidth, tokens.at(batchId), genLogits, vocabSizePadded, batchId);
                 }
                 else
                 {
@@ -1941,56 +1761,105 @@ void runTest(fs::path const& modelPath, BatchingType batchingType, bool streamin
             ++iter;
         }
         EXPECT_LT(iter, maxWaitMs);
-        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, excludeInputInOutput, flakyTestInfo,
-            isSpeculativeDecoding);
+        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
+            flakyTestInfo, isSpeculativeDecoding);
     }
 }
+
+void runTest(fs::path const& modelPath, ExecutorConfig const& executorConfig, fs::path const& inputPath,
+    ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded,
+    BeamResult const& beamResult, OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs)
+{
+    auto executor = Executor{modelPath, ModelType::kDECODER_ONLY, executorConfig};
+
+    runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
+        isSpeculativeDecoding, maxWaitMs);
+}
+
+ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBeamWidth, bool useOrchestratorMode)
+{
+    // Note: we reduce memory fraction for cases that return context/generation logits which require more free
+    // memory
+    FloatType constexpr freeGpuMemoryFraction{0.5F};
+    KvCacheConfig kvCacheConfig(false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction);
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
+    executorConfig.setBatchingType(batchingType);
+    executorConfig.setKvCacheConfig(kvCacheConfig);
+    executorConfig.setNormalizeLogProbs(false);
+
+    std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
+    if (useOrchestratorMode)
+    {
+        orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+    }
+    auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
+        useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt, std::nullopt,
+        orchestratorConfig);
+    executorConfig.setParallelConfig(parallelConfig);
+
+    return executorConfig;
+}
+
+} // namespace
 
 TEST_P(AllParamsTest, TokenComparison)
 {
     auto const batchingType = std::get<0>(GetParam());
     auto const streaming = std::get<1>(GetParam());
     auto const& beamWidth = std::get<2>(GetParam());
-    auto const& computeLogProbs = std::get<3>(GetParam());
-    auto const& excludeInputInOutput = std::get<4>(GetParam());
-    auto const& returnContextLogits = std::get<5>(GetParam());
-    auto const& returnGenerationLogits = std::get<6>(GetParam());
+    OutputConfig outConfig;
+    outConfig.returnLogProbs = std::get<3>(GetParam());
+    outConfig.excludeInputFromOutput = std::get<4>(GetParam());
+    outConfig.returnContextLogits = std::get<5>(GetParam());
+    outConfig.returnGenerationLogits = std::get<6>(GetParam());
     auto const modelName = std::get<7>(GetParam());
     auto const useOrchestratorMode = std::get<8>(GetParam());
 
+    auto const executorConfig = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode);
+
     BeamResult beamResult{beamWidth};
 
+    ASSERT_TRUE(fs::exists(DATA_PATH));
+
     fs::path modelPath;
+    // set defaults and adjust if needed by different models
+    fs::path inputPath = DATA_PATH / "input_tokens.npy";
+    ModelIds modelIds{50256, 50256};
+    bool isSpeculativeDecoding{false};
+
+    // NOTE: This can be used to disable checks for certain prompt batch entries
+    FlakyTestInfo flakyTestInfo;
 
     if (modelName == "gpt")
     {
-        auto resultsPath = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        if (returnContextLogits || returnGenerationLogits)
+        auto const resultsPath
+            = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
+        if (outConfig.returnContextLogits || outConfig.returnGenerationLogits)
         {
             modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-            beamResult.logitsFiles.first = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-            beamResult.logitsFiles.second = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
-            if (computeLogProbs)
+            beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
+            beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+            if (outConfig.returnLogProbs)
             {
-                beamResult.logProbsFiles.first = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFiles.second = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE;
+                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE;
+                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE;
             }
         }
         else
         {
             modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-            if (computeLogProbs)
+            if (outConfig.returnLogProbs)
             {
-                beamResult.logProbsFiles.first = resultsPath / FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFiles.second = resultsPath / FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE;
+                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE;
+                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE;
             }
         }
     }
     else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2")
     {
-        auto resultsPath
+        auto const resultsPath
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         if (modelName == "llama_tp4_pp1")
         {
@@ -2011,11 +1880,16 @@ TEST_P(AllParamsTest, TokenComparison)
     else if (modelName == "medusa")
     {
         TLLM_CHECK_WITH_INFO(beamWidth == 1, "Medusa does not support beam search.");
-        auto resultsPath = MEDUSA_DATA_PATH / "sampling";
+        auto const resultsPath = MEDUSA_DATA_PATH / "sampling";
         ModelSpec modelSpec
             = getDefaultModelSpec().useMedusa().setInputFile("input_tokens_long.npy").setMaxOutputLength(128);
         beamResult.resultsFile = resultsPath / modelSpec.getResultsFile();
         modelPath = MEDUSA_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+
+        inputPath = DATA_PATH / "input_vicuna.npy";
+        modelIds.padId = 2;
+        modelIds.endId = 2;
+        isSpeculativeDecoding = true;
     }
     else if (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
     {
@@ -2053,18 +1927,33 @@ TEST_P(AllParamsTest, TokenComparison)
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
             modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
         }
+
+        char versionChatglm{0};
+        if (size_t index = modelPath.string().find("chatglm"); index != std::string::npos)
+        {
+            versionChatglm = modelPath.string()[index + 7];
+            std::string const vChatglmString
+                = (versionChatglm == '-') ? std::string("") : std::string(1, versionChatglm);
+            inputPath = DATA_PATH / ("input_tokens_chatglm" + vChatglmString + "-6b.npy");
+            modelIds.padId = (versionChatglm == '-') ? 3 : 0;
+            modelIds.endId = (versionChatglm == '-') ? 130005 : 2;
+        }
+        else if (size_t index = modelPath.string().find("glm-10b"); index != std::string::npos)
+        {
+            inputPath = DATA_PATH / "input_tokens_glm-10b.npy";
+            modelIds.padId = 50256;
+            modelIds.endId = 50258;
+        }
+
+        if (versionChatglm != 0)
+        {
+            flakyTestInfo.batchIdBeams.insert(std::make_pair(1, 0));
+        }
     }
     else
     {
         TLLM_THROW("Unrecognized modelName");
     }
-
-    auto const dtype
-        = (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
-        ? nvinfer1::DataType::kFLOAT
-        : nvinfer1::DataType::kHALF;
-
-    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
 
     if (streaming && beamWidth > 1)
     {
@@ -2084,7 +1973,7 @@ TEST_P(AllParamsTest, TokenComparison)
         }
         else
         {
-            if (computeLogProbs || returnContextLogits || returnGenerationLogits)
+            if (outConfig.returnLogProbs || outConfig.returnContextLogits || outConfig.returnGenerationLogits)
             {
                 GTEST_SKIP() << "Skipping logits and log probs tests for mpi runs";
             }
@@ -2103,8 +1992,88 @@ TEST_P(AllParamsTest, TokenComparison)
         }
     }
 
-    runTest(modelPath, batchingType, streaming, vocabSizePadded, beamResult, computeLogProbs, excludeInputInOutput,
-        mMaxWaitMs, returnContextLogits, returnGenerationLogits, useOrchestratorMode);
+    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+    runTest(modelPath, executorConfig, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
+        outConfig, isSpeculativeDecoding, mMaxWaitMs);
+}
+
+TEST_F(GptExecutorTest, ChangeBwError)
+{
+    SizeType32 constexpr maxBeamWidth{2};
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
+
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    SizeType32 constexpr beamWidth1{1};
+    SizeType32 constexpr beamWidth2{2};
+    SizeType32 constexpr maxNewTokens{5};
+    VecTokens inputTokens{1, 2, 3, 4};
+
+    // Create two req with different beam width
+    std::vector<Request> requests;
+    requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth1));
+    requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth2));
+
+    auto requestIds = executor.enqueueRequests(requests);
+
+    bool done = false;
+    int iter = 0;
+    while (!done && iter < mMaxWaitMs)
+    {
+        std::chrono::milliseconds waitTime(1);
+        auto responses = executor.awaitResponses(waitTime);
+        for (auto& response : responses)
+        {
+            if (response.hasError())
+            {
+                auto err = response.getErrorMsg();
+                std::cout << "err:" << err << std::endl;
+                EXPECT_THAT(err, testing::HasSubstr("All active requests must have same beam width"));
+                done = true;
+            }
+            else
+            {
+                FAIL() << "Should get a response with error";
+            }
+        }
+        ++iter;
+    }
+    EXPECT_LT(iter, mMaxWaitMs);
+}
+
+TEST_F(GptExecutorTest, TokenComparisonChangeBw)
+{
+    SizeType32 constexpr maxBeamWidth{2};
+    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+    auto constexpr streaming = false;
+
+    // Create executor config
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
+
+    // Create executor
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    auto const inputPath = DATA_PATH / "input_tokens.npy";
+    ModelIds modelIds{50256, 50256};
+
+    OutputConfig outConfig;
+    FlakyTestInfo flakyTestInfo;
+    bool constexpr isSpeculativeDecoding{false};
+
+    for (SizeType32 beamWidth : {1, 2})
+    {
+        BeamResult beamResult{beamWidth};
+        auto const resultsPath
+            = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
+        beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
+        beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
+        beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+
+        runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
+            isSpeculativeDecoding, mMaxWaitMs);
+    }
 }
 
 TEST_F(GptExecutorTest, TimedOut)
@@ -2146,7 +2115,7 @@ TEST_F(GptExecutorTest, LogitsPostProcessor)
     OutputConfig outConfig;
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
     SizeType32 numRequests = 20;
-    const IdType kClientId = 1234;
+    IdType const kClientId = 1234;
 
     SizeType32 beamWidth = 1;
     SizeType32 maxPromptLen = 20;
@@ -2431,6 +2400,82 @@ TEST_P(ParamTest, MockedModel)
 
     EXPECT_LT(iter, mMaxWaitMs);
     EXPECT_EQ(callCount, maxNewTokens);
+}
+
+TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
+{
+    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
+    using RequestList = std::list<LlmRequestPtr>;
+
+    auto model = std::make_shared<MockedModel>();
+
+    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
+    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
+    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
+    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
+    EXPECT_CALL(*model, getLogitDataType()).Times(0);
+
+    SizeType32 callCount = 0;
+    EXPECT_CALL(*model, forwardAsync(_))
+        .WillRepeatedly(Invoke(
+            [&](RequestList const& requestList)
+            {
+                for (auto const& llmReq : requestList)
+                {
+                    // Sleep to allow queue to fill up
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    // Don't add any tokens to simulate no output tokens
+                    llmReq->addNewTokens({1});
+                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
+                    {
+                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                    }
+                }
+                callCount++;
+            }));
+
+    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
+    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
+    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
+    EXPECT_CALL(*model, getMaxDraftLen()).WillRepeatedly(Invoke([&]() { return 0; }));
+    tr::WorldConfig const dummyWorldConfig;
+    EXPECT_CALL(*model, getWorldConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentRequestStats(_))
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+
+    SizeType32 maxQueueSize = 6;
+    ExecutorConfig executorConfig;
+    executorConfig.setMaxQueueSize(maxQueueSize);
+
+    auto executor = Executor(model, executorConfig);
+
+    // Create the request
+    SizeType32 maxNewTokens = 5;
+    VecTokens inputTokens{1, 2, 3, 4};
+    auto request = Request(inputTokens, maxNewTokens);
+
+    // Enqueue as many requests as the queue can manage
+    for (int i = 0; i < maxQueueSize; i++)
+    {
+        auto requestId = executor.enqueueRequest(std::move(request));
+    }
+    try
+    {
+        auto requestId = executor.enqueueRequest(std::move(request));
+
+        FAIL() << "Expected TllmException";
+    }
+    catch (std::exception const& e)
+    {
+        EXPECT_THAT(e.what(), testing::HasSubstr("Maximum queue size of 6 has been reached, please try again later"));
+    }
+
+    // Wait for requests to get scheduled to free up space in queue
+    std::this_thread::sleep_for(std::chrono::milliseconds(maxQueueSize * 200));
+    auto requestId = executor.enqueueRequest(std::move(request));
 }
 
 TEST_F(GptExecutorTest, MockedModelReqStatsBug)
@@ -3201,8 +3246,8 @@ TEST_F(GptExecutorTest, orchModeFetchNewReqErr)
 
 TEST_F(GptExecutorTest, orchModeForwardError)
 {
-    SizeType32 beamWidth = 1;
-    auto executorConfig = ExecutorConfig(beamWidth);
+    SizeType32 constexpr maxBeamWidth{1};
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
 
     auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
     auto parallelConfig = ParallelConfig(
@@ -3212,13 +3257,12 @@ TEST_F(GptExecutorTest, orchModeForwardError)
     auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
-    // Create a req with invalid parameters
-    SizeType32 maxNewTokens = 5;
-    // Create very long prompt which should result in error during request validate
+    // Setting request beam width to 2 which should cause failure
+    SizeType32 constexpr beamWidth{2};
+    SizeType32 constexpr maxNewTokens{5};
     VecTokens inputTokens{1, 2, 3, 4};
 
-    // Setting request beam width to 2 which should cause failure
-    auto request = Request(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(2));
+    auto request = Request(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
     auto requestId = executor.enqueueRequest(request);
     auto requestId2 = executor.enqueueRequest(request);
 
@@ -3234,7 +3278,8 @@ TEST_F(GptExecutorTest, orchModeForwardError)
             {
                 auto err = response.getErrorMsg();
                 std::cout << "err:" << err << std::endl;
-                EXPECT_THAT(err, testing::HasSubstr("Request with beam width 2 differs from the max beam width"));
+                EXPECT_THAT(
+                    err, testing::HasSubstr("Requested beam width 2 is larger than configured max beam width 1"));
                 done = true;
             }
             else

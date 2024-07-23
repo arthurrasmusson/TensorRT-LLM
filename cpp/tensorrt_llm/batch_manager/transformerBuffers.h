@@ -50,6 +50,7 @@ public:
     TensorPtr kvCacheBlockPoolPointers;
     TensorPtr kvCacheBlockOffsetsHost;   // [numSequences, 2, maxBlocksPerSeq * 2]
     TensorPtr kvCacheBlockOffsetsDevice; // [numSequences, 2, maxBlocksPerSeq * 2]
+    TensorPtr runtimePerfKnobsHost;
 
     TensorPtr crossKvCacheBlockPoolPointers = nullptr;
     TensorPtr crossKvCacheBlockOffsetsHost = nullptr;
@@ -63,16 +64,15 @@ public:
     TensorPtr seqSlotsAlt;
 
     TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig);
+        SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     void reshape(SizeType32 numSequences);
 
     void reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
         runtime::TllmRuntime const& runtime, KvCacheType kvCacheType = KvCacheType::kSELF);
 
-    void setKvPoolPointers(
-        kv_cache_manager::KVCacheManager& kvCacheManager, KvCacheType kvCacheType = KvCacheType::kSELF);
+    void setKvPoolPointers(kv_cache_manager::KVCacheManager& kvCacheManager);
 
     void getBuffers(TensorMap& inputBuffers) const;
 

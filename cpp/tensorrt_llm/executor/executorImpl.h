@@ -49,6 +49,14 @@ public:
     void push(MpiMessage&& message)
     {
         std::lock_guard<std::mutex> lock(mMutex);
+        if (mMaxQueueSize)
+        {
+            auto const maxQueueSize = mMaxQueueSize.value();
+            if (maxQueueSize > 0 && mQueue.size() >= static_cast<size_t>(maxQueueSize))
+            {
+                TLLM_THROW("Maximum queue size of %d has been reached, please try again later", maxQueueSize);
+            }
+        }
         mQueue.push(std::move(message));
         mCv.notify_one();
     }
@@ -62,10 +70,16 @@ public:
         return message;
     }
 
+    void setMaxQueueSize(std::optional<SizeType32> maxQueueSize)
+    {
+        mMaxQueueSize = std::move(maxQueueSize);
+    }
+
 private:
     std::queue<MpiMessage> mQueue;
     std::mutex mMutex;
     std::condition_variable mCv;
+    std::optional<SizeType32> mMaxQueueSize;
 };
 
 class Executor::Impl
@@ -137,6 +151,8 @@ private:
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
         ExecutorConfig const& executorConfig);
 
+    void setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelConfig const& parallelConfig);
+
     void initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
         std::optional<ModelType> modelType = std::nullopt,
         std::optional<std::filesystem::path> const& modelPath = std::nullopt);
@@ -145,7 +161,7 @@ private:
         std::optional<std::filesystem::path> const& modelPath);
 
     void initializeOrchestrator(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
-        ParallelConfig& parallelConfig, ModelType modelType, std::filesystem::path const& modelPath);
+        ParallelConfig parallelConfig, ModelType modelType, std::filesystem::path const& modelPath);
 
     void initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig);
 
@@ -225,6 +241,7 @@ private:
     std::mutex mQueuedReqMtx;
     std::condition_variable mQueuedReqCv;
     std::deque<RequestWithId> mQueuedRequests;
+    std::optional<SizeType32> mMaxQueueSize;
 
     // Cancelled requests
     std::mutex mCancelReqMtx;
@@ -271,6 +288,9 @@ private:
     std::thread mOrchRecvThread;
     std::thread mLeaderRecvReqThread;
     std::thread mLeaderSendThread;
+
+    int32_t mLeaderRank = -1;
+    int32_t mOrchRank = 0;
 
     MpiMessageQueue mSendQueue;
 

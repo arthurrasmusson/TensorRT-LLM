@@ -23,14 +23,18 @@
 
 namespace tensorrt_llm::executor
 {
-OrchestratorConfig::OrchestratorConfig(
-    bool isOrchestrator, std::string workerExecutablePath, std::shared_ptr<mpi::MpiComm> orchLeaderComm)
+OrchestratorConfig::OrchestratorConfig(bool isOrchestrator, std::string workerExecutablePath,
+    std::shared_ptr<mpi::MpiComm> orchLeaderComm, bool spawnProcesses)
     : mIsOrchestrator(isOrchestrator)
     , mWorkerExecutablePath(std::move(workerExecutablePath))
     , mOrchLeaderComm(std::move(orchLeaderComm))
+    , mSpawnProcesses(spawnProcesses)
 {
-    TLLM_CHECK_WITH_INFO(std::filesystem::exists(mWorkerExecutablePath), "Worker executable at %s does not exist.",
-        mWorkerExecutablePath.c_str());
+    if (spawnProcesses)
+    {
+        TLLM_CHECK_WITH_INFO(std::filesystem::exists(mWorkerExecutablePath), "Worker executable at %s does not exist.",
+            mWorkerExecutablePath.c_str());
+    }
 }
 
 bool OrchestratorConfig::getIsOrchestrator() const
@@ -48,6 +52,11 @@ std::shared_ptr<mpi::MpiComm> OrchestratorConfig::getOrchLeaderComm() const
     return mOrchLeaderComm;
 }
 
+bool OrchestratorConfig::getSpawnProcesses() const
+{
+    return mSpawnProcesses;
+}
+
 void OrchestratorConfig::setIsOrchestrator(bool isOrchestrator)
 {
     mIsOrchestrator = isOrchestrator;
@@ -61,6 +70,11 @@ void OrchestratorConfig::setWorkerExecutablePath(std::string const& workerExecut
 void OrchestratorConfig::setOrchLeaderComm(std::shared_ptr<mpi::MpiComm> const& orchLeaderComm)
 {
     mOrchLeaderComm = orchLeaderComm;
+}
+
+void OrchestratorConfig::setSpawnProcesses(bool spawnProcesses)
+{
+    mSpawnProcesses = spawnProcesses;
 }
 
 } // namespace tensorrt_llm::executor

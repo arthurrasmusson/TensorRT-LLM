@@ -42,10 +42,23 @@ public:
 
     virtual ~DataContext() = default;
 
+protected:
+    virtual bool isEqual(DataContext const& obj) const
+    {
+        return mRanks == obj.mRanks && mSelfIdx == obj.mSelfIdx;
+    }
+
 private:
+    friend bool operator==(DataContext const&, DataContext const&);
+
     std::vector<SizeType32> mRanks;
     std::optional<SizeType32> mSelfIdx;
 };
+
+inline bool operator==(DataContext const& lhs, DataContext const& rhs)
+{
+    return typeid(lhs) == typeid(rhs) && lhs.isEqual(rhs);
+}
 
 // Used to support the data transmission with different layouts and different protocols.
 class DataSender

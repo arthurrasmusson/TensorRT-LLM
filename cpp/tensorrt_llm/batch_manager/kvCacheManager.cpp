@@ -1016,8 +1016,9 @@ void KVCacheManager::addSequence(
         = mSinkBlockTokenLength + (inputLength - 1 - mSinkBlockTokenLength) % (mMaxTokenNum - mSinkBlockTokenLength);
 
     // Get block index that with shareAmongBeams=False.
+    // For cross kv cache in encoder-decoder models, always shareAmongBeams=True.
     SizeType32 unsharedBlockIdx = -1;
-    if (!enableCyclicKvCache || beamWidth > 1 || finalTokenKVIdx % getTokensPerBlock() > 0)
+    if ((!enableCyclicKvCache || beamWidth > 1 || finalTokenKVIdx % getTokensPerBlock() > 0) && !isCrossKv())
     {
         unsharedBlockIdx = ((finalTokenKVIdx + 1) % getTokensPerBlock() == 0)
             ? finalTokenKVIdx / getTokensPerBlock() + 1

@@ -64,6 +64,11 @@ private:
     SizeType32 numGenTokens{};
     SizeType32 numLogits{};
 
+    [[nodiscard]] SizeType32 constexpr getNumRequests() const noexcept
+    {
+        return numContextRequests + numGenRequests;
+    };
+
     [[nodiscard]] SizeType32 constexpr getNumSequences() const noexcept
     {
         return numContextRequests + numGenSequences;
@@ -132,8 +137,8 @@ public:
 
     // decoder
     TensorPtr decoderInputsIds;
-    TensorPtr inputLengthsHost;        // This is really the current input lengths, not context lengths
     TensorPtr decoderInputLengthsHost; // This is really the current input lengths, not context lengths
+
     TensorPtr cacheIndirDecoderIOBatchedCopySrcOffsets;
     TensorPtr cacheIndirDecoderIOBatchedCopyDstOffsets;
     TensorPtr cacheIndirDecoderIOBatchedCopySizes;
@@ -173,9 +178,10 @@ private:
 
 public:
     RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, TensorPtr allReduceWorkspace, runtime::TllmRuntime const& runtime,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
-        executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens = std::nullopt);
+        SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TensorPtr allReduceWorkspace,
+        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+        runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
+        std::optional<SizeType32> maxNumTokens = std::nullopt);
 
     std::tuple<SizeType32, TensorMap const&, TensorMap&> prepareStep(RequestVector const& contextRequests,
         RequestVector const& genRequests, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
@@ -194,8 +200,9 @@ public:
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig);
+        SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
+        executor::DecodingConfig const& decodingConfig);
 
     void reshape(runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);

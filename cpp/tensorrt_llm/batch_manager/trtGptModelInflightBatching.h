@@ -17,6 +17,7 @@
 #include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/iGptDecoderBatch.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
@@ -98,11 +99,11 @@ public:
     ///        REQUEST_STATE_GENERATION_IN_PROGRESS.
     void forwardSync() override;
 
-    /// @brief Function that tries to advance the active requests
-    ///        Depending on resources available, it's possible that not all requests will get advanced
+    /// @brief Function that tries to advance the active requests.
+    ///        Depending on resources available, it's possible that not all requests will get advanced.
     ///        Requests that may be in state REQUEST_STATE_CONTEXT_INIT become REQUEST_STATE_GENERATION_IN_PROGRESS or
-    ///        REQUEST_STATE_GENERATION_TO_COMPLETE
-    /// @param activeRequests The list of request to try to advance
+    ///        REQUEST_STATE_GENERATION_TO_COMPLETE.
+    /// @param activeRequests The list of request to try to advance.
     void forwardAsync(RequestList const& activeRequests) override;
 
     void updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest) override;
@@ -153,13 +154,20 @@ private:
 
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
-    void createBuffers(executor::DecodingConfig const& decodingConfig);
+    void createBuffers(executor::DecodingConfig const& decodingConfig, bool multiBlockMode);
     std::shared_ptr<KVCacheManager> createKvCacheManager(
         KvCacheConfig const& kvCacheConfig, KvCacheType kvCacheType = KvCacheType::kSELF);
     void createRnnStateManager();
     void createCustomAllReduceWorkspace();
 
-    void verifyRequests(ScheduledRequests const& scheduledRequests);
+    /// @brief Verify draft token length and beam width of all active requests.
+    ///        May change operating beam width if all requests agree on same beam width.
+    void verifyRequests(RequestList const& activeRequests);
+
+    /// @brief Change the operating beam width.
+    ///        Only possible if no requests are currently in-flight.
+    /// @param beamWidth New operating beam width. Must be smaller than initial maxBeamWidth.
+    void changeBeamWidth(SizeType32 beamWidth);
 
     void assignReqSeqSlots(ScheduledRequests const& scheduledRequests);
 
@@ -178,7 +186,7 @@ private:
     void getDecoderSlotHostOutputs(
         SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig);
     void rewindKVCacheBlocks(SizeType32 numSequences);
-    void setupSpecualtiveDecodingModule(executor::DecodingConfig const& decodingConfig);
+    void setupSpeculativeDecodingModule(executor::DecodingConfig const& decodingConfig);
 
     std::vector<bool> computeActiveVec(ScheduledRequests const& scheduledRequests);
 
@@ -198,6 +206,8 @@ private:
     }
 
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
+
+    void reshapeKvTensors(KVCacheManager const& kvCacheManager);
 
 protected:
     std::shared_ptr<KVCacheManager> getKVCacheManager() override
@@ -238,6 +248,7 @@ protected:
 private:
     runtime::ModelConfig mModelConfig;
     runtime::WorldConfig mWorldConfig;
+    executor::DecodingConfig mDecodingConfig;
     int mDevice{-1};
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;
 
@@ -249,11 +260,13 @@ private:
 
     SizeType32 mMicroBatchId;
     bool mCtxGenFusion;
+    bool mMultiBlockMode;
 
     std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
 
     SizeType32 mNumMicroBatches;
     SizeType32 mNumBuffers;
+    SizeType32 mOperatingBeamWidth;
 
     std::vector<ScheduledRequests> mMicroBatchScheduledRequests;
     std::vector<TokenPtr> mDecoderWaitEvents;
@@ -268,7 +281,7 @@ private:
     std::shared_ptr<BasePeftCacheManager> mPeftCacheManager;
 
     std::shared_ptr<DecoderBuffers> mDecoderBuffers;
-    std::shared_ptr<runtime::decoder_batch::Input> mDecodingInput;
+    std::vector<std::shared_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
     std::shared_ptr<runtime::decoder_batch::Output> mDecodingOutput;
     std::vector<std::shared_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
 

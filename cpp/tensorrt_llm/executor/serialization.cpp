@@ -488,10 +488,16 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getPeftCacheConfig), ExecutorConfig>>(is);
     auto decodingConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDecodingConfig), ExecutorConfig>>(is);
+    auto gpuWeightsPercent
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGpuWeightsPercent), ExecutorConfig>>(is);
+    auto maxQueueSize
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxQueueSize), ExecutorConfig>>(is);
+    auto multiBlockMode
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMultiBlockMode), ExecutorConfig>>(is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
-        peftCacheConfig, std::nullopt, std::nullopt, decodingConfig};
+        peftCacheConfig, std::nullopt, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, multiBlockMode};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -514,6 +520,9 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getParallelConfig());
     totalSize += su::serializedSize(executorConfig.getPeftCacheConfig());
     totalSize += su::serializedSize(executorConfig.getDecodingConfig());
+    totalSize += su::serializedSize(executorConfig.getGpuWeightsPercent());
+    totalSize += su::serializedSize(executorConfig.getMaxQueueSize());
+    totalSize += su::serializedSize(executorConfig.getMultiBlockMode());
 
     return totalSize;
 }
@@ -536,6 +545,9 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getParallelConfig(), os);
     su::serialize(executorConfig.getPeftCacheConfig(), os);
     su::serialize(executorConfig.getDecodingConfig(), os);
+    su::serialize(executorConfig.getGpuWeightsPercent(), os);
+    su::serialize(executorConfig.getMaxQueueSize(), os);
+    su::serialize(executorConfig.getMultiBlockMode(), os);
 }
 
 // KvCacheConfig
