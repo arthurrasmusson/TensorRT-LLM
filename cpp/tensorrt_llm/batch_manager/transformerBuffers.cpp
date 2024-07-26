@@ -49,14 +49,16 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
         crossKvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
     }
 
-    fillValuesAlt = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    seqSlotsAlt = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    fillValuesAlt = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    fillValuesAltDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    seqSlotsAlt = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    seqSlotsAltDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
     cacheIndirBatchedCopySrcOffsets
-        = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     cacheIndirBatchedCopyDstOffsets
-        = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    cacheIndirBatchedCopySizes = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    cacheIndirBatchedCopySizes = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
@@ -195,7 +197,8 @@ void TransformerBuffers::resetCacheIndirection(RequestVector const& contextReque
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(resetCacheIndirection);
-    auto const& stream = runtime.getStream();
+    auto const& manager = runtime.getBufferManager();
+    auto const& stream = manager.getStream();
 
     auto const numContextRequests = contextRequests.size();
 
@@ -203,11 +206,14 @@ void TransformerBuffers::resetCacheIndirection(RequestVector const& contextReque
     std::transform(contextRequests.begin(), contextRequests.end(), bufferCast<SizeType32>(*seqSlotsAlt),
         [](auto const& llmReq) { return llmReq->mSeqSlot.value(); });
 
-    auto const seqSlotsView = ITensor::slice(seqSlotsAlt, 0, numContextRequests);
-    runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionInput, *seqSlotsView,
-        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAlt, stream);
-    runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionOutput, *seqSlotsView,
-        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAlt, stream);
+    auto const seqSlotsHostView = ITensor::slice(seqSlotsAlt, 0, numContextRequests);
+    auto seqSlotsDeviceView = ITensor::slice(seqSlotsAltDevice, 0, numContextRequests);
+    manager.copy(*seqSlotsHostView, *seqSlotsDeviceView);
+    manager.copy(*fillValuesAlt, *fillValuesAltDevice);
+    runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionInput, *seqSlotsDeviceView,
+        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
+    runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionOutput, *seqSlotsDeviceView,
+        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

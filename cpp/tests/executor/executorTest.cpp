@@ -688,7 +688,6 @@ class ParamStatsTest : public GptExecutorTest, public ::testing::WithParamInterf
 };
 
 class AllParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<AllParamsType>
-
 {
 };
 
@@ -2476,6 +2475,60 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
     // Wait for requests to get scheduled to free up space in queue
     std::this_thread::sleep_for(std::chrono::milliseconds(maxQueueSize * 200));
     auto requestId = executor.enqueueRequest(std::move(request));
+}
+
+TEST_F(GptExecutorTest, OrchestratorMaxQueueSize)
+{
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    SizeType32 maxQueueSize = 6;
+    ExecutorConfig executorConfig;
+    executorConfig.setMaxQueueSize(maxQueueSize);
+    auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+    auto parallelConfig = ParallelConfig(
+        CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
+    executorConfig.setParallelConfig(parallelConfig);
+
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    // Create the request
+    SizeType32 maxNewTokens = 100;
+    VecTokens inputTokens{1, 2, 3, 4};
+    auto request = Request(inputTokens, maxNewTokens);
+    std::vector<IdType> requestIds;
+    auto numberOfRequests = maxQueueSize * 5;
+    requestIds.reserve(numberOfRequests);
+
+    // Enqueue more requests than the queue can manage
+    for (int i = 0; i < numberOfRequests; i++)
+    {
+        auto requestId = executor.enqueueRequest(request);
+        requestIds.emplace_back(requestId);
+    }
+
+    auto responseVectors = executor.awaitResponses(std::move(requestIds));
+    bool failedWithFullQueue = false;
+    for (auto& responseVector : responseVectors)
+    {
+        for (auto& response : responseVector)
+        {
+            if (response.hasError())
+            {
+                EXPECT_THAT(response.getErrorMsg(),
+                    testing::HasSubstr("Maximum queue size of 6 has been reached, please try again later"));
+                failedWithFullQueue = true;
+            }
+        }
+    }
+    EXPECT_TRUE(failedWithFullQueue) << "Expected requests to fail due to maximum queue size reached";
+
+    // Wait for requests to get scheduled to free up space in queue
+    std::this_thread::sleep_for(std::chrono::milliseconds(maxQueueSize * 200));
+    auto requestId = executor.enqueueRequest(std::move(request));
+    auto responses = executor.awaitResponses(requestId);
+    for (auto& response : responses)
+    {
+        EXPECT_FALSE(response.hasError());
+    }
 }
 
 TEST_F(GptExecutorTest, MockedModelReqStatsBug)

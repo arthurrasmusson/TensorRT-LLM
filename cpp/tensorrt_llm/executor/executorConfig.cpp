@@ -41,7 +41,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mLogitsPostProcessorBatched(std::move(logitsPostProcessorBatched))
     , mDecodingConfig(std::move(decodingConfig))
     , mGpuWeightsPercent(gpuWeightPercent)
-    , mMaxQueueSize(std::move(maxQueueSize))
+    , mMaxQueueSize(maxQueueSize)
     , mMultiBlockMode(multiBlockMode)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);

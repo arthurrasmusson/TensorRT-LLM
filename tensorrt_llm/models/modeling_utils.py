@@ -15,8 +15,8 @@ from .._common import default_net
 from .._utils import (get_init_params, numpy_to_torch, release_gc,
                       str_dtype_to_torch, str_dtype_to_trt, trt_dtype_to_torch)
 from ..functional import PositionEmbeddingType, Tensor, gather_last_token_logits
-from ..layers import (AttentionParams, Embedding, FusedGatedMLP, FusedRgLru,
-                      GatedMLP, KeyValueCacheParams, LoraParams,
+from ..layers import (MLP, AttentionParams, Embedding, FusedGatedMLP,
+                      FusedRgLru, GatedMLP, KeyValueCacheParams, LoraParams,
                       PromptTuningEmbedding, RgLru)
 from ..layers.attention import Attention, BertAttention
 from ..layers.linear import ColumnLinear, Linear, RowLinear
@@ -615,7 +615,7 @@ class PretrainedModel(Module,
                 model_inputs['lora_ranks'],
                 model_inputs['lora_weights_pointers'],
                 host_context_lengths=model_inputs['host_context_lengths'],
-                max_context_length=max_input_len,
+                max_num_tokens=max_num_tokens,
                 host_request_types=model_inputs['host_request_types'])
         if model_inputs['spec_decoding_params'] is not None:
             result['spec_decoding_params'] = model_inputs[
@@ -757,6 +757,10 @@ def fuse_gate_mlp(
     from ..quantization.quantize import fp8_quantize
 
     quant_algo = model.config.quantization.quant_algo
+    if quant_algo != QuantAlgo.FP8 and quant_algo is not None:
+        logger.warning("fuse_gate_mlp cannot be done for this model. Skipping.")
+        return model
+
     for name, mlp, layer in model.named_modules_with_parent():
         if isinstance(mlp, GatedMLP):
             init_params = get_init_params(mlp)
@@ -982,7 +986,7 @@ def add_lora(model: PretrainedModel,
                 out_hidden_sizes=[layer.out_features],
                 max_low_rank=max_rank,
             )
-        if isinstance(layer, FusedGatedMLP):
+        if isinstance(layer, (MLP, FusedGatedMLP)):
             if max_rank is None:
                 max_rank = min(layer.hidden_size,
                                layer.ffn_hidden_size // layer.tp_size)

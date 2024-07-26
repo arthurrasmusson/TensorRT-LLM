@@ -61,7 +61,9 @@ public:
     TensorPtr cacheIndirBatchedCopySizes;
 
     TensorPtr fillValuesAlt;
+    TensorPtr fillValuesAltDevice;
     TensorPtr seqSlotsAlt;
+    TensorPtr seqSlotsAltDevice;
 
     TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
         SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,

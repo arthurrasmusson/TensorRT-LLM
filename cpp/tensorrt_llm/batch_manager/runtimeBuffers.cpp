@@ -209,16 +209,18 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, Si
         hiddenStates = manager.emptyTensor(MemoryType::kGPU, modelConfig.getDataType());
     }
 
-    fillValues = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    seqSlots = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    sortedSeqSlots = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    fillValues = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    fillValuesDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    seqSlots = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    seqSlotsDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    sortedSeqSlots = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
     cacheIndirDecoderIOBatchedCopySrcOffsets
-        = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     cacheIndirDecoderIOBatchedCopyDstOffsets
-        = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     cacheIndirDecoderIOBatchedCopySizes
-        = BufferManager::pinned(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     mCacheIndirDecoderIOBatchedCopySrcOffsetsSliceDevice
         = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     mCacheIndirDecoderIOBatchedCopyDstOffsetsSliceDevice
@@ -244,7 +246,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, Si
 
         cacheGenerationFragmentPointerDevice = manager.gpu(
             ITensor::makeShape({maxBatchSize, GENERATION_LOGITS_BUFFER_LENGTH}), nvinfer1::DataType::kINT64);
-        cacheGenerationFragmentPointerHost = BufferManager::pinnedPool(
+        cacheGenerationFragmentPointerHost = manager.pinnedPool(
             ITensor::makeShape({maxBatchSize, GENERATION_LOGITS_BUFFER_LENGTH}), nvinfer1::DataType::kINT64);
     }
 
@@ -413,8 +415,11 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         }
 
         TLLM_CHECK(seqSlots->getSize() == static_cast<std::size_t>(batchIdx));
+        TensorPtr seqSlotsDeviceSlice = ITensor::slice(seqSlotsDevice, 0, batchIdx);
+        manager.copy(*ITensor::slice(seqSlots, 0, batchIdx), *seqSlotsDeviceSlice);
+        manager.copy(*fillValues, *fillValuesDevice);
         runtime::kernels::invokeFillBatch<SizeType32>(
-            *decoderBuffers.sequenceLengths, *seqSlots, maxBeamWidth, *fillValues, stream);
+            *decoderBuffers.sequenceLengths, *seqSlotsDeviceSlice, maxBeamWidth, *fillValuesDevice, stream);
     }
 
     // context preparation loop

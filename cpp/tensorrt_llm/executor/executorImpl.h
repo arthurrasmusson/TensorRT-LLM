@@ -49,14 +49,6 @@ public:
     void push(MpiMessage&& message)
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        if (mMaxQueueSize)
-        {
-            auto const maxQueueSize = mMaxQueueSize.value();
-            if (maxQueueSize > 0 && mQueue.size() >= static_cast<size_t>(maxQueueSize))
-            {
-                TLLM_THROW("Maximum queue size of %d has been reached, please try again later", maxQueueSize);
-            }
-        }
         mQueue.push(std::move(message));
         mCv.notify_one();
     }
@@ -70,16 +62,10 @@ public:
         return message;
     }
 
-    void setMaxQueueSize(std::optional<SizeType32> maxQueueSize)
-    {
-        mMaxQueueSize = std::move(maxQueueSize);
-    }
-
 private:
     std::queue<MpiMessage> mQueue;
     std::mutex mMutex;
     std::condition_variable mCv;
-    std::optional<SizeType32> mMaxQueueSize;
 };
 
 class Executor::Impl

@@ -116,6 +116,7 @@ private:
 
     // Helper buffers
     TensorPtr fillValues;
+    TensorPtr fillValuesDevice;
 
     TensorPtr mAllReduceWorkspace;
 
@@ -154,6 +155,7 @@ public:
 
     // Helper for KV cache rewind
     TensorPtr seqSlots;
+    TensorPtr seqSlotsDevice;
     TensorPtr sortedSeqSlots;
     // TODO(rkobus): move into decoderBuffers.DraftBuffers
     TensorPtr seqSlotRemappingHost;                                 // [numSequences]

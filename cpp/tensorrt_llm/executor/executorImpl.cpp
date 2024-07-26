@@ -281,7 +281,6 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
         == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT);
     mIsChunkedContext = executorConfig.getEnableChunkedContext();
     mMaxQueueSize = executorConfig.getMaxQueueSize();
-    mSendQueue.setMaxQueueSize(mMaxQueueSize);
 
     mLastReqId = 1;
     mLogitsPostProcessorMap = executorConfig.getLogitsPostProcessorMap().value_or(LogitsPostProcessorMap{});
@@ -1668,6 +1667,24 @@ void Executor::Impl::leaderRecvReqThread()
             TLLM_LOG_DEBUG("Leader recvReq thread receiving %d pending requests", requestWithIds.size());
             {
                 std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
+                if (mMaxQueueSize)
+                {
+                    auto const maxQueueSize = mMaxQueueSize.value();
+                    if (maxQueueSize > 0 && mQueuedRequests.size() >= static_cast<size_t>(maxQueueSize))
+                    {
+                        auto err = tensorrt_llm::common::fmtstr(
+                            "Maximum queue size of %d has been reached, please try again later", maxQueueSize);
+                        TLLM_LOG_ERROR("%s", err.c_str());
+                        std::vector<Response> responses;
+                        responses.reserve(requestWithIds.size());
+                        for (auto const& reqWithId : requestWithIds)
+                        {
+                            responses.emplace_back(reqWithId.id, err);
+                        }
+                        enqueueNewResponses(std::move(responses));
+                        continue;
+                    }
+                }
                 mQueuedRequests.insert(mQueuedRequests.end(), std::make_move_iterator(requestWithIds.begin()),
                     std::make_move_iterator(requestWithIds.end()));
             }
