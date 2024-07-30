@@ -207,8 +207,9 @@ void verifyOutput(RequestList const& finishedRequestList,
                 TensorPtr const& acceptedTokensLogits = llmReq.getGenerationLogitsHost();
                 auto const acceptedTokensLogitsShape = acceptedTokensLogits->getShape();
 
-                EXPECT_EQ(acceptedTokensLogitsShape.nbDims, 2);
-                EXPECT_EQ(numPredTokens, acceptedTokensLogitsShape.d[0]);
+                EXPECT_EQ(acceptedTokensLogitsShape.nbDims, 3);
+                EXPECT_EQ(1, acceptedTokensLogitsShape.d[0]);
+                EXPECT_EQ(numPredTokens, acceptedTokensLogitsShape.d[1]);
 
                 TensorPtr const& expectedLogits = ITensor::slice(expectedGenerationLogits[requestId], 1, numPredTokens);
 
@@ -540,8 +541,9 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
             {
                 auto const vocabSizePadded
                     = trtGptModel->getModelConfig().getVocabSizePadded(trtGptModel->getWorldConfig().getSize());
-                TensorPtr generationLogitsHost = BufferManager::cpu(
-                    ITensor::makeShape({r->getNumDraftTokens() + 1, vocabSizePadded}), trtGptModel->getLogitDataType());
+                TensorPtr generationLogitsHost
+                    = BufferManager::cpu(ITensor::makeShape({1, r->getNumDraftTokens() + 1, vocabSizePadded}),
+                        trtGptModel->getLogitDataType());
                 r->setGenerationLogitsHost(generationLogitsHost);
                 r->setReturnGenerationLogits(true);
             }

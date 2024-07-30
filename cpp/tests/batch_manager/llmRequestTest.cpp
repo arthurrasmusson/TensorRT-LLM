@@ -316,9 +316,10 @@ TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
     EXPECT_EQ(llmReq.getGenerationLogitsHost(), nullptr);
     llmReq.allocTargetModelAcceptedTokenLogitsHost(vocabSizePadded, logitsDataType);
     auto targetModelAcceptedTokenLogitShape = llmReq.getGenerationLogitsHost()->getShape();
-    EXPECT_EQ(targetModelAcceptedTokenLogitShape.nbDims, 2);
-    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[0], 4);
-    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[1], vocabSizePadded);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.nbDims, 3);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[0], 1);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[1], 4);
+    EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[2], vocabSizePadded);
 }
 
 using ParamType = std::tuple<bool, bool, bool, SizeType32, SizeType32>;

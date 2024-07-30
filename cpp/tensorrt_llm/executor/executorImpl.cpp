@@ -1106,7 +1106,7 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
             // Create the context logits tensor
             if (newReq->getReturnContextLogits())
             {
-                TLLM_CHECK_WITH_INFO(mModel->computeContextLogits(),
+                TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeContextLogits(),
                     "Return context logit need to build engine with gather_context_logits");
                 newReq->allocContextLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
             }
@@ -1114,18 +1114,18 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
             // Create the generation logits tensor
             if (newReq->getReturnGenerationLogits())
             {
-                TLLM_CHECK_WITH_INFO(mModel->computeGenerationLogits(),
+                TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeGenerationLogits(),
                     "Return generation logit need to build engine with gather_generation_logits");
-                newReq->allocGenerationLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
-            }
 
-            // Create the generation logits tensor for saving target model's accepted token logits
-            if (newReq->getReturnTargetModelAcceptedLogits())
-            {
-                TLLM_CHECK_WITH_INFO(mModel->computeGenerationLogits(),
-                    "Return target model accepted logits need to build engine with gather_generation_logits");
-                newReq->allocTargetModelAcceptedTokenLogitsHost(
-                    mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                if (mModel->getModelConfig().getSpeculativeDecodingMode().isDraftTokensExternal())
+                {
+                    newReq->allocTargetModelAcceptedTokenLogitsHost(
+                        mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                }
+                else
+                {
+                    newReq->allocGenerationLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                }
             }
 
             mModel->updatePeftCache(newReq);

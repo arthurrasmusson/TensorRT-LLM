@@ -131,6 +131,31 @@ std::string getEncDecEnginePath(std::string const& modelName, SizeType32 tp, Siz
     return modelName + '/' + std::to_string(tp * pp) + "-gpu/float16";
 }
 
+TokenIdType getDecTokenFromJsonConfig(std::filesystem::path decEnginePath, std::string const& token_name)
+{
+    TokenIdType tokenId = 0;
+    try
+    {
+        std::ifstream decoderJsonConfigPath(decEnginePath / "config.json");
+        auto const decoderPretrainedConfig
+            = nlohmann::json::parse(decoderJsonConfigPath, nullptr, true, true).at("pretrained_config");
+        tokenId = decoderPretrainedConfig.at(token_name).template get<int32_t>();
+    }
+    catch (nlohmann::json::out_of_range& e)
+    {
+        TLLM_LOG_ERROR(
+            "Parameter %s cannot be found from decoder config.json in pretrained_config. Using default id 0.",
+            token_name.c_str());
+    }
+    catch (nlohmann::json::type_error const& e)
+    {
+        TLLM_LOG_ERROR(
+            "Parameter %s has a different type from decoder config.json in pretrained_config. Using default id 0.",
+            token_name.c_str());
+    }
+    return tokenId;
+}
+
 TestData loadTestData(BeamResult const& beamResults, ITensor const& givenInput, SizeType32 const maxBeamWidth,
     tr::BufferManager& manager, OutputConfig const& outConfig, ModelIds const& modelIds)
 {
@@ -2313,11 +2338,10 @@ public:
     MOCK_METHOD(SizeType32, getVocabSizePadded, (), (const));
     MOCK_METHOD(SizeType32, getMaxDraftLen, (), (const));
     MOCK_METHOD(nvinfer1::DataType, getLogitDataType, (), (const));
-    MOCK_METHOD(bool, computeContextLogits, (), (const));
-    MOCK_METHOD(bool, computeGenerationLogits, (), (const));
     MOCK_METHOD(void, getCurrentIterationStats, (IterationStats&), (const));
     MOCK_METHOD(void, getCurrentRequestStats, (RequestStatsPerIteration&), (const));
     MOCK_METHOD(tr::WorldConfig const&, getWorldConfig, (), (const));
+    MOCK_METHOD(tr::ModelConfig const&, getModelConfig, (), (const));
     MOCK_METHOD(tr::BufferManager const&, getBufferManager, (), (const));
     MOCK_METHOD(tr::BufferManager::CudaStreamPtr, getRuntimeStreamPtr, (), (const));
     MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
@@ -2337,8 +2361,6 @@ TEST_P(ParamTest, MockedModel)
     auto model = std::make_shared<MockedModel>();
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
 
@@ -2409,8 +2431,6 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
     auto model = std::make_shared<MockedModel>();
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
 
@@ -2543,8 +2563,6 @@ TEST_F(GptExecutorTest, MockedModelReqStatsBug)
     auto model = std::make_shared<MockedModel>();
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
     EXPECT_CALL(*model, updatePeftCache(_)).WillRepeatedly(Invoke([&]() { return; }));
@@ -2653,8 +2671,6 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
     auto model = std::make_shared<MockedModel>();
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
     EXPECT_CALL(*model, updatePeftCache(_)).WillRepeatedly(Invoke([&]() { return; }));
@@ -2765,8 +2781,6 @@ TEST_P(ParamTest, MockedModelMultiGpu)
         = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
 
@@ -2909,10 +2923,6 @@ TEST_F(GptExecutorTest, MockedModelWithError)
 
         // One request should be terminated
         EXPECT_CALL(*model, terminateRequest(_, _)).Times(mockedModelParam.expectedTerminateCnt);
-        EXPECT_CALL(*model, computeContextLogits())
-            .WillRepeatedly(Invoke([&]() { return mockedModelParam.computeContextLogits; }));
-        EXPECT_CALL(*model, computeGenerationLogits())
-            .WillRepeatedly(Invoke([&]() { return mockedModelParam.computeGenLogits; }));
         EXPECT_CALL(*model, getVocabSizePadded()).WillRepeatedly(Invoke([&]() { return 1024; }));
         EXPECT_CALL(*model, getLogitDataType()).WillRepeatedly(Invoke([&]() { return nvinfer1::DataType::kFLOAT; }));
         EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
@@ -2939,6 +2949,11 @@ TEST_F(GptExecutorTest, MockedModelWithError)
         tr::WorldConfig const dummyWorldConfig;
         EXPECT_CALL(*model, getWorldConfig())
             .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
+        tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 0, nvinfer1::DataType::kHALF);
+        dummyModelConfig.computeContextLogits(mockedModelParam.computeContextLogits);
+        dummyModelConfig.computeGenerationLogits(mockedModelParam.computeGenLogits);
+        EXPECT_CALL(*model, getModelConfig())
+            .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
         EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
         EXPECT_CALL(*model, getCurrentRequestStats(_))
             .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
@@ -2992,8 +3007,6 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
 
     // One request should be terminated
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(1);
-    EXPECT_CALL(*model, computeContextLogits()).WillRepeatedly(Invoke([&]() { return false; }));
-    EXPECT_CALL(*model, computeGenerationLogits()).WillRepeatedly(Invoke([&]() { return false; }));
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
     tr::WorldConfig const dummyWorldConfig;
@@ -3588,11 +3601,10 @@ TEST_P(EncDecParamsTest, Forward)
     outConfig.returnContextLogits = false;
     outConfig.returnEncoderOutput = false;
 
-    // TODO: currently hardcoded. add to engine config and read from there?
-    TokenIdType const bosId = 0;
-    TokenIdType const padId = 0;
-    TokenIdType const eosId = 1;
-    TokenIdType const decoderStartTokenId = padId;
+    TokenIdType bosId = getDecTokenFromJsonConfig(decEnginePath, "bos_token_id");
+    TokenIdType padId = getDecTokenFromJsonConfig(decEnginePath, "pad_token_id");
+    TokenIdType eosId = getDecTokenFromJsonConfig(decEnginePath, "eos_token_id");
+    TokenIdType decoderStartTokenId = getDecTokenFromJsonConfig(decEnginePath, "decoder_start_token_id");
 
     // create requests
     SizeType32 const nbRequests = inputLengthsHost->getShape().d[0];

@@ -49,8 +49,6 @@ public:
         , mMaxSequenceLen{modelConfig.getMaxSequenceLen()}
         , mMaxDraftLen{modelConfig.getMaxDecodingDraftTokens()}
         , mVocabSizePadded{modelConfig.getVocabSizePadded(worldConfig.getSize())}
-        , mComputeContextLogits{modelConfig.computeContextLogits()}
-        , mComputeGenerationLogits{modelConfig.computeGenerationLogits()}
         , mNormalizeLogProbs{optionalParams.normalizeLogProbs}
         , mEnableTrtOverlap{optionalParams.enableTrtOverlap}
     {
@@ -88,8 +86,6 @@ public:
 
         TLLM_LOG_INFO("TRTGptModel mMaxAttentionWindowSize: %d", mMaxAttentionWindow);
 
-        TLLM_LOG_INFO("TRTGptModel computeContextLogits: %d", mComputeContextLogits);
-        TLLM_LOG_INFO("TRTGptModel computeGenerationLogits: %d", mComputeGenerationLogits);
         TLLM_LOG_INFO("TRTGptModel enableTrtOverlap: %d", mEnableTrtOverlap);
         TLLM_LOG_INFO("TRTGptModel normalizeLogProbs: %d", mNormalizeLogProbs);
 
@@ -174,8 +170,6 @@ public:
     }
 
     [[nodiscard]] virtual TrtGptModelType getModelType() const = 0;
-    [[nodiscard]] virtual runtime::BufferManager const& getBufferManager() const = 0;
-    [[nodiscard]] virtual runtime::ModelConfig const& getModelConfig() const = 0;
 
     [[nodiscard]] SizeType32 getVocabSizePadded() const override
     {
@@ -185,16 +179,6 @@ public:
     [[nodiscard]] SizeType32 getMaxDraftLen() const override
     {
         return mMaxDraftLen;
-    }
-
-    [[nodiscard]] bool computeContextLogits() const override
-    {
-        return mComputeContextLogits;
-    }
-
-    [[nodiscard]] bool computeGenerationLogits() const override
-    {
-        return mComputeGenerationLogits;
     }
 
     virtual void setLayerProfiler() = 0;
@@ -247,8 +231,6 @@ private:
     SizeType32 mMaxAttentionWindow;
     SizeType32 mSinkTokenLen;
 
-    bool mComputeContextLogits;
-    bool mComputeGenerationLogits;
     bool mNormalizeLogProbs;
     bool mEnableTrtOverlap;
 };

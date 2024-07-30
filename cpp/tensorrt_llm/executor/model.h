@@ -15,7 +15,9 @@
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
+
 #include <nlohmann/json.hpp>
 
 namespace tensorrt_llm::executor
@@ -56,10 +58,9 @@ public:
     [[nodiscard]] virtual SizeType32 getMaxDraftLen() const = 0;
     [[nodiscard]] virtual nvinfer1::DataType getLogitDataType() const = 0;
     [[nodiscard]] virtual runtime::WorldConfig const& getWorldConfig() const = 0;
+    [[nodiscard]] virtual runtime::ModelConfig const& getModelConfig() const = 0;
     [[nodiscard]] virtual runtime::BufferManager const& getBufferManager() const = 0;
     [[nodiscard]] virtual runtime::BufferManager::CudaStreamPtr getRuntimeStreamPtr() const = 0;
-    [[nodiscard]] virtual bool computeContextLogits() const = 0;
-    [[nodiscard]] virtual bool computeGenerationLogits() const = 0;
 
     /// @brief Function that provides per iteration stats specific to a certain model
     /// @param stats The json object to write stats to

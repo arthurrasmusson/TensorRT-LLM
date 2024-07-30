@@ -27,6 +27,7 @@
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
+#include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/loraUtils.h"
 #include "tensorrt_llm/runtime/memoryCounters.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
@@ -36,7 +37,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <cstring>
 #include <cuda_profiler_api.h>
 #include <filesystem>
@@ -445,13 +445,14 @@ BatchManagerErrorCode_t GptManager::fetchNewRequests()
                     {
                         TLLM_THROW("Return generation logit need to build engine with gather_generation_logits");
                     }
-                    r->allocGenerationLogitsHost(vocabSizePadded, logitsDtype);
-                }
-
-                // Allocate host memory for target model's accepted token logits
-                if (r->getReturnTargetModelAcceptedLogits())
-                {
-                    r->allocTargetModelAcceptedTokenLogitsHost(vocabSizePadded, logitsDtype);
+                    if (mTrtGptModel->getModelConfig().getSpeculativeDecodingMode().isDraftTokensExternal())
+                    {
+                        r->allocTargetModelAcceptedTokenLogitsHost(vocabSizePadded, logitsDtype);
+                    }
+                    else
+                    {
+                        r->allocGenerationLogitsHost(vocabSizePadded, logitsDtype);
+                    }
                 }
 
                 auto requestId = r->mRequestId;
@@ -714,29 +715,12 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
                     !llmReq.isStreaming(), "Return generation logits is not supported with streaming mode");
 
                 TensorPtr const& generationLogitsHost = llmReq.getGenerationLogitsHost();
-                auto generationLogitsShape = generationLogitsHost->getShape();
+                auto const generationLogitsShape = generationLogitsHost->getShape();
                 TLLM_CHECK(generationLogitsShape.nbDims == 3);
-                auto beamWidth = generationLogitsShape.d[0];
-                auto outputLength = generationLogitsShape.d[1];
-                auto vocabSizePadded = generationLogitsShape.d[2];
-
-                TensorPtr generationLogitsHostView = ITensor::view(llmReq.getGenerationLogitsHost(),
-                    ITensor::makeShape({1, beamWidth, outputLength, vocabSizePadded}));
-                output_tensors.emplace_back(NamedTensor({generationLogitsHostView, kGenerationLogitsName}));
-            }
-            else if (llmReq.getReturnTargetModelAcceptedLogits())
-            {
-                TensorPtr const& targetModelAcceptedTokenLogits = llmReq.getGenerationLogitsHost();
-                auto targetModelAcceptedTokenLogitsShape = targetModelAcceptedTokenLogits->getShape();
-                TLLM_CHECK(targetModelAcceptedTokenLogitsShape.nbDims == 2);
-                auto numAcceptedToken = targetModelAcceptedTokenLogitsShape.d[0];
-                auto vocabSizePadded = targetModelAcceptedTokenLogitsShape.d[1];
-
                 // Reshape to be a dim=4 tensor to meet dimensional requirements
-                TensorPtr targetModelAcceptedTokenLogitsHostView = ITensor::view(
-                    llmReq.getGenerationLogitsHost(), ITensor::makeShape({1, 1, numAcceptedToken, vocabSizePadded}));
-                output_tensors.emplace_back(
-                    NamedTensor({targetModelAcceptedTokenLogitsHostView, kGenerationLogitsName}));
+                auto const newShape = ITensor::unsqueeze(generationLogitsShape, 0);
+                TensorPtr generationLogitsHostView = ITensor::view(llmReq.getGenerationLogitsHost(), newShape);
+                output_tensors.emplace_back(NamedTensor({generationLogitsHostView, kGenerationLogitsName}));
             }
             else
             {

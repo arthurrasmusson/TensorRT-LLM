@@ -70,16 +70,17 @@ void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr& med
     }
 }
 
-void copyLastContextLogits(TensorPtr const& decoderLogits, LlmRequest& llmReq, BufferManager const& bufferManager)
+//! @brief Copy logits from context phase to beginning of generation logits.
+//! @details Usually, this concerns logits of 1 token. In speculative decoding this concerns draftLen + 1 tokens.
+void copyLastContextLogits(TensorPtr const& contextLogits, LlmRequest& llmReq, BufferManager const& bufferManager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    auto const numLogits = contextLogits->getShape().d[0];
     for (int beam = 0; beam < llmReq.mSamplingConfig.beamWidth; beam++)
     {
-        // [1, beamWidth, vocabSizePadded] -> [vocabSizePadded]
-        auto beamDeviceTensorPtr = ITensor::at(decoderLogits, {0, beam});
-        // [beamWidth, mMaxNewTokens, vocabSizePadded] -> [vocabSizePadded]
-        auto beamHostTensorPtr = ITensor::at(llmReq.getGenerationLogitsHost(), {beam, 0});
-        bufferManager.copy(*beamDeviceTensorPtr, *beamHostTensorPtr);
+        // [beamWidth, mMaxNewTokens, vocabSizePadded] -> [numLogits, vocabSizePadded]
+        auto beamHostTensorPtr = ITensor::slice(llmReq.getGenerationLogitsHost(), {beam, 0}, numLogits);
+        bufferManager.copy(*contextLogits, *beamHostTensorPtr);
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -1158,7 +1159,7 @@ void TrtGptModelInflightBatching::postProcessRequest(
         }
 
         // Send generation logits from last to first PP rank
-        if (llmReq.getReturnGenerationLogits() || llmReq.getReturnTargetModelAcceptedLogits())
+        if (llmReq.getReturnGenerationLogits())
         {
             if (mWorldConfig.isLastPipelineParallelRank())
             {
@@ -1310,9 +1311,6 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
     for (auto const& llmReq : scheduledRequests.contextRequests)
     {
         auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-        auto const seqSlot = llmReq->mSeqSlot.value();
-        auto& decoderLogits = mDecoderBuffers->logits.at(seqSlot);
-
         auto const numContextLogits = contextRuntimeBuffers.numContextLogits.at(batchIndex);
         auto const draftLength = llmReq->getNumDraftTokens();
 
@@ -1360,6 +1358,8 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
 
         // Get the logits from the last context token and draft tokens
         auto const numDecoderLogits = 1 + draftLength;
+        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto& decoderLogits = mDecoderBuffers->logits.at(seqSlot);
         TensorPtr logitsView
             = ITensor::slice(contextRuntimeBuffers.logits, logitsIndex - numDecoderLogits, numDecoderLogits);
 
@@ -1371,12 +1371,11 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
                 numDecoderLogits);
         }
 
-        // Save the accepted token logits from target model
-        if (llmReq->getReturnTargetModelAcceptedLogits())
+        // Save the last token logits of context into generation logits or
+        // save the accepted token logits from target model
+        if (llmReq->getReturnGenerationLogits())
         {
-            TLLM_CHECK_WITH_INFO(
-                draftLength > 0, "Return target model's accepted token logits need to have draft tokens");
-            manager.copy(*logitsView, *(llmReq->getGenerationLogitsHost()));
+            copyLastContextLogits(logitsView, *llmReq, manager);
         }
 
         TLLM_CHECK_DEBUG_WITH_INFO(
@@ -1398,11 +1397,6 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
                 = ITensor::view(logitsView, ITensor::makeShape({logitsViewShape.d[0], 1, logitsViewShape.d[1]}));
         }
 
-        // Save the last token logits of context into generation logit
-        if (llmReq->getReturnGenerationLogits())
-        {
-            copyLastContextLogits(decoderLogits, *llmReq, manager);
-        }
         ++batchIndex;
     }
 
@@ -1754,18 +1748,18 @@ std::unique_ptr<DecoderStepAsyncSend> TrtGptModelInflightBatching::decoderSync(
             auto const currentNumOfTokens = llmReq->getMaxBeamNumTokens();
 
             // Save the accepted token logits from target model
-            if (llmReq->getReturnTargetModelAcceptedLogits())
+            if (llmReq->getReturnGenerationLogits()
+                && mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
             {
-                TLLM_CHECK_WITH_INFO(
-                    numGeneratedTokens > 0, "Return target model's accepted token logits need to have draft tokens");
                 TLLM_CHECK_WITH_INFO(reqBeamWidth == 1, "Speculative decoding only works for beam width == 1");
 
                 SizeType32 numAcceptedTokens
                     = sequenceLengthsHostData[seqSlot * mOperatingBeamWidth + 0] - llmReq->getMaxBeamNumTokens();
 
-                TensorPtr acceptedTokensLogitsHost
-                    = ITensor::slice(llmReq->getGenerationLogitsHost(), 0, numAcceptedTokens);
-                llmReq->setGenerationLogitsHost(acceptedTokensLogitsHost);
+                auto const& generationLogitsHost = llmReq->getGenerationLogitsHost();
+                auto shape = generationLogitsHost->getShape();
+                shape.d[1] = numAcceptedTokens;
+                generationLogitsHost->reshape(shape);
             }
 
             std::vector<SizeType32> numDroppedTokens(reqBeamWidth);
@@ -1840,7 +1834,7 @@ std::unique_ptr<DecoderStepAsyncSend> TrtGptModelInflightBatching::decoderSync(
             // Terminate if request has finished or if it is speculative decoding target model
             // FIXME(nkorobov): remove this when lookahead is supported
             if (decoderFinishedPtr[seqSlot] != 0U || mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
-                || (mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal() && llmReq->hasDraftTokens()))
+                || mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
             {
                 postProcessRequest(*llmReq, batchIdx, numDroppedTokens);
                 if (!mWorldConfig.isPipelineParallel() || !mWorldConfig.isLastPipelineParallelRank())
