@@ -86,3 +86,33 @@ TEST(ExecutorConfigTest, ctorInvalidInputs)
     ParallelConfig parallelConfigValid;
     testInvalid(1, schedulerConfig, kvCacheConfig, true, true, -1, BatchingType::kINFLIGHT, parallelConfigValid);
 }
+
+TEST(ExecutorConfigTest, extendedRuntimePerfKnobConfigTest)
+{
+    ExtendedRuntimePerfKnobConfig extendedRuntimePerfKnobConfig;
+    {
+        auto executorConfig = ExecutorConfig(1);
+        executorConfig.setExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig);
+    }
+    {
+        auto executorConfig = ExecutorConfig(1);
+        extendedRuntimePerfKnobConfig.setMultiBlockMode(true);
+        extendedRuntimePerfKnobConfig.setEnableContextFMHAFP32Acc(true);
+        executorConfig.setExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig);
+    }
+    {
+        auto executorConfig = ExecutorConfig(1);
+        extendedRuntimePerfKnobConfig.setMultiBlockMode(true);
+        extendedRuntimePerfKnobConfig.setMultiBlockMode(false);
+        extendedRuntimePerfKnobConfig.setEnableContextFMHAFP32Acc(true);
+        extendedRuntimePerfKnobConfig.setEnableContextFMHAFP32Acc(false);
+        executorConfig.setExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig);
+    }
+    {
+        ExtendedRuntimePerfKnobConfig newExtendedRuntimePerfKnobConfig(false, false);
+        auto executorConfig = ExecutorConfig(1);
+        newExtendedRuntimePerfKnobConfig.setMultiBlockMode(true);
+        newExtendedRuntimePerfKnobConfig.setEnableContextFMHAFP32Acc(true);
+        executorConfig.setExtendedRuntimePerfKnobConfig(newExtendedRuntimePerfKnobConfig);
+    }
+}

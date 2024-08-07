@@ -24,7 +24,8 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
     std::optional<LogitsPostProcessorMap> logitsPostProcessorMap,
     std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched, std::optional<DecodingConfig> decodingConfig,
-    float gpuWeightPercent, std::optional<SizeType32> maxQueueSize, bool multiBlockMode)
+    float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
+    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -42,7 +43,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mDecodingConfig(std::move(decodingConfig))
     , mGpuWeightsPercent(gpuWeightPercent)
     , mMaxQueueSize(maxQueueSize)
-    , mMultiBlockMode(multiBlockMode)
+    , mExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -134,9 +135,9 @@ std::optional<SizeType32> ExecutorConfig::getMaxQueueSize() const
     return mMaxQueueSize;
 }
 
-bool ExecutorConfig::getMultiBlockMode() const
+ExtendedRuntimePerfKnobConfig ExecutorConfig::getExtendedRuntimePerfKnobConfig() const
 {
-    return mMultiBlockMode;
+    return mExtendedRuntimePerfKnobConfig;
 }
 
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
@@ -229,9 +230,10 @@ void ExecutorConfig::setMaxQueueSize(std::optional<SizeType32> const& maxQueueSi
     mMaxQueueSize = maxQueueSize;
 }
 
-void ExecutorConfig::setMultiBlockMode(bool const multiBlockMode)
+void ExecutorConfig::setExtendedRuntimePerfKnobConfig(
+    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
 {
-    mMultiBlockMode = multiBlockMode;
+    mExtendedRuntimePerfKnobConfig = extendedRuntimePerfKnobConfig;
 }
 
 } // namespace tensorrt_llm::executor

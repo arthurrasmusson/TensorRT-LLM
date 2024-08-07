@@ -24,11 +24,12 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streamin
     std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
     std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
     std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
-    std::optional<IdType> clientId, bool returnAllGeneratedTokens)
+    std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig,
         endId, padId, std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
-        std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens))
+        std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens,
+        priority))
 {
 }
 
@@ -132,6 +133,11 @@ std::optional<IdType> Request::getClientId() const
     return mImpl->getClientId();
 }
 
+PriorityType Request::getPriority() const
+{
+    return mImpl->getPriority();
+}
+
 bool Request::getReturnAllGeneratedTokens() const
 {
     return mImpl->getReturnAllGeneratedTokens();
@@ -205,6 +211,11 @@ void Request::setEncoderInputTokenIds(VecTokens const& encoderInputTokenIds)
 void Request::setClientId(IdType clientId)
 {
     return mImpl->setClientId(clientId);
+}
+
+void Request::setPriority(PriorityType priority)
+{
+    return mImpl->setPriority(priority);
 }
 
 void Request::setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)

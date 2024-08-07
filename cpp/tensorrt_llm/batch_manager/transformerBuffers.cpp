@@ -26,8 +26,9 @@ namespace tensorrt_llm::batch_manager
 {
 
 TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,
-    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
+    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+    runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+    runtime::WorldConfig const& worldConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -73,7 +74,10 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     runtimePerfKnobsHost = BufferManager::cpu(ITensor::makeShape({perfKnobSize}), nvinfer1::DataType::kINT64);
     auto runtimePerfKnobsHostPtr = bufferCast<int64_t>(*runtimePerfKnobsHost);
     std::fill_n(runtimePerfKnobsHostPtr, perfKnobSize, -1);
+    SizeType32 multiBlockModeVal = extendedRuntimePerfKnobConfig.getMultiBlockMode() ? 1 : 0;
+    SizeType32 enableContextFMHAFP32AccVal = extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc() ? 1 : 0;
     runtimePerfKnobsHostPtr[0] = multiBlockModeVal;
+    runtimePerfKnobsHostPtr[1] = enableContextFMHAFP32AccVal;
 }
 
 void TransformerBuffers::reshape(SizeType32 numSequences)

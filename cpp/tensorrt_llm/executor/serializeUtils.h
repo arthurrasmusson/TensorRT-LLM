@@ -316,6 +316,10 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializeSchedulerConfig(is);
     }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::ExtendedRuntimePerfKnobConfig>::value)
+    {
+        return Serialization::deserializeExtendedRuntimePerfKnobConfig(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::ParallelConfig>::value)
     {
         return Serialization::deserializeParallelConfig(is);

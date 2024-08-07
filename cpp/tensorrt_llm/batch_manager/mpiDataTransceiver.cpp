@@ -85,7 +85,7 @@ void MpiResponder::response()
             if (!mAnyReady)
             {
                 std::unique_lock lk(mCondMutex);
-                mResponderCv.wait(lk, [&]() { return (mAnyReady || mTerminate); });
+                mResponderCv.wait(lk, [this]() { return (mAnyReady || mTerminate); });
             }
             if (mTerminate)
             {
@@ -103,7 +103,7 @@ void MpiResponder::response()
             else
             {
                 std::unique_lock lk(mCondMutex);
-                mResponderCv.wait(lk, [&]() { return (mAnyReady || mTerminate); });
+                mResponderCv.wait(lk, [this]() { return (mAnyReady || mTerminate); });
             }
         }
     }

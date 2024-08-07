@@ -384,8 +384,8 @@ PeftCacheManager::PeftTable PeftCacheManager::ensureBatch(
             peftTable.try_emplace(reqId, values);
         }
     }
-    return peftTable;
     TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
+    return peftTable;
 }
 
 bool PeftCacheManager::isTaskCached(uint64_t taskId) const

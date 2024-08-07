@@ -21,6 +21,7 @@
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
+#include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
@@ -589,8 +590,7 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
         MPI_Comm sessionComm = MPI_COMM_NULL;
         MPICHECK(MPI_Comm_create_group(MPI_COMM_WORLD, sessionGroup, 1000 + participantIds.front(), &sessionComm));
 
-        auto session = tensorrt_llm::mpi::MpiComm(sessionComm, false);
-        COMM_SESSION = std::move(session);
+        tensorrt_llm::mpi::MpiComm::setSession(tensorrt_llm::mpi::MpiComm(sessionComm, false));
     }
 
     if (mIsLeader && mCommMode == CommunicationMode::kORCHESTRATOR)
@@ -696,8 +696,11 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
                     TLLM_THROW("Maximum queue size of %d has been reached, please try again later", maxQueueSize);
                 }
             }
-            mQueuedRequests.insert(mQueuedRequests.end(), std::make_move_iterator(requestWithIds.begin()),
-                std::make_move_iterator(requestWithIds.end()));
+
+            for (auto&& req : requestWithIds)
+            {
+                insertRequestInOrder(mQueuedRequests, std::move(req));
+            }
         }
         mQueuedReqCv.notify_one();
     }
@@ -899,7 +902,7 @@ void Executor::Impl::shutdown()
     // undefined order and can cause crashes on program exit.
     if (mIsWorker)
     {
-        COMM_SESSION = tensorrt_llm::mpi::MpiComm(MPI_COMM_WORLD, false);
+        tensorrt_llm::mpi::MpiComm::setSession(tensorrt_llm::mpi::MpiComm(MPI_COMM_WORLD, false));
     }
 }
 
@@ -967,7 +970,8 @@ bool Executor::Impl::canEnqueueRequests() const
             || (mCommMode == CommunicationMode::kORCHESTRATOR && mIsOrchestrator));
 }
 
-std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(SizeType32 numActiveRequests)
+std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
+    SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
     if (mRequestWithIdWaitThread)
     {
@@ -985,14 +989,27 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(SizeType32 numActive
             std::unique_lock<std::mutex> lck(mQueuedReqMtx);
             mQueuedReqCv.wait(lck, [&]() { return (!mQueuedRequests.empty() || numActiveRequests > 0 || mShutdown); });
 
-            SizeType32 maxNewRequests = std::max(mMaxNumActiveRequests - numActiveRequests, 0);
-            if (maxNewRequests > 0 && !mQueuedRequests.empty() && !mShutdown)
+            if (!mQueuedRequests.empty() && !mShutdown)
             {
-                SizeType32 numNewRequests = std::min(maxNewRequests, static_cast<SizeType32>(mQueuedRequests.size()));
-                for (int req = 0; req < numNewRequests; ++req)
+                auto const maxNewRequests = static_cast<size_t>(std::max(mMaxNumActiveRequests - numActiveRequests, 0));
+                auto const insertQueuedRequestIntoReqWithIds = [this, &reqWithIds]()
                 {
                     reqWithIds.emplace_back(std::move(mQueuedRequests.front()));
                     mQueuedRequests.pop_front();
+                };
+
+                for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests; ++req)
+                {
+                    insertQueuedRequestIntoReqWithIds();
+                }
+
+                if (lowestPriorityActive)
+                {
+                    while (mQueuedRequests.size() > 0
+                        && mQueuedRequests.front().req.getPriority() > (*lowestPriorityActive))
+                    {
+                        insertQueuedRequestIntoReqWithIds();
+                    }
                 }
             }
         }
@@ -1027,11 +1044,12 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(SizeType32 numActive
     return reqWithIds;
 }
 
-Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiveRequests)
+Executor::Impl::RequestList Executor::Impl::fetchNewRequests(
+    SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
     NVTX3_SCOPED_RANGE(fetchNewRequests);
     // If grab requests from queue, do exchange between ranks
-    auto reqWithIds = getNewReqWithIds(numActiveRequests);
+    auto reqWithIds = getNewReqWithIds(numActiveRequests, lowestPriorityActive);
 
     RequestList newRequests;
     for (auto& reqWithId : reqWithIds)
@@ -1517,11 +1535,17 @@ void Executor::Impl::executionLoop()
                 cudaProfilerStart();
             }
             iterStart = std::chrono::steady_clock::now();
-            auto newRequests = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()));
+            std::optional<PriorityType> lowestPriority = std::nullopt;
+            if (activeRequests.size() > 0)
+            {
+                lowestPriority = activeRequests.back()->priority();
+            }
+
+            auto newRequests = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()), lowestPriority);
 
             for (auto const& newRequest : newRequests)
             {
-                activeRequests.emplace_back(newRequest);
+                insertRequestInOrder(activeRequests, newRequest);
             }
         }
 
@@ -1685,8 +1709,10 @@ void Executor::Impl::leaderRecvReqThread()
                         continue;
                     }
                 }
-                mQueuedRequests.insert(mQueuedRequests.end(), std::make_move_iterator(requestWithIds.begin()),
-                    std::make_move_iterator(requestWithIds.end()));
+                for (auto&& req : requestWithIds)
+                {
+                    insertRequestInOrder(mQueuedRequests, std::move(req));
+                }
             }
             mQueuedReqCv.notify_one();
         }

@@ -19,6 +19,7 @@
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
+#include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/types.h"
 
 #include <NvInferPlugin.h>
@@ -31,6 +32,7 @@
 using namespace tensorrt_llm::runtime;
 using namespace tensorrt_llm::batch_manager;
 using namespace tensorrt_llm::batch_manager::batch_scheduler;
+using tensorrt_llm::executor::insertRequestInOrder;
 namespace tc = tensorrt_llm::common;
 
 using CudaStreamPtr = std::shared_ptr<tensorrt_llm::runtime::CudaStream>;
@@ -135,12 +137,15 @@ protected:
     }
 
     static std::shared_ptr<LlmRequest> createRequest(int32_t promptLen, int32_t maxNewTokens,
-        std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt)
+        std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
+        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority)
     {
         tensorrt_llm::runtime::SamplingConfig samplingConfig;
         uint64_t reqId = optionalReqId.value_or((rand() % INT64_MAX) + 1);
         auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
         auto req = std::make_shared<LlmRequest>(reqId, maxNewTokens, inputTokens, samplingConfig, false);
+        req->setPriority(priority);
+
         if (loraTaskId.has_value())
         {
             req->setLoraTaskId(loraTaskId.value());
@@ -438,8 +443,26 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
     auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
         CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
     auto sinkTokenLens = std::vector<SizeType32>{0, 4};
+
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
     {
+        std::vector<ExpectedState> expectedStates;
+        uint32_t expectedIterations{0};
+        if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kMAX_UTILIZATION)
+        {
+            expectedStates.emplace_back(ExpectedState{0, 50, {0, 1, 2}, {{0, 50, 10, 0}}});
+            expectedStates.emplace_back(ExpectedState{50, 100, {1, 2}, {{1, 50, 10, 0}}});
+            expectedStates.emplace_back(ExpectedState{100, 150, {2}, {{2, 50, 10, 0}}});
+            expectedIterations = 150;
+        }
+        else if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+        {
+            // NO_EVICT can guarantee no eviction with requests 0 and 2, so it will allocate them concurrently
+            expectedStates.emplace_back(ExpectedState{0, 50, {0, 1, 2}, {{0, 50, 10, 0}, {2, 50, 10, 0}}});
+            expectedStates.emplace_back(ExpectedState{50, 100, {1}, {{1, 50, 10, 0}}});
+            expectedIterations = 100;
+        }
+
         for (auto sinkTokenLen : sinkTokenLens)
         {
             auto kvCacheManager = getKvCacheManager(
@@ -450,7 +473,7 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
             uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
             auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
-            // Create two requests that should fit in kvCache for entire duration
+            // Create two requests that should not fit in kvCache for entire duration
             int32_t maxNewTokens = 50;
             int32_t promptLen = 10;
 
@@ -459,17 +482,13 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
             activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 5678));
             activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2, 1234));
 
-            std::vector<ExpectedState> expectedStates;
-            expectedStates.push_back(ExpectedState{0, 50, {0, 1, 2}, {{0, 50, 10, 0}, {2, 50, 10, 0}}});
-            expectedStates.push_back(ExpectedState{50, 100, {1}, {{1, 50, 10, 0}}});
-
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
             int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
                 expectedStates, addNewRequestsCb, maxInputLen);
 
-            EXPECT_EQ(numIterations, 100);
+            EXPECT_EQ(numIterations, expectedIterations);
         }
     }
 }
@@ -578,6 +597,98 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilization)
             addNewRequestsCb, maxInputLen);
 
         int expectedNumIters = (sinkTokenLen == 0) ? 119 : 125;
+        EXPECT_EQ(numIterations, expectedNumIters);
+    }
+}
+
+TEST_F(CapacitySchedulerTest, RequestsSortedByPriorities)
+{
+    RequestList activeRequests;
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 0, std::nullopt));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 1, std::nullopt));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 2, std::nullopt, 0.6));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 3, std::nullopt, 0.6));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 4, std::nullopt, 0.6));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 5, std::nullopt, 1.0));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 6, std::nullopt, 0.3));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 7, std::nullopt, 0.3));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 8, std::nullopt, 0.3));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 9, std::nullopt, 0.6));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 10, std::nullopt, 1.0));
+    insertRequestInOrder(activeRequests, createRequest(10, 20, 11, std::nullopt));
+
+    std::vector<RequestIdType> expectedOrder = {5, 10, 2, 3, 4, 9, 0, 1, 11, 6, 7, 8};
+
+    int i = 0;
+    for (auto const& a : activeRequests)
+    {
+        EXPECT_EQ(a->mRequestId, expectedOrder[i++]);
+    }
+}
+
+TEST_F(CapacitySchedulerTest, SimpleDoesntFitPriorities)
+{
+    SizeType32 kvCacheMaxNumTokens = 100;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+
+    auto configurations = std::vector<std::tuple<CapacitySchedulerPolicy, SizeType32, int>>{
+        {CapacitySchedulerPolicy::kMAX_UTILIZATION, 0, 119}, {CapacitySchedulerPolicy::kMAX_UTILIZATION, 4, 125},
+        {CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, 1, 160}};
+
+    for (auto [capacitySchedulerPolicy, sinkTokenLen, expectedNumIters] : configurations)
+    {
+        auto kvCacheManager = getKvCacheManager(
+            maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
+        auto peftCacheManager = getPeftCacheManager();
+        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
+        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+        // Create two requests that will not fit in kvCache for entire duration
+        int32_t maxNewTokens = 80;
+        int32_t promptLen = 10;
+
+        RequestList activeRequests;
+        insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 0, std::nullopt));
+        insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 1, std::nullopt, 0.6));
+
+        std::vector<ExpectedState> expectedStates;
+        if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kMAX_UTILIZATION && sinkTokenLen == 0)
+        {
+            // Up to iteration 41, kvCache is big enough, expect 2 requests
+            expectedStates.push_back(ExpectedState{0, 41, {1, 0}, {{0, 80, 10, 0}, {1, 80, 10, 0}}});
+            // At iteration 41, running out of space, only one scheduled (req 1, as it has more priority)
+            expectedStates.push_back(ExpectedState{41, 80, {1, 0}, {{1, 80, 10, 41, 10}}});
+            // At iteration 80, req 1 is done
+            expectedStates.push_back(ExpectedState{80, 120, {0}, {{0, 39, 51, 0}}});
+        }
+        else if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kMAX_UTILIZATION && sinkTokenLen == 4)
+        {
+            // Up to iteration 35, kvCache is big enough, expect 2 requests
+            expectedStates.push_back(ExpectedState{0, 35, {1, 0}, {{0, 80, 10, 0}, {1, 80, 10, 0}}});
+            // At iteration 35, running out of space, only one scheduled (req 1, as it has more priority)
+            expectedStates.push_back(ExpectedState{35, 80, {1, 0}, {{1, 80, 10, 35, 10}}});
+            // At iteration 80, req 1 is done
+            expectedStates.push_back(ExpectedState{80, 126, {0}, {{0, 45, 45, 0}}});
+        }
+        else if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+        {
+            // It cannot fit both for all iterations, so it should pick req 1 with higher priority
+            expectedStates.push_back(ExpectedState{0, 80, {1, 0}, {{1, 80, 10, 0}}});
+            // At iteration 80, req 1 is done
+            expectedStates.push_back(ExpectedState{80, 160, {0}, {{0, 80, 10, 0}}});
+        }
+
+        // Callback to call at each iteration, to have option to add new active Requests
+        auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
+            addNewRequestsCb, maxInputLen);
+
         EXPECT_EQ(numIterations, expectedNumIters);
     }
 }
@@ -942,6 +1053,208 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilization)
             // At it 190, req 2 is done
             // Only req 3 is remaining, -> 35 tokens generated
             expectedStates.push_back(ExpectedState{190, 245, {3}, {{3, 55, 35, 0}}});
+        }
+
+        // Callback to call after scheduling requests
+        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests,
+            expectedStates, addNewRequestsCb, maxInputLen);
+
+        int expectedNumIters = (sinkTokenLen == 0) ? 227 : 245;
+        EXPECT_EQ(numIterations, expectedNumIters);
+    }
+}
+
+TEST_F(CapacitySchedulerTest, SimpleSurpassMaxNumRequestsWithPriorities)
+{
+    SizeType32 kvCacheMaxNumTokens = 100;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+
+    auto sinkTokenLen = 0;
+    auto kvCacheManager = getKvCacheManager(
+        maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
+    auto peftCacheManager = getPeftCacheManager();
+    std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+        maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kMAX_UTILIZATION);
+    uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+    auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+    int32_t maxNewTokens = 10;
+    int32_t promptLen = 10;
+
+    RequestList initActiveRequests;
+    insertRequestInOrder(initActiveRequests, createRequest(promptLen, maxNewTokens, 0));
+    insertRequestInOrder(initActiveRequests, createRequest(promptLen, maxNewTokens, 1));
+
+    // Callback to call at each iteration, to have option to add new active Requests
+    auto addNewRequestsCb = [this, promptLen, maxNewTokens](RequestList& activeRequests, int itCount)
+    {
+        if (itCount == 2)
+        {
+            insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 2, std::nullopt, 0.6));
+            insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 3, std::nullopt, 0.7));
+        }
+    };
+
+    std::vector<ExpectedState> expectedStates;
+    // Up to iteration 2, expect 2 requests
+    expectedStates.push_back(ExpectedState{0, 2, {0, 1}, {{0, 10, 10, 0}, {1, 10, 10, 0}}});
+
+    // At iteration 2, two more request get added. They have more priority than
+    // running requests, therefore they are added to activeRequests. The maxNumRequests is 2,
+    // so only the newly added requests should run.
+    expectedStates.push_back(ExpectedState{2, 12, {3, 2, 0, 1}, {{2, 10, 10, 0}, {3, 10, 10, 0}}});
+
+    // At iteration 12, reqs 2 and 3 have completed.
+    expectedStates.push_back(ExpectedState{12, 20, {0, 1}, {{0, 8, 12, 0}, {1, 8, 12, 0}}});
+
+    // Callback to call after scheduling requests
+    int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests, expectedStates,
+        addNewRequestsCb, maxInputLen);
+
+    EXPECT_EQ(numIterations, 20);
+}
+
+TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilizationPriorities)
+{
+    SizeType32 kvCacheMaxNumTokens = 100;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 4;
+    SizeType32 maxInputLen = 1000;
+
+    auto sinkTokenLens = std::vector<SizeType32>{0, 4};
+    for (auto sinkTokenLen : sinkTokenLens)
+    {
+        auto kvCacheManager = getKvCacheManager(
+            maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
+        auto peftCacheManager = getPeftCacheManager();
+        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kMAX_UTILIZATION);
+        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+        // Initially two requests that will not fit in kvCache for entire duration
+        int32_t maxNewTokens = 80;
+        int32_t promptLen = 10;
+
+        RequestList initActiveRequests;
+        insertRequestInOrder(initActiveRequests, createRequest(promptLen, maxNewTokens, 0));
+        insertRequestInOrder(initActiveRequests, createRequest(promptLen, maxNewTokens, 1));
+
+        // Callback to call at each iteration, to have option to add new active Requests
+        auto addNewRequestsCb = [this, promptLen, maxNewTokens](RequestList& activeRequests, int itCount)
+        {
+            if (itCount == 10)
+            {
+                insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 2, std::nullopt, 0.6));
+                insertRequestInOrder(activeRequests, createRequest(promptLen, maxNewTokens, 3, std::nullopt, 0.7));
+            }
+        };
+
+        std::vector<ExpectedState> expectedStates;
+        if (sinkTokenLen == 0)
+        {
+            // Up to iteration 10, kvCache is big enough, expect 2 requests
+            expectedStates.push_back(ExpectedState{0, 10, {0, 1}, {{0, 80, 10, 0}, {1, 80, 10, 0}}});
+
+            // At iteration 10, two more request get added, fits in KV cache
+            expectedStates.push_back(ExpectedState{
+                10, 21, {3, 2, 0, 1}, {{0, 80, 10, 10, 10}, {1, 80, 10, 10, 10}, {2, 80, 10, 0}, {3, 80, 10, 0}}});
+
+            // At iteration 21, running out of kv cache
+            // Req 0 and 1 used 31 tokens (62 tokens, 6 blocks)
+            // Req 2 and 3 used 21 tokens (42 tokens, 4 blocks)
+            // Each sequence needs 1 block -> Need to drop a sequence. The lowest priority one is req 1,
+            // which has priority 0.5 and arrived later than req 0. It liberates 3 blocks, enough to continue
+            // with the three ongoing reqs for another 10 tokens for 3 reqs.
+            expectedStates.push_back(
+                ExpectedState{21, 31, {3, 2, 0, 1}, {{0, 80, 10, 21, 10}, {2, 80, 10, 11, 10}, {3, 80, 10, 11, 10}}});
+
+            // At iteration 31, running out of Kv cache again
+            // Req 0 used 41 tokens (4 blocks)
+            // Req 2 and 3 used 31 tokens (62 tokens, 6 blocks)
+            // Freeing req 0, with priority 0.5, liberates 4 blocks, good for another 20 tokens for 2 reqs.
+            expectedStates.push_back(ExpectedState{31, 51, {3, 2, 0, 1}, {{2, 80, 10, 21, 10}, {3, 80, 10, 21, 10}}});
+
+            // At iteration 51, running out of Kv cache again
+            // Reqs 2 and 3 used 51 tokens (102 tokens, 10 blocks)
+            // Req 2 has priority 0.6 and req 3 has priority 0.7, so req 2 will be freed, liberating 5 blocks.
+            expectedStates.push_back(ExpectedState{51, 90, {3, 2, 0, 1}, {{3, 80, 10, 41, 10}}});
+
+            // At it 90, req 3 is done, 100 free kv tokens (10 blocks).
+            // req 2 has 51 tokens (needs 6 blocks)
+            // req 0 has 41 tokens (needs 5 blocks)
+            // req 1 has 31 tokens (needs 4 blocks)
+            // Therefore, only req 2 will be scheduled (req 1 will not be scheduled as it would jump the order).
+            expectedStates.push_back(ExpectedState{90, 129, {2, 0, 1}, {{2, 39, 51, 0}}});
+
+            // At it 129, req 2 is done
+            // req 0 has 41 tokens (needs 5 blocks)
+            // req 1 has 31 tokens (needs 4 blocks)
+            // Both req 0 and 1 are scheduled.
+            expectedStates.push_back(ExpectedState{129, 139, {0, 1}, {{0, 49, 41, 0}, {1, 59, 31, 0}}});
+
+            // At it 139
+            // req 0 has 51 tokens (needs 6 blocks)
+            // req 1 has 41 tokens (needs 5 blocks)
+            // Therefore we need to drop one, which is req 1 due to same priority / later arrival.
+            expectedStates.push_back(ExpectedState{139, 178, {0, 1}, {{0, 49, 41, 10, 41}}});
+
+            // At it 178, req 0 is done
+            // req 1 has 41 tokens and is scheduled at long last.
+            expectedStates.push_back(ExpectedState{178, 227, {1}, {{1, 49, 41, 0}}});
+        }
+        else if (sinkTokenLen == 4)
+        {
+            // Up to iteration 10, kvCache is big enough, expect 2 requests
+            expectedStates.push_back(ExpectedState{0, 10, {0, 1}, {{0, 80, 10, 0, 0}, {1, 80, 10, 0, 0}}});
+            // At iteration 10, two more request get added, fits in KV cache
+            expectedStates.push_back(ExpectedState{
+                10, 15, {3, 2, 0, 1}, {{0, 80, 10, 10, 10}, {1, 80, 10, 10, 10}, {2, 80, 10, 0}, {3, 80, 10, 0}}});
+
+            // At iteration 15, running out of kv cache
+            // Req 0 and 1 used 31 tokens (62 tokens), including 6 bubble tokens
+            // Req 2 and 3 used 21 tokens (42 tokens), including 6 bubble tokens
+            // Each sequence need 1 block -> Need to drop the lowest prio: req 1
+            expectedStates.push_back(
+                ExpectedState{15, 25, {3, 2, 0, 1}, {{0, 80, 10, 15, 10}, {2, 80, 10, 5, 10}, {3, 80, 10, 5, 10}}});
+
+            // At iteration 25, running out of Kv cache again
+            // Req 0 used 41 tokens, including 6 bubble tokens
+            // Req 2 and 3 used 31 tokens, including 6 bubble tokens
+            // Free req 0, which has the lowest priority.
+            expectedStates.push_back(ExpectedState{25, 45, {3, 2, 0, 1}, {{2, 80, 10, 15, 10}, {3, 80, 10, 15, 10}}});
+
+            // At it 45, running out of Kv cache again
+            // Req 2 and 3 used 51 tokens, including 6 bubble tokens
+            // Free req 2 (lowest priority)
+            expectedStates.push_back(ExpectedState{45, 90, {3, 2, 0, 1}, {{3, 80, 10, 35, 10}}});
+
+            // At it 90, req 3 finished, 100 tokens up for grabs
+            // req 2 used 51 tokens (including 6 bubble tokens, always assumed from now) (requires 6 blocks)
+            // req 0 used 41 tokens (requires 5 blocks)
+            // req 1 used 31 tokens (requires 4 blocks)
+            // Only req 2 can be scheduled now (higher priority).
+            expectedStates.push_back(ExpectedState{90, 135, {2, 0, 1}, {{2, 45, 45, 0}}});
+
+            // At it 135, req 2 is done
+            // req 0 used 41 tokens (requires 5 blocks)
+            // req 1 used 31 tokens (requires 4 blocks)
+            // Both can be scheduled for 10 tokens
+            expectedStates.push_back(ExpectedState{135, 145, {0, 1}, {{0, 55, 35, 0}, {1, 65, 25, 0}}});
+
+            // At it 139, run out of kv cache again
+            // req 0 used 51 tokens (requires 6 blocks)
+            // req 1 used 41 tokens (requires 5 blocks)
+            // Free req 1 (lowest priority)
+            expectedStates.push_back(ExpectedState{145, 190, {0, 1}, {{0, 55, 35, 10, 35}}});
+
+            // At it 200, req 0 is done
+            // Only req 1 is remaining -> 41 tokens generated
+            expectedStates.push_back(ExpectedState{190, 245, {1}, {{1, 55, 35, 0}}});
         }
 
         // Callback to call after scheduling requests

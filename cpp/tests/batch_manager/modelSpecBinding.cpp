@@ -73,5 +73,7 @@ PYBIND11_MODULE(model_spec, m)
         .def("get_context_logits_file", &ModelSpec::getContextLogitsFile)
         .def("get_cum_log_probs_file", &ModelSpec::getCumLogProbsFile)
         .def("get_log_probs_file", &ModelSpec::getLogProbsFile)
+        .def("enable_context_fmha_fp32_acc", &ModelSpec::enableContextFMHAFp32Acc)
+        .def("get_enable_context_fmha_fp32_acc", &ModelSpec::getEnableContextFMHAFp32Acc)
         .def("__copy__", [](ModelSpec const& self) { return ModelSpec(self); });
 };

@@ -25,6 +25,7 @@
 #include "tensorrt_llm/common/stlUtils.h"
 #include "tensorrt_llm/common/stringUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
+#include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/iTensor.h"
@@ -465,7 +466,7 @@ BatchManagerErrorCode_t GptManager::fetchNewRequests()
 
                 mTrtGptModel->updatePeftCache(r);
 
-                mActiveRequests.push_back(r);
+                tensorrt_llm::executor::insertRequestInOrder(mActiveRequests, r);
                 mActiveRequestsIds.insert(requestId);
             }
             catch (std::exception const& e)
@@ -535,12 +536,12 @@ BatchManagerErrorCode_t GptManager::returnBatchManagerStats()
     {
         auto ifbGptModel = std::dynamic_pointer_cast<TrtGptModelInflightBatching>(mTrtGptModel);
         auto lastIterationStatsIFB = ifbGptModel->getLastIterationStats();
-        statsJson["Scheduled Requests"] = lastIterationStatsIFB.numScheduledRequests;
+        statsJson["Scheduled Requests"] = lastIterationStatsIFB.scheduledRequests.size();
         statsJson["Context Requests"] = lastIterationStatsIFB.numCtxRequests;
         statsJson["Total Context Tokens"] = lastIterationStatsIFB.numCtxTokens;
         statsJson["Generation Requests"] = lastIterationStatsIFB.numGenRequests;
         statsJson["MicroBatch ID"] = lastIterationStatsIFB.microBatchId;
-        statsJson["Paused Requests"] = lastIterationStatsIFB.numPausedRequests;
+        statsJson["Paused Requests"] = lastIterationStatsIFB.pausedRequests.size();
         statsJson["Average Number of Decoded Tokens Per Iteration"] = lastIterationStatsIFB.avgNumDecodedTokensPerIter;
     }
     else if (modelType == TrtGptModelType::V1)

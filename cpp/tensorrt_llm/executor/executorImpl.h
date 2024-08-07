@@ -158,9 +158,10 @@ private:
         return (mLastReqId++ % UINT64_MAX);
     }
 
-    std::vector<RequestWithId> getNewReqWithIds(SizeType32 numActiveRequests);
+    std::vector<RequestWithId> getNewReqWithIds(
+        SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
-    RequestList fetchNewRequests(SizeType32 numActiveRequests);
+    RequestList fetchNewRequests(SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
     void forwardSync(RequestList& activeRequests);
 

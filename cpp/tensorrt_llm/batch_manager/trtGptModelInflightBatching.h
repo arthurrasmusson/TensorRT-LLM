@@ -19,7 +19,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-#include "tensorrt_llm/runtime/iGptDecoderBatch.h"
+#include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -30,7 +30,7 @@
 namespace tensorrt_llm::runtime
 {
 class TllmRuntime;
-class IGptDecoderBatch;
+class IGptDecoderBatched;
 class AllReduceBuffers;
 class NcclCommunicator;
 } // namespace tensorrt_llm::runtime
@@ -64,15 +64,19 @@ class TrtGptModelInflightBatching : public TrtGptModel
     using RnnStateManager = rnn_state_manager::RnnStateManager;
 
 public:
-    struct IterationStatsIFB
+    class IterationStatsIFB
     {
-        SizeType32 numScheduledRequests;
-        SizeType32 numCtxRequests;
-        SizeType32 numGenRequests;
-        SizeType32 numCtxTokens;
+    public:
+        explicit IterationStatsIFB(SizeType32 microBatchId)
+            : microBatchId{microBatchId}
+        {
+        }
+
         SizeType32 microBatchId;
-        SizeType32 numPausedRequests;
-        float avgNumDecodedTokensPerIter;
+        SizeType32 numCtxRequests{};
+        SizeType32 numGenRequests{};
+        SizeType32 numCtxTokens{};
+        float avgNumDecodedTokensPerIter{};
         ReqIdsSet scheduledRequests;
         ReqIdsSet pausedRequests;
     };
@@ -154,7 +158,8 @@ private:
 
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
-    void createBuffers(executor::DecodingConfig const& decodingConfig, bool multiBlockMode);
+    void createBuffers(executor::DecodingConfig const& decodingConfig,
+        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig);
     std::shared_ptr<KVCacheManager> createKvCacheManager(
         KvCacheConfig const& kvCacheConfig, KvCacheType kvCacheType = KvCacheType::kSELF);
     void createRnnStateManager();
@@ -170,6 +175,11 @@ private:
     void changeBeamWidth(SizeType32 beamWidth);
 
     void assignReqSeqSlots(ScheduledRequests const& scheduledRequests);
+
+    /// @details Should be called after setting up the current batch in executeBatch to get the correct number of
+    /// context tokens.
+    IterationStatsIFB fillIterationStats(
+        ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause);
 
     /// @brief Function that sets up the TensorRT execution context that is going to be used for execution. If multiple
     /// TensorRT optimization profiles are built in the engine, it selects the corresponding context that is going to be
@@ -256,11 +266,11 @@ private:
 
     std::shared_ptr<nvinfer1::ILogger> mLogger;
     std::shared_ptr<runtime::TllmRuntime> mRuntime;
-    std::shared_ptr<runtime::IGptDecoderBatch> mDecoder;
+    std::shared_ptr<runtime::IGptDecoderBatched> mDecoder;
 
     SizeType32 mMicroBatchId;
     bool mCtxGenFusion;
-    bool mMultiBlockMode;
+    executor::ExtendedRuntimePerfKnobConfig mExtendedRuntimePerfKnobConfig;
 
     std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
 
@@ -287,8 +297,6 @@ private:
 
     runtime::BufferManager mCopyBufferManager;
 
-    static IterationStatsIFB fillIterationStats(
-        ScheduledRequests const& scheduledRequests, SizeType32 microBatchId, RequestVector const& requestsToPause);
     IterationStatsIFB mLastIterationStatsIFB;
 
     std::vector<PeftTable> mPeftTables;

@@ -189,6 +189,17 @@ public:
         return *this;
     }
 
+    ModelSpec& enableContextFMHAFp32Acc()
+    {
+        mEnableContextFMHAFp32Acc = true;
+        return *this;
+    }
+
+    [[nodiscard]] bool getEnableContextFMHAFp32Acc() const
+    {
+        return mEnableContextFMHAFp32Acc;
+    }
+
     ModelSpec& setBatchSizes(std::vector<SizeType32> batchSizes)
     {
         mBatchSizes = std::move(batchSizes);
@@ -288,6 +299,7 @@ public:
     int mMaxInputLength{0};
     int mMaxOutputLength{0};
     bool mUseLoraPlugin{false};
+    bool mEnableContextFMHAFp32Acc{false};
 
     // Flags to store whether model spec wants collect these outputs, you could call getXXXFile() if you need the name.
     bool mCollectGenerationLogits{false};

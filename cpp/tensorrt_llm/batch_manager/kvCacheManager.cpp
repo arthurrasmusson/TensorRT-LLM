@@ -744,8 +744,7 @@ KVCacheManager::KVCacheManager(SizeType32 numLayers, SizeType32 numKvHeads, Size
     // The sink tokens are stored in blocks separate from other tokens.
     // If the last block of sink tokens is only partially filled,
     // we fill that block with a "bubble" to reach the number of tokens per block.
-    auto const sinkTokensInLastBlock = sinkTokenLength % tokensPerBlock;
-    mSinkBubbleLength = sinkTokensInLastBlock == 0 ? 0 : tokensPerBlock - sinkTokensInLastBlock;
+    mSinkBubbleLength = getSinkBubbleLength(sinkTokenLength, tokensPerBlock);
 
     mSinkBlockTokenLength = mSinkBubbleLength + sinkTokenLength;
     TLLM_CHECK(mSinkBlockTokenLength % tokensPerBlock == 0);
@@ -1202,6 +1201,31 @@ GenerationRequest const& KVCacheManager::getSequence(SizeType32 seqSlotIdx) cons
     auto reqPtr = mSequences.at(seqSlotIdx);
     TLLM_CHECK(reqPtr);
     return *reqPtr;
+}
+
+SizeType32 KVCacheManager::getSinkBubbleLength(SizeType32 sinkTokenLen, SizeType32 tokensPerBlock)
+{
+    auto const sinkTokensInLastBlock = sinkTokenLen % tokensPerBlock;
+    auto const sinkBubbleLength = sinkTokensInLastBlock == 0 ? 0 : tokensPerBlock - sinkTokensInLastBlock;
+    return sinkBubbleLength;
+}
+
+SizeType32 KVCacheManager::getMaxAttentionWindowUpperBound(SizeType32 blocksInPrimaryPool, SizeType32 tokensPerBlock,
+    SizeType32 maxBeamWidth, SizeType32 sinkTokenLen, bool useOneMoreBlock)
+{
+    // Inverse function of the capacity check in KVCacheManager::KVCacheManager
+    auto const tokenCapacity = blocksInPrimaryPool * tokensPerBlock;
+    auto const maxBlocksPerSeq = tokenCapacity / (maxBeamWidth * tokensPerBlock);
+    TLLM_CHECK_WITH_INFO(maxBlocksPerSeq > 0, "Impossibe to fit in any sequence in kvCache");
+    auto const maxTokenNum = maxBlocksPerSeq * tokensPerBlock;
+
+    auto maxAttentionWindowUpperBound = maxTokenNum - getSinkBubbleLength(sinkTokenLen, tokensPerBlock);
+    if (useOneMoreBlock)
+    {
+        maxAttentionWindowUpperBound -= tokensPerBlock;
+    }
+    TLLM_CHECK_WITH_INFO(maxAttentionWindowUpperBound > 0, "Impossibe to fit in any sequence in kvCache");
+    return maxAttentionWindowUpperBound;
 }
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

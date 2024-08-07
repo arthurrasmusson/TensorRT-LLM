@@ -20,12 +20,13 @@
 #include "tensorrt_llm/batch_manager/requestScheduler.h"
 #include "tensorrt_llm/batch_manager/rnnStateManager.h"
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/common.h"
-#include "tensorrt_llm/runtime/gptDecoderBatch.h"
+#include "tensorrt_llm/runtime/gptDecoderBatched.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/ipcUtils.h"
@@ -134,6 +135,92 @@ void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, BufferManager
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
+    kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_CHECK(kvCacheManagerPtr);
+    auto& kvCacheManager = *kvCacheManagerPtr;
+
+    for (auto const& llmReq : scheduledRequests.contextRequests)
+    {
+        if (llmReq->isFirstContextChunk())
+        {
+            // Get slot of the current sequence in the KV cache
+            auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const promptLen = llmReq->mPromptLen;
+            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+            auto const draftLength = llmReq->getNumDraftTokens();
+
+            // Allocate/Reuse KV cache
+            kvCacheManager.addSequence(seqSlot, promptLen, reqBeamWidth, llmReq);
+
+            // Allocate more KV cache for speculative decoding
+            if (draftLength > 0)
+            {
+                for (SizeType32 di = 0; di < draftLength; ++di)
+                {
+                    kvCacheManager.addToken(seqSlot);
+                }
+            }
+
+            if (crossKvCacheManagerPtr != nullptr)
+            {
+                crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderLen(), reqBeamWidth, llmReq);
+            }
+
+            auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
+            TLLM_CHECK(prepopulatedPromptLen < promptLen);
+
+            if (prepopulatedPromptLen > 0)
+            {
+                // Currently, the runtime process is to apply for cache first and then determine prepopulation.
+                // Use the prepopulated length to advance the context position and decrease chunk size if necessary.
+                if (llmReq->isFullContextRequest())
+                {
+                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
+                    llmReq->setContextChunkSize(promptLen);
+                }
+                else
+                {
+                    auto chunkSize = llmReq->getContextChunkSize();
+                    if (prepopulatedPromptLen + chunkSize < promptLen)
+                    {
+                        // make sure to end at block boundary after current chunk
+                        auto const flooredEndPosition = (prepopulatedPromptLen + chunkSize)
+                            / kvCacheManager.getTokensPerBlock() * kvCacheManager.getTokensPerBlock();
+                        chunkSize = flooredEndPosition - prepopulatedPromptLen;
+                        TLLM_CHECK(chunkSize <= llmReq->getContextChunkSize());
+                    }
+                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
+                    llmReq->setContextChunkSize(chunkSize);
+                }
+                if (!llmReq->isLastContextChunk())
+                {
+                    TLLM_CHECK_WITH_INFO((llmReq->getContextCurrentPosition() + llmReq->getContextChunkSize())
+                                % kvCacheManager.getTokensPerBlock()
+                            == 0,
+                        "To prevent cache fragmentation, the context position after current chunk should be divisible "
+                        "by the number of tokens per block, except for the last chunk.");
+                }
+            }
+        }
+    }
+
+    for (auto const& llmReq : scheduledRequests.generationRequests)
+    {
+        // Get slot of the current sequence in the KV cache
+        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto const draftLength = llmReq->getNumDraftTokens();
+
+        for (SizeType32 di = 0; di < draftLength + 1; ++di)
+        {
+            kvCacheManager.addToken(seqSlot);
+        }
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 } // namespace
 
 TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer1::ILogger> logger,
@@ -149,9 +236,10 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
           rawEngine, mLogger.get(), optionalParams.gpuWeightsPercent, modelConfig.useShapeInference())}
     , mMicroBatchId(0)
     , mCtxGenFusion(ctxGenFusion)
-    , mMultiBlockMode{optionalParams.multiBlockMode}
+    , mExtendedRuntimePerfKnobConfig{optionalParams.extendedRuntimePerfKnobConfig}
     , mOperatingBeamWidth{getMaxBeamWidth()}
     , mCopyBufferManager{std::make_shared<CudaStream>()}
+    , mLastIterationStatsIFB(-1)
     , mDecStepAsyncSndHdl(nullptr)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -185,6 +273,12 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
             "KV cache blocks need to be onboarded if context FMHA or XAQ kernels are used");
     }
 
+    if (mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
+    {
+        TLLM_CHECK_WITH_INFO(optionalParams.kvCacheConfig.enableBlockReuse,
+            "KV cache block reuse must be enabled for speculative decoding target model");
+    }
+
     if (mCtxGenFusion)
     {
         TLLM_CHECK_WITH_INFO(!mModelConfig.isRnnBased(), "RNN based model doesn't support context generation fusion.");
@@ -203,7 +297,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
     auto& memCounter = MemoryCounters::getInstance();
     auto const gpuUsage1 = memCounter.getGpu();
-    createBuffers(mDecodingConfig, mMultiBlockMode);
+    createBuffers(mDecodingConfig, mExtendedRuntimePerfKnobConfig);
     auto const gpuUsage2 = memCounter.getGpu();
     TLLM_LOG_INFO("[MemUsageChange] Allocated %s GPU memory for runtime buffers.",
         memCounter.bytesToString(gpuUsage2 - gpuUsage1).c_str());
@@ -299,13 +393,6 @@ TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
         mMpiWaitThread->join();
         mMpiWaitThread.reset(nullptr);
     }
-
-    if (mWorldConfig.isPipelineParallel())
-    {
-        // Ensure all communication has finished
-        auto& comm = COMM_SESSION;
-        comm.barrier();
-    }
 }
 
 void TrtGptModelInflightBatching::setupSpeculativeDecodingModule(executor::DecodingConfig const& decodingConfig)
@@ -372,6 +459,31 @@ std::shared_ptr<KVCacheManager> TrtGptModelInflightBatching::createKvCacheManage
     auto const localNbLayers = mModelConfig.getNbAttentionLayers(mWorldConfig.getPipelineParallelism());
     auto const nbKvHeads = mModelConfig.getNbKvHeads();
     auto const sizePerHead = mModelConfig.getSizePerHead();
+
+    // now we check if maxAttentionWindow is too large for at least one sequence to fit in kvCache
+    // this can happen if maxSeqLen is deduced from the model and is too large
+    // and user also either didn't provide maxAttentionWindow, which leads it to be equal to maxSeqLen
+    if (kvCacheType == KvCacheType::kSELF)
+    {
+        auto const maxAttentionWindowUpperBound = KVCacheManager::getMaxAttentionWindowUpperBound(
+            blocksInPrimaryPool, tokensPerBlock, getMaxBeamWidth(), getSinkTokenLen(), useOneMoreBlock);
+
+        if (maxAttentionWindowUpperBound < getMaxAttentionWindow())
+        {
+            TLLM_LOG_WARNING(
+                "maxAttentionWindow and maxSequenceLen are too large for at least one sequence to fit in kvCache. "
+                "they are reduced to %d",
+                maxAttentionWindowUpperBound);
+            setMaxAttentionWindow(maxAttentionWindowUpperBound);
+            setMaxSequenceLen(maxAttentionWindowUpperBound);
+            if (getMaxInputLen() > getMaxSequenceLen() - 1)
+            {
+                setMaxInputLen(getMaxSequenceLen() - 1);
+                TLLM_LOG_WARNING("maxInputLen is reduced to %d", getMaxInputLen());
+            }
+        }
+    }
+
     auto const maxKvCacheLength
         = kvCacheType == KvCacheType::kSELF ? getMaxAttentionWindow() : mModelConfig.getMaxEncoderLen();
     auto kvCacheManager = std::make_shared<KVCacheManager>(localNbLayers, nbKvHeads, sizePerHead, tokensPerBlock,
@@ -447,52 +559,36 @@ void TrtGptModelInflightBatching::terminateRequest(std::shared_ptr<LlmRequest> c
 }
 
 TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fillIterationStats(
-    ScheduledRequests const& scheduledRequests, SizeType32 const microBatchId, RequestVector const& requestsToPause)
+    ScheduledRequests const& scheduledRequests, RequestVector const& requestsToPause)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(fillIterationStats);
 
-    IterationStatsIFB iterationStatsIfb;
-    iterationStatsIfb.numScheduledRequests = scheduledRequests.size();
-    iterationStatsIfb.numCtxRequests = 0;
-    iterationStatsIfb.numGenRequests = 0;
-    iterationStatsIfb.numCtxTokens = 0;
-    iterationStatsIfb.microBatchId = microBatchId;
-    iterationStatsIfb.numPausedRequests = requestsToPause.size();
+    IterationStatsIFB iterationStatsIfb{mMicroBatchId};
+    iterationStatsIfb.numCtxRequests = scheduledRequests.contextRequests.size();
+    iterationStatsIfb.numGenRequests = scheduledRequests.generationRequests.size();
     iterationStatsIfb.avgNumDecodedTokensPerIter = 0;
 
-    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
+    auto const contextBufferId = mCtxGenFusion ? getFusedBufferId() : getContextBufferId();
+    auto const& buffers = mBuffers.at(contextBufferId);
+    iterationStatsIfb.numCtxTokens = buffers->getNumContextTokens();
+
+    for (auto const& llmReq : scheduledRequests.contextRequests)
     {
-        for (auto const& llmReq : requests)
-        {
-            if (llmReq->isContextInitState())
-            {
-                iterationStatsIfb.numCtxRequests += 1;
-                // TODO(nkorobov): correct based on the prepopulated KV cache len
-                if (llmReq->isFullContextRequest())
-                {
-                    iterationStatsIfb.numCtxTokens += llmReq->mPromptLen;
-                }
-                else
-                {
-                    iterationStatsIfb.numCtxTokens += llmReq->getContextChunkSize();
-                }
-            }
-            else if (llmReq->isGenerationInProgressState())
-            {
-                iterationStatsIfb.numGenRequests += 1;
-                iterationStatsIfb.avgNumDecodedTokensPerIter += llmReq->getAvgDecodedTokensPerIter();
-            }
-            iterationStatsIfb.scheduledRequests.insert(llmReq->mRequestId);
-        }
+        iterationStatsIfb.scheduledRequests.insert(llmReq->mRequestId);
     }
-    for (auto const& llmReq : requestsToPause)
+    for (auto const& llmReq : scheduledRequests.generationRequests)
     {
-        iterationStatsIfb.pausedRequests.insert(llmReq->mRequestId);
+        iterationStatsIfb.scheduledRequests.insert(llmReq->mRequestId);
+        iterationStatsIfb.avgNumDecodedTokensPerIter += llmReq->getAvgDecodedTokensPerIter();
     }
     if (iterationStatsIfb.numGenRequests > 0)
     {
         iterationStatsIfb.avgNumDecodedTokensPerIter /= iterationStatsIfb.numGenRequests;
+    }
+    for (auto const& llmReq : requestsToPause)
+    {
+        iterationStatsIfb.pausedRequests.insert(llmReq->mRequestId);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -605,6 +701,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
         std::tie(currRequests.contextRequests, currRequests.generationRequests, requestsToPause)
             = mRequestScheduler->scheduleRequests(activeRequests, mInflightReqIds);
 
+        assert(currRequests.size() <= static_cast<size_t>(getMaxBatchSize()));
+
         {
             NVTX3_SCOPED_RANGE(pauseRequestsFlaggedByScheduler);
             // Loop over requests flagged to be paused, and if not in flight pause it right away
@@ -623,11 +721,6 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                 }
             }
         }
-        assert(currRequests.size() <= static_cast<size_t>(getMaxBatchSize()));
-
-        // Assign callback stats
-        // TODO(rkobus): get stats from batch buffers instead of recalculation
-        mLastIterationStatsIFB = fillIterationStats(currRequests, mMicroBatchId, requestsToPause);
 
         if (!currRequests.empty())
         {
@@ -647,6 +740,10 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             assignReqSeqSlots(currRequests);
 
+            if (mKvCacheManager)
+            {
+                allocateKvCache(currRequests, mKvCacheManager.get(), mCrossKvCacheManager.get());
+            }
             mPeftTables.at(mMicroBatchId) = mPeftCacheManager->ensureBatch(currRequests, true);
             executeBatch(currRequests);
 
@@ -667,6 +764,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             sync_check_cuda_error();
 
             decoderWaitEvent = mWorldConfig.isLastPipelineParallelRank() ? decoderStepAsync(currRequests) : TokenPtr();
+
+            mLastIterationStatsIFB = fillIterationStats(currRequests, requestsToPause);
 
             for (auto const& requests : {currRequests.contextRequests, currRequests.generationRequests})
             {
@@ -693,6 +792,10 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                     }
                 }
             }
+        }
+        else
+        {
+            mLastIterationStatsIFB = IterationStatsIFB{mMicroBatchId};
         }
 
         if (mWorldConfig.isPipelineParallel() && mWorldConfig.isLastPipelineParallelRank())
@@ -927,18 +1030,18 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
     if (mWorldConfig.isLastPipelineParallelRank())
     {
         auto decoderType = mRuntime->getEngine().getTensorDataType("logits");
+
         auto const decodingMode
             = getDecodingMode(mModelConfig.getSpeculativeDecodingMode(), decodingModeOpt, mOperatingBeamWidth);
         if (decodingMode.isExplicitDraftTokens())
         {
             decoderType = mModelConfig.getDataType();
         }
-        mDecoder = std::make_shared<runtime::GptDecoderBatch>(mModelConfig.getVocabSize(),
+        mDecoder = std::make_shared<runtime::GptDecoderBatched>(mModelConfig.getVocabSize(),
             mModelConfig.getVocabSizePadded(mWorldConfig.getSize()), mRuntime->getStreamPtr(),
             mModelConfig.getSpeculativeDecodingMode(), decoderType);
         mDecoder->setup(decodingMode, getMaxNumSequences(), mOperatingBeamWidth, getMaxAttentionWindow(),
-            getSinkTokenLen(), getMaxSequenceLen(), mModelConfig.getMaxDecodingTokens(), true, decoderType,
-            mModelConfig);
+            getSinkTokenLen(), getMaxSequenceLen(), mModelConfig.getMaxDecodingTokens(), decoderType, mModelConfig);
 
         if (decodingMode.isExplicitDraftTokens())
         {
@@ -948,22 +1051,19 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& decodingConfig, bool multiBlockMode)
+void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& decodingConfig,
+    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
     auto allReduceCommPtrs = mAllReduceBuffers ? mAllReduceBuffers->mAllReduceCommPtrs : TensorPtr{};
 
-    SizeType32 multiBlockModeval = multiBlockMode ? 1 : 0;
-
-    // TODO(yibinl): add other perf knobs here
-
     mBuffers.clear();
     for (SizeType32 i = 0; i < mNumBuffers; ++i)
     {
         mBuffers.emplace_back(std::make_shared<RuntimeBuffers>(getMaxBatchSize(), mOperatingBeamWidth,
-            getMaxAttentionWindow(), getSinkTokenLen(), multiBlockModeval, allReduceCommPtrs, *mRuntime, mModelConfig,
-            mWorldConfig, decodingConfig, getMaxNumTokens()));
+            getMaxAttentionWindow(), getSinkTokenLen(), extendedRuntimePerfKnobConfig, allReduceCommPtrs, *mRuntime,
+            mModelConfig, mWorldConfig, decodingConfig, getMaxNumTokens()));
     }
 
     mDecodingInputs.resize(mNumMicroBatches);
@@ -1917,7 +2017,7 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
     TLLM_LOG_INFO("Changing operating beam width from %d to %d", mOperatingBeamWidth, beamWidth);
     mOperatingBeamWidth = beamWidth;
 
-    createBuffers(mDecodingConfig, mMultiBlockMode);
+    createBuffers(mDecodingConfig, mExtendedRuntimePerfKnobConfig);
     createDecoder(mDecodingConfig.getDecodingMode());
 
     if (mKvCacheManager)
@@ -1973,10 +2073,10 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
         stats.crossKvCacheStats = kvStats;
     }
     executor::InflightBatchingStats modelStats;
-    modelStats.numScheduledRequests = mLastIterationStatsIFB.numScheduledRequests;
+    modelStats.numScheduledRequests = mLastIterationStatsIFB.scheduledRequests.size();
     modelStats.numContextRequests = mLastIterationStatsIFB.numCtxRequests;
     modelStats.numGenRequests = mLastIterationStatsIFB.numGenRequests;
-    modelStats.numPausedRequests = mLastIterationStatsIFB.numPausedRequests;
+    modelStats.numPausedRequests = mLastIterationStatsIFB.pausedRequests.size();
     modelStats.avgNumDecodedTokensPerIter = mLastIterationStatsIFB.avgNumDecodedTokensPerIter;
     modelStats.numCtxTokens = mLastIterationStatsIFB.numCtxTokens;
     modelStats.microBatchId = mLastIterationStatsIFB.microBatchId;

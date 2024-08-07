@@ -34,7 +34,7 @@ public:
         std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
         std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
-        std::optional<IdType> clientId, bool returnAllGeneratedTokens)
+        std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -52,6 +52,7 @@ public:
         , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
         , mClientId(clientId)
         , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
+        , mPriority(priority)
     {
         validate();
     }
@@ -150,6 +151,11 @@ public:
         return mClientId;
     }
 
+    PriorityType getPriority() const
+    {
+        return mPriority;
+    }
+
     [[nodiscard]] bool getReturnAllGeneratedTokens() const
     {
         return mReturnAllGeneratedTokens;
@@ -225,6 +231,11 @@ public:
         mClientId = clientId;
     }
 
+    void setPriority(PriorityType priority)
+    {
+        mPriority = priority;
+    }
+
     void setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)
     {
         mReturnAllGeneratedTokens = returnAllGeneratedTokens;
@@ -267,6 +278,7 @@ private:
         lambda(mEncoderInputTokenIds);
         lambda(mClientId);
         lambda(mReturnAllGeneratedTokens);
+        lambda(mPriority);
     }
 
     VecTokens mInputTokenIds;
@@ -286,6 +298,7 @@ private:
     std::optional<VecTokens> mEncoderInputTokenIds;
     std::optional<IdType> mClientId;
     bool mReturnAllGeneratedTokens;
+    PriorityType mPriority;
 };
 
 } // namespace tensorrt_llm::executor

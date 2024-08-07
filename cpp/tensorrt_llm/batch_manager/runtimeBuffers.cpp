@@ -38,8 +38,9 @@ namespace tensorrt_llm::batch_manager
 {
 
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TensorPtr allReduceWorkspace, TllmRuntime const& runtime,
-    ModelConfig const& modelConfig, WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
+    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+    TensorPtr allReduceWorkspace, TllmRuntime const& runtime, ModelConfig const& modelConfig,
+    WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
     std::optional<SizeType32> maxNumTokens)
     : mAllReduceWorkspace{std::move(allReduceWorkspace)}
 {
@@ -48,8 +49,8 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         TLLM_CHECK(mAllReduceWorkspace);
     }
 
-    create(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, multiBlockModeVal, runtime, modelConfig,
-        worldConfig, decodingConfig);
+    create(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, extendedRuntimePerfKnobConfig, runtime,
+        modelConfig, worldConfig, decodingConfig);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
@@ -159,16 +160,17 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 }
 
 void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TllmRuntime const& runtime, ModelConfig const& modelConfig,
-    WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig)
+    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+    TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+    executor::DecodingConfig const& decodingConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
 
     if (modelConfig.isTransformerBased())
     {
-        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, multiBlockModeVal,
-            runtime, modelConfig, worldConfig);
+        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen,
+            extendedRuntimePerfKnobConfig, runtime, modelConfig, worldConfig);
     }
     if (modelConfig.isRnnBased())
     {
@@ -319,16 +321,22 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(runtimeBuffersSetBufferSizes);
 
+    // set context sizes
     numContextRequests = static_cast<SizeType32>(contextRequests.size());
-    numGenRequests = static_cast<SizeType32>(genRequests.size());
-
-    numLogits = numContextRequests;
+    auto numContextLogits = numContextRequests;
+    numContextTokens = 0;
     for (auto const& llmReq : contextRequests)
     {
-        auto const draftLength = llmReq->getNumDraftTokens();
-        numLogits += draftLength;
+        auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
+        numContextLogits += draftLength;
+
+        auto const contextChunkSize
+            = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+        numContextTokens += contextChunkSize + draftLength;
     }
 
+    // set generation sizes
+    numGenRequests = static_cast<SizeType32>(genRequests.size());
     numGenSequences = 0;
     numGenTokens = 0;
     for (auto const& llmReq : genRequests)
@@ -338,24 +346,8 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
         auto const draftLen = llmReq->getNumDraftTokens();
         numGenTokens += draftLen + reqBeamWidth;
     }
-    numLogits += numGenTokens;
 
-    numContextTokens = 0;
-    for (auto const& llmReq : contextRequests)
-    {
-        // TODO(rkobus): correct based on the prepopulated KV cache len
-        if (llmReq->isFullContextRequest())
-        {
-            numContextTokens += llmReq->mPromptLen;
-        }
-        else
-        {
-            // Using chunked context.
-            // This is currently not the correct amount, it will be corrected in setFromInputs
-            // TODO(rkobus): set it correctly in scheduler
-            numContextTokens += llmReq->getContextChunkSize();
-        }
-    }
+    numLogits = numContextLogits + numGenTokens;
 
     if (encoderBuffers)
     {
@@ -432,93 +424,40 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         for (auto const& llmReq : contextRequests)
         {
             TLLM_CHECK_WITH_INFO(llmReq->isContextInitState(), "The request should be in context phase.");
+            TLLM_CHECK_WITH_INFO(
+                llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
+
             SizeType32 constexpr requestType{0};
             hostRequestTypes[batchIdx] = requestType;
 
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-            // Get position of the current sequence in the KV cache
-            auto const seqSlot = llmReq->mSeqSlot.value();
             auto const promptLen = llmReq->mPromptLen;
             auto const& reqTokens = llmReq->getTokens(0);
             auto const& draftTokens = llmReq->getDraftTokens();
             auto const draftLength = llmReq->getNumDraftTokens();
 
-            SizeType32 prepopulatedPromptLen = 0;
-            if (transformerBuffers)
-            {
-                auto& kvCacheManager = *kvCacheManagerPtr;
-                if (llmReq->isFirstContextChunk())
-                {
-                    if (draftLength > 0)
-                    {
-                        TLLM_CHECK_WITH_INFO(kvCacheManager.isEnableBlockReuse(),
-                            "KV cache block reuse must be enabled for speculative decoding target model");
-                        // When target model is queried in speculative decoding, the last input token is not saved in KV
-                        // cache. In speculative decoding we have to predict logits for K draft tokens + for the last
-                        // token from prompt
-                        kvCacheManager.addSequence(seqSlot, promptLen - 1, reqBeamWidth, llmReq);
-                        // Add the last token from prompt for speculative decoding
-                        kvCacheManager.addToken(seqSlot);
-                        // Add draft tokens
-                        for (SizeType32 di = 0; di < draftLength; ++di)
-                        {
-                            kvCacheManager.addToken(seqSlot);
-                        }
-                    }
-                    else
-                    {
-                        kvCacheManager.addSequence(seqSlot, llmReq->mPromptLen, reqBeamWidth, llmReq);
-                    }
-
-                    if (crossKvCacheManagerPtr)
-                    {
-                        crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderLen(), reqBeamWidth, llmReq);
-                    }
-                }
-
-                prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
-                TLLM_CHECK(prepopulatedPromptLen < promptLen);
-
-                if (!llmReq->isFullContextRequest())
-                {
-                    if (llmReq->isFirstContextChunk() && (prepopulatedPromptLen != 0))
-                    {
-                        // Currently, the runtime process is to apply for cache first and then determine prepopulation.
-                        // To avoid causing the input size to be 0, the chunk size is reset here.
-                        llmReq->setContextChunkSize((prepopulatedPromptLen / kvCacheManager.getTokensPerBlock() + 1)
-                            * kvCacheManager.getTokensPerBlock());
-                    }
-                    if (!llmReq->isLastContextChunk())
-                    {
-                        TLLM_CHECK_WITH_INFO(llmReq->getContextChunkSize() % kvCacheManager.getTokensPerBlock() == 0,
-                            "To prevent cache fragmentation, the context chunk size should be divisible by the number "
-                            "of "
-                            "tokens per block, except for the last chunk.");
-                    }
-                }
-            }
-
             decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
-            decoderInputLengthsHostPtr[batchIdx] = llmReq->mPromptLen;
+            decoderInputLengthsHostPtr[batchIdx] = promptLen;
 
-            prepopulatedPromptLen = std::max(0, prepopulatedPromptLen - llmReq->getContextCurrentPosition());
-            auto inputLength = (llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize())
-                - prepopulatedPromptLen;
-            auto const beginCompute = llmReq->getContextCurrentPosition() + prepopulatedPromptLen;
-            auto const endCompute = beginCompute + inputLength;
+            auto const contextChunkSize
+                = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+            auto const beginCompute = llmReq->getContextCurrentPosition();
+            auto const endCompute = beginCompute + contextChunkSize;
             inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute, reqTokens.begin() + endCompute);
 
-            logitsIdsHostPtr[totalNumLogits++] = inputLength;
-            numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? inputLength : 1;
+            logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
+            numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
 
-            if (llmReq->isFullContextRequest() || llmReq->isLastContextChunk())
+            if (llmReq->isLastContextChunk())
             {
                 inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                inputLength += draftLength;
                 std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
                 totalNumLogits += draftLength;
                 decoderInputHost.insert(decoderInputHost.end(), draftTokens->begin(), draftTokens->end());
             }
+            auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
+            contextLengthsHostPtr[batchIdx] = inputLength;
+            auto const sequenceLen = inputLength + llmReq->getContextCurrentPosition();
+            sequenceLengthsHostPtr[batchIdx] = sequenceLen;
 
             if (pastKeyValueLengthsPtr)
             {
@@ -567,24 +506,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                     std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
             }
             totalInputSize += inputLength;
-
-            auto contextQLength = llmReq->mPromptLen + draftLength;
-            auto sequenceLen = contextQLength + llmReq->getMaxNumGeneratedTokens();
-
-            if (!llmReq->isFullContextRequest())
-            {
-                contextQLength = llmReq->getContextChunkSize();
-                if (llmReq->isLastContextChunk() && modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
-                {
-                    contextQLength += draftLength;
-                }
-                sequenceLen = contextQLength + llmReq->getContextCurrentPosition();
-            }
-
-            contextQLength = std::max(0, contextQLength - prepopulatedPromptLen);
-            contextLengthsHostPtr[batchIdx] = contextQLength;
-            sequenceLengthsHostPtr[batchIdx] = sequenceLen;
-
             ++batchIdx;
         }
 
@@ -627,9 +548,10 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
             for (int beam = 0; beam < reqBeamWidth; ++beam)
             {
-                auto const& tokens = llmReq->getTokens(beam);
-                inputHost.push_back(tokens.back());
-                decoderInputHost.push_back(tokens.back());
+                auto lastToken = llmReq->getLastTokens(beam);
+                auto numTokens = llmReq->getNumTokens(beam);
+                inputHost.push_back(lastToken);
+                decoderInputHost.push_back(lastToken);
 
                 // If model updates generation position ids do not append them here.
                 if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
@@ -647,7 +569,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                     else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
                     {
                         // positionIds is just the size of tokens -1
-                        positionIdsHost.push_back(static_cast<SizeType32>(tokens.size()) - 1);
+                        positionIdsHost.push_back(numTokens - 1);
                     }
                 }
 
@@ -671,14 +593,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
             totalNumLogits += numLogits;
 
-            if (transformerBuffers)
-            {
-                auto& kvCacheManager = *kvCacheManagerPtr;
-                for (SizeType32 di = 0; di < draftLength + 1; ++di)
-                {
-                    kvCacheManager.addToken(seqSlot);
-                }
-            }
             if (rnnStateBuffers)
             {
                 auto& rnnStateManager = *rnnStateManagerPtr;

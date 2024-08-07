@@ -215,11 +215,12 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto encoderInputTokenIds = su::deserialize<std::optional<VecTokens>>(is);
     auto clientId = su::deserialize<std::optional<IdType>>(is);
     auto returnAllGeneratedTokens = su::deserialize<bool>(is);
+    auto priority = su::deserialize<executor::PriorityType>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(badWords), std::move(stopWords), std::move(embeddingBias), std::move(externalDraftTokensConfig),
         std::move(pTuningConfig), std::move(loraConfig), std::move(logitsPostProcessorName),
-        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens);
+        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -492,12 +493,13 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGpuWeightsPercent), ExecutorConfig>>(is);
     auto maxQueueSize
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxQueueSize), ExecutorConfig>>(is);
-    auto multiBlockMode
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMultiBlockMode), ExecutorConfig>>(is);
+    auto extendedRuntimePerfKnobConfig = su::deserialize<
+        std::invoke_result_t<decltype(&ExecutorConfig::getExtendedRuntimePerfKnobConfig), ExecutorConfig>>(is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
-        peftCacheConfig, std::nullopt, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, multiBlockMode};
+        peftCacheConfig, std::nullopt, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize,
+        extendedRuntimePerfKnobConfig};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -522,7 +524,7 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getDecodingConfig());
     totalSize += su::serializedSize(executorConfig.getGpuWeightsPercent());
     totalSize += su::serializedSize(executorConfig.getMaxQueueSize());
-    totalSize += su::serializedSize(executorConfig.getMultiBlockMode());
+    totalSize += su::serializedSize(executorConfig.getExtendedRuntimePerfKnobConfig());
 
     return totalSize;
 }
@@ -547,7 +549,7 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getDecodingConfig(), os);
     su::serialize(executorConfig.getGpuWeightsPercent(), os);
     su::serialize(executorConfig.getMaxQueueSize(), os);
-    su::serialize(executorConfig.getMultiBlockMode(), os);
+    su::serialize(executorConfig.getExtendedRuntimePerfKnobConfig(), os);
 }
 
 // KvCacheConfig
@@ -609,6 +611,28 @@ size_t Serialization::serializedSize(SchedulerConfig const& schedulerConfig)
     size_t totalSize = 0;
     totalSize += su::serializedSize(schedulerConfig.getCapacitySchedulerPolicy());
     totalSize += su::serializedSize(schedulerConfig.getContextChunkingPolicy());
+    return totalSize;
+}
+
+// ExtendedRuntimePerfKnobConfig
+ExtendedRuntimePerfKnobConfig Serialization::deserializeExtendedRuntimePerfKnobConfig(std::istream& is)
+{
+    auto multiBlockMode = su::deserialize<bool>(is);
+    auto enableContextFMHAFP32Acc = su::deserialize<bool>(is);
+    return ExtendedRuntimePerfKnobConfig{multiBlockMode, enableContextFMHAFP32Acc};
+}
+
+void Serialization::serialize(ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::ostream& os)
+{
+    su::serialize(extendedRuntimePerfKnobConfig.getMultiBlockMode(), os);
+    su::serialize(extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc(), os);
+}
+
+size_t Serialization::serializedSize(ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getMultiBlockMode());
+    totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc());
     return totalSize;
 }
 

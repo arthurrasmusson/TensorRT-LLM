@@ -322,6 +322,53 @@ TEST_F(LlmRequestTest, testAllocateLogitsBuffer)
     EXPECT_EQ(targetModelAcceptedTokenLogitShape.d[2], vocabSizePadded);
 }
 
+TEST_F(LlmRequestTest, testLastTokensSetIndependence)
+{
+    tb::LlmRequest::RequestIdType requestId{77};
+    SizeType32 maxNewTokens(66);
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
+    SizeType32 beamWidth = 3;
+    bool streaming = false;
+    tb::LlmRequest::BeamTokens expectedInitialOutput
+        = {{1, 2, 3, 4, 5, 10, 20}, {1, 2, 3, 4, 5, 11, 21}, {1, 2, 3, 4, 5, 12, 22}};
+    tb::LlmRequest::BeamTokens expectedOverwrittenOutput
+        = {{1, 2, 3, 4, 5, 100, 200}, {1, 2, 3, 4, 5, 101, 201}, {1, 2, 3, 4, 5, 102, 202}};
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(beamWidth), streaming);
+
+    // check individually set tokens
+    llmReq.addNewToken(10, 0);
+    llmReq.addNewToken(11, 1);
+    llmReq.addNewToken(12, 2);
+    auto lastTokens = llmReq.getLastTokens();
+    EXPECT_EQ(lastTokens.size(), beamWidth);
+    EXPECT_THAT(lastTokens, testing::ElementsAreArray({10, 11, 12}));
+
+    // check tokens set all-at-once
+    VecTokens expectedLastTokens = VecTokens({20, 21, 22});
+    llmReq.addNewTokens(expectedLastTokens);
+    for (SizeType32 beam = 0; beam < beamWidth; beam++)
+    {
+        EXPECT_EQ(llmReq.getLastTokens(beam), expectedLastTokens[beam]);
+    }
+
+    // check mTokens when written by addNewToken
+    for (SizeType32 beam = 0; beam < beamWidth; beam++)
+    {
+        EXPECT_THAT(llmReq.getTokens(beam), testing::ElementsAreArray(expectedInitialOutput[beam]));
+    }
+
+    // check that setGeneratedTokens sets mTokens, but doesn't change lastTokens
+    tb::LlmRequest::BeamTokens overwriteTokens = {{100, 200}, {101, 201}, {102, 202}};
+    llmReq.setGeneratedTokens(overwriteTokens);
+
+    for (SizeType32 beam = 0; beam < beamWidth; beam++)
+    {
+        EXPECT_THAT(llmReq.getTokens(beam), testing::ElementsAreArray(expectedOverwrittenOutput[beam]));
+    }
+
+    EXPECT_THAT(llmReq.getLastTokens(), testing::ElementsAreArray({20, 21, 22}));
+}
+
 using ParamType = std::tuple<bool, bool, bool, SizeType32, SizeType32>;
 
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)

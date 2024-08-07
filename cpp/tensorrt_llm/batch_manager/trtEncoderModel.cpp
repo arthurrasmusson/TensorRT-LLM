@@ -80,6 +80,9 @@ TrtEncoderModel::TrtEncoderModel(runtime::ModelConfig const& modelConfig, WorldC
 
     mHiddenSize = modelConfig.getHiddenSize();
 
+    mMaxInputLen = mModelConfig.getMaxInputLen();
+    TLLM_LOG_INFO("TRTEncoderModel mMaxInputLen: reset to %d from build config.", mMaxInputLen);
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

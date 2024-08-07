@@ -14,7 +14,7 @@
 
 #include "requestScheduler.h"
 #include "tensorrt_llm/common/mpiUtils.h"
-#include "tensorrt_llm/runtime/iGptDecoderBatch.h"
+#include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
 #include "trtGptModel.h"
 
@@ -68,6 +68,11 @@ public:
     [[nodiscard]] SizeType32 getHiddenSize() const override
     {
         return mHiddenSize;
+    }
+
+    [[nodiscard]] SizeType32 getMaxInputLen() const override
+    {
+        return mMaxInputLen;
     }
 
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override
@@ -153,7 +158,8 @@ private:
 
     std::shared_ptr<batch_scheduler::RequestScheduler> mRequestScheduler;
 
-    SizeType32 mHiddenSize; // already divided by Tensor Parallelism
+    SizeType32 mHiddenSize;  // already divided by Tensor Parallelism
+    SizeType32 mMaxInputLen; // WAR for max_input_len == max_seq_len at all circumstances
 
     runtime::BufferManager mCopyBufferManager;
 };

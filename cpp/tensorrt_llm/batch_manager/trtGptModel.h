@@ -114,6 +114,10 @@ public:
             mMaxInputLen = mMaxSequenceLen - 1;
             TLLM_LOG_INFO(
                 "TRTGptModel maxInputLen: %d  = maxSequenceLen - 1 since chunked context is enabled", mMaxInputLen);
+            TLLM_LOG_INFO(
+                "TRTGptModel If model type is encoder, maxInputLen would be reset in trtEncoderModel to maxInputLen: "
+                "%d = maxSequenceLen.",
+                mMaxSequenceLen);
         }
         else if (modelConfig.getContextFMHA() && modelConfig.usePackedInput())
         {
@@ -124,6 +128,9 @@ public:
                 "TRTGptModel maxInputLen: %d = min(maxSequenceLen - 1, maxNumTokens) since context FMHA "
                 "and usePackedInput are enabled",
                 mMaxInputLen);
+            TLLM_LOG_INFO(
+                "TRTGptModel If model type is encoder, maxInputLen would be reset in trtEncoderModel to maxInputLen: "
+                "min(maxSequenceLen, maxNumTokens).");
         }
         else
         {
@@ -210,6 +217,21 @@ protected:
     [[nodiscard]] bool isTtrOverlap() const
     {
         return mEnableTrtOverlap;
+    }
+
+    void setMaxAttentionWindow(SizeType32 maxAttentionWindow)
+    {
+        mMaxAttentionWindow = maxAttentionWindow;
+    }
+
+    void setMaxSequenceLen(SizeType32 maxSequenceLen)
+    {
+        mMaxSequenceLen = maxSequenceLen;
+    }
+
+    void setMaxInputLen(SizeType32 maxInputLen)
+    {
+        mMaxInputLen = maxInputLen;
     }
 
     [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::KVCacheManager> getKVCacheManager() = 0;

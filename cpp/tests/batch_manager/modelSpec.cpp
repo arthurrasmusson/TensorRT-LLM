@@ -211,6 +211,11 @@ std::string ModelSpec::getResultsFileInternal(OutputContentType outputContentTyp
 
     ret.emplace_back("pp" + std::to_string(mPPSize));
 
+    if (mEnableContextFMHAFp32Acc)
+    {
+        ret.emplace_back("fmhafp32acc");
+    }
+
     switch (outputContentType)
     {
     case OutputContentType::kNONE:

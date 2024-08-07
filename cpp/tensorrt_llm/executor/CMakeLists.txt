@@ -28,12 +28,14 @@ set(SRCS
     request.cpp
     requestWithId.cpp
     response.cpp
+    extendedRuntimePerfKnobConfig.cpp
     samplingConfig.cpp
     serialization.cpp
     decodingConfig.cpp
     schedulerConfig.cpp
     types.cpp
-    tensor.cpp)
+    tensor.cpp
+    requestUtils.cpp)
 
 if(NOT WIN32)
   # additional warnings

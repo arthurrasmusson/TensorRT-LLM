@@ -55,15 +55,22 @@ public:
     using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
     using PeftTable = LoraBuffers::PeftTable;
 
-private:
-    // sizes
-    SizeType32 numContextRequests{};
-    SizeType32 numGenRequests{};
-    SizeType32 numGenSequences{};
-    SizeType32 numContextTokens{};
-    SizeType32 numGenTokens{};
-    SizeType32 numLogits{};
+    [[nodiscard]] SizeType32 constexpr getContextIndex() const noexcept
+    {
+        return contextIndex;
+    };
 
+    void constexpr setContextIndex(SizeType32 index) noexcept
+    {
+        contextIndex = index;
+    };
+
+    [[nodiscard]] SizeType32 constexpr getNumContextTokens() const noexcept
+    {
+        return numContextTokens;
+    };
+
+private:
     [[nodiscard]] SizeType32 constexpr getNumRequests() const noexcept
     {
         return numContextRequests + numGenRequests;
@@ -74,6 +81,14 @@ private:
         return numContextRequests + numGenSequences;
     };
 
+    // sizes
+    SizeType32 numContextRequests{};
+    SizeType32 numGenRequests{};
+    SizeType32 numGenSequences{};
+    SizeType32 numContextTokens{};
+    SizeType32 numGenTokens{};
+    SizeType32 numLogits{};
+
     // general
     TensorPtr inputsIds;
 
@@ -81,20 +96,11 @@ private:
     TensorPtr contextLengthsDevice;
     TensorPtr sequenceLengthsHost;
 
+    /// @brief Index of selected runtime context.
     SizeType32 contextIndex{};
 
 public:
     TensorPtr sequenceLengthsDevice;
-
-    [[nodiscard]] SizeType32 constexpr getContextIndex() const noexcept
-    {
-        return contextIndex;
-    };
-
-    void constexpr setContextIndex(SizeType32 index) noexcept
-    {
-        contextIndex = index;
-    };
 
 private:
     // runtime
@@ -180,8 +186,8 @@ private:
 
 public:
     RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, TensorPtr allReduceWorkspace,
-        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+        SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+        TensorPtr allReduceWorkspace, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
         std::optional<SizeType32> maxNumTokens = std::nullopt);
 
@@ -202,9 +208,9 @@ public:
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, SizeType32 multiBlockModeVal, runtime::TllmRuntime const& runtime,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
-        executor::DecodingConfig const& decodingConfig);
+        SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+        runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig);
 
     void reshape(runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);

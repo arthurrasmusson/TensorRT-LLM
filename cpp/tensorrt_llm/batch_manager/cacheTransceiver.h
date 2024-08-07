@@ -46,10 +46,8 @@ public:
 
     [[nodiscard]] bool operator==(CacheConfig const& other) const noexcept
     {
-        bool res = (mModelConfig == other.mModelConfig);
-        res = res && (mParallelConfig == other.mParallelConfig);
-        res = res && (mDataType == other.mDataType);
-        return res;
+        return mModelConfig == other.mModelConfig && mParallelConfig == other.mParallelConfig
+            && mDataType == other.mDataType;
     }
 
 private:
@@ -60,9 +58,7 @@ private:
 
         [[nodiscard]] bool operator==(ParallelConfig const& other) const noexcept
         {
-            bool res = (mTensorParallelism == other.mTensorParallelism);
-            res = res && (mPipelineParallelism == other.mPipelineParallelism);
-            return res;
+            return mTensorParallelism == other.mTensorParallelism && mPipelineParallelism == other.mPipelineParallelism;
         }
     };
 
@@ -75,11 +71,8 @@ private:
 
         [[nodiscard]] bool operator==(ModelConfig const& other) const noexcept
         {
-            bool res = (mNbAttentionLayers == other.mNbAttentionLayers);
-            res = res && (mNbKvHeads == other.mNbKvHeads);
-            res = res && (mSizePerHead == other.mSizePerHead);
-            res = res && (mTokensPerBlock == other.mTokensPerBlock);
-            return res;
+            return mNbAttentionLayers == other.mNbAttentionLayers && mNbKvHeads == other.mNbKvHeads
+                && mSizePerHead == other.mSizePerHead && mTokensPerBlock == other.mTokensPerBlock;
         }
     };
 

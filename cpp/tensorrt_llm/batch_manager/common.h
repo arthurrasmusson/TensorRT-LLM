@@ -19,9 +19,15 @@
 #include <utility>
 #include <vector>
 
+namespace tensorrt_llm::executor
+{
+class RequestWithId;
+}
+
 namespace tensorrt_llm::batch_manager
 {
 class LlmRequest;
+
 using RequestList = std::list<std::shared_ptr<LlmRequest>>;
 
 using RequestIdType = std::uint64_t;

@@ -119,6 +119,16 @@ auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE
     = getDefaultModelSpec().useTensorParallelism(2).usePipelineParallelism(2).getResultsFile();
 auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE
     = getDefaultModelSpec().usePipelineParallelism(4).getResultsFile();
+auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE
+    = getDefaultModelSpec().usePipelineParallelism(2).getResultsFile();
+
+// GptExecutorTest.GenerationLogitsEarlyStop requires to use context_fmha_fp32_acc flag in runtime for better accuracy
+auto const FP16_PLUGIN_PACKED_PAGED_GATHER_CONTEXTFMHAFP32ACC_RESULT_FILE
+    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getResultsFile();
+auto const FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_GENERATION_LOGITS_FILE
+    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getGenerationLogitsFile();
+auto const FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_CONTEXT_LOGITS_FILE
+    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getContextLogitsFile();
 
 auto const LORA_DATA_PATH = DATA_PATH / "lora-test-weights-gpt2-tp1";
 auto const LORA_WEIGHTS_FILE = LORA_DATA_PATH / "source.npy";
@@ -428,8 +438,12 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
     auto constexpr streaming = false;
 
+    ExtendedRuntimePerfKnobConfig perfKnobConfig = ExtendedRuntimePerfKnobConfig();
+    perfKnobConfig.setEnableContextFMHAFP32Acc(true); // use fmha fp32 acc for better accuracy
+
     // Create executor config
     auto executorConfig = ExecutorConfig(beamWidth);
+    executorConfig.setExtendedRuntimePerfKnobConfig(perfKnobConfig);
 
     // Create executor
     auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
@@ -450,9 +464,9 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     BeamResult beamResult{beamWidth};
     auto const resultsPath
         = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-    beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-    beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-    beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+    beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CONTEXTFMHAFP32ACC_RESULT_FILE;
+    beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_CONTEXT_LOGITS_FILE;
+    beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_GENERATION_LOGITS_FILE;
 
     // Set return generation logits for this request
     OutputConfig outConfig;
@@ -1800,7 +1814,9 @@ void runTest(fs::path const& modelPath, ExecutorConfig const& executorConfig, fs
         isSpeculativeDecoding, maxWaitMs);
 }
 
-ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBeamWidth, bool useOrchestratorMode)
+ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBeamWidth, bool useOrchestratorMode,
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt,
+    std::optional<std::vector<SizeType32>> participantIds = std::nullopt)
 {
     // Note: we reduce memory fraction for cases that return context/generation logits which require more free
     // memory
@@ -1817,8 +1833,8 @@ ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBea
         orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
     }
     auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
-        useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt, std::nullopt,
-        orchestratorConfig);
+        useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::move(deviceIds),
+        std::move(participantIds), orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
 
     return executorConfig;
@@ -1838,8 +1854,7 @@ TEST_P(AllParamsTest, TokenComparison)
     outConfig.returnGenerationLogits = std::get<6>(GetParam());
     auto const modelName = std::get<7>(GetParam());
     auto const useOrchestratorMode = std::get<8>(GetParam());
-
-    auto const executorConfig = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode);
+    std::optional<std::vector<SizeType32>> participantIds = std::nullopt;
 
     BeamResult beamResult{beamWidth};
 
@@ -1881,7 +1896,8 @@ TEST_P(AllParamsTest, TokenComparison)
             }
         }
     }
-    else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2")
+    else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
+        || modelName == "llama_tp1_pp2")
     {
         auto const resultsPath
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
@@ -1894,6 +1910,11 @@ TEST_P(AllParamsTest, TokenComparison)
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
             modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+        }
+        else if (modelName == "llama_tp1_pp2")
+        {
+            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-gpu";
         }
         else if (modelName == "llama_tp2_pp2")
         {
@@ -1986,7 +2007,8 @@ TEST_P(AllParamsTest, TokenComparison)
 
     // Warning: This should be the last check before running the test.
     // It will initialize MPI which can take significant time.
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2")
+    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
+        || modelName == "llama_tp1_pp2")
     {
         // For llama model, only run for multiple GPUs
         // This is detected by setting an env variable when running the test
@@ -2016,9 +2038,30 @@ TEST_P(AllParamsTest, TokenComparison)
         }
     }
 
+    if (modelName == "llama_tp1_pp2")
+    {
+        auto const& session = tensorrt_llm::mpi::MpiComm::world();
+        if (session.getSize() != 4)
+        {
+            FAIL() << "Llama-tp1-pp2 is intended solely for testing coexisting engines within the same MPI world,"
+                      " which requires a session size of 4. However, the current session size is "
+                   << session.getSize() << " .";
+        }
+        if (session.getRank() / 2 == 0)
+        {
+            participantIds = std::vector<SizeType32>{0, 1};
+        }
+        else
+        {
+            participantIds = std::vector<SizeType32>{2, 3};
+        }
+    }
+
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
-    runTest(modelPath, executorConfig, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
-        outConfig, isSpeculativeDecoding, mMaxWaitMs);
+    auto executorConfig
+        = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode, std::nullopt, std::move(participantIds));
+    runTest(modelPath, std::move(executorConfig), inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded,
+        beamResult, outConfig, isSpeculativeDecoding, mMaxWaitMs);
 }
 
 TEST_F(GptExecutorTest, ChangeBwError)
@@ -3762,6 +3805,12 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, AllParamsTest,
         testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
         testing::Values(false, true), testing::Values("llama_tp1_pp4", "llama_tp4_pp1", "llama_tp2_pp2"),
         testing::Values(false, true)),
+    generateTestNameAllParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaMultiExecutorTest, AllParamsTest,
+    testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false, true), testing::Values(1, 2),
+        testing::Values(false), testing::Values(false, true), testing::Values(false), testing::Values(false),
+        testing::Values("llama_tp1_pp2"), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(MedusaExecutorTest, AllParamsTest,
