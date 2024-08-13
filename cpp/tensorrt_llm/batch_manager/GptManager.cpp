@@ -170,6 +170,9 @@ GptManager::GptManager(std::filesystem::path const& trtEnginePath, TrtGptModelTy
     , mExcludeInputInOutput(excludeInputInOutput)
     , shutdown_requested_{false}
 {
+    TLLM_LOG_WARNING(
+        "GptManager is deprecated and will be removed in a future release."
+        " Please use the executor API instead (cpp/include/tensorrt_llm/executor).");
 
     isCallbackEmptyThrowWithErrorMessage(mGetInferenceRequestsCb, "GptManager ctor: getInferenceRequestsCb is empty.");
     isCallbackEmptyThrowWithErrorMessage(mSendResponseCb, "GptManager ctor: sendResponseCb is empty.");
@@ -875,7 +878,15 @@ namespace kv_cache_manager
 std::ostream& operator<<(std::ostream& os, KvCacheConfig const& config)
 {
     os << "  maxTokens: " << config.maxTokens.value_or(0) << "\n";
-    os << "  maxAttentionWindow: " << config.maxAttentionWindow.value_or(0) << "\n";
+    os << "  maxAttentionWindow: ";
+    if (config.maxAttentionWindowVec.has_value())
+    {
+        os << tc::vec2str(config.maxAttentionWindowVec.value()) << "\n";
+    }
+    else
+    {
+        os << "0\n";
+    }
     os << "  sinkTokenLength: " << config.sinkTokenLength.value_or(0) << "\n";
     os << "  freeGpuMemoryFraction: " << config.freeGpuMemoryFraction.value_or(0) << "\n";
     os << "  enableBlockReuse: " << config.enableBlockReuse << "\n";

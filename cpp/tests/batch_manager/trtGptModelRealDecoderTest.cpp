@@ -162,7 +162,16 @@ void verifyOutput(RequestList const& finishedRequestList,
                 // For the cases when BS < 8, some predicted tokens are mismatched to reference data.
                 numPredTokens /= 2;
             }
-            EXPECT_EQ(predictedTokens.size(), expectedOutputLength) << "b: " << requestId << " beam: " << beam;
+
+            if (modelSpec.mKVCacheType == KVCacheType::kDISABLED)
+            {
+                EXPECT_EQ(numPredTokens, 1) << "b: " << requestId << " beam: " << beam;
+            }
+            else
+            {
+                EXPECT_EQ(predictedTokens.size(), expectedOutputLength) << "b: " << requestId << " beam: " << beam;
+            }
+
             for (auto i = 0; i < numPredTokens; ++i)
             {
                 // Use the expected data for that beamWidth
@@ -491,7 +500,7 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
                 maxNewTokens = modelSpec.mMaxDraftTokens + 1;
             }
             // Run model only to produce a single token and prepopulate KV cache
-            if (prepopulateKVCache)
+            if (prepopulateKVCache || modelSpec.mKVCacheType == KVCacheType::kDISABLED)
             {
                 maxNewTokens = 1;
             }
@@ -645,6 +654,11 @@ void runIfbTest(fs::path const& modelPath, ModelSpec const& modelSpec, ModelIds 
 
     auto trtGptModel = TrtGptModelFactory::create(modelPath, modelType, optionalParams);
 
+    if (modelSpec.mKVCacheType == KVCacheType::kDISABLED)
+    {
+        ASSERT_FALSE(trtGptModel->hasKVCacheManager());
+    }
+
     for (auto batchSize : batchSizes)
     {
         std::cout << "=== batchSize:" << batchSize << " ===\n";
@@ -709,10 +723,15 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     case TrtGptModelType::InflightFusedBatching: name.append("FusedIbModel"); break;
     default: name.append("DefaultModel"); break;
     }
-    if (modelSpec.mKVCacheType == KVCacheType::kPAGED)
+
+    switch (modelSpec.mKVCacheType)
     {
-        name.append("PagedKvCache");
+    case KVCacheType::kCONTINUOUS: name.append("ContinuousKVCache"); break;
+    case KVCacheType::kPAGED: name.append("PagedKVCache"); break;
+    case KVCacheType::kDISABLED: name.append("NoKVCache"); break;
+    default: throw std::runtime_error("Unknown KVCacheType"); break;
     }
+
     auto const testType = std::get<3>(info.param);
     switch (testType)
     {
@@ -835,10 +854,16 @@ TEST_P(ParamTest, Test)
     auto const modelType = std::get<2>(GetParam());
     auto const testType = std::get<3>(GetParam());
 
-    if (modelType != TrtGptModelType::V1
-        && !(modelSpec.mUsePackedInput && modelSpec.mKVCacheType == KVCacheType::kPAGED))
+    if (testType == TrtGptModelIfbTestType::BULK && modelSpec.mKVCacheType == KVCacheType::kDISABLED)
     {
-        GTEST_SKIP() << "Inflight batching requires packed input and paged KV cache.";
+        GTEST_SKIP() << "No KV cache can't be run with bulk inference.";
+    }
+
+    if (modelType != TrtGptModelType::V1
+        && !(modelSpec.mUsePackedInput
+            && (modelSpec.mKVCacheType == KVCacheType::kPAGED || modelSpec.mKVCacheType == KVCacheType::kDISABLED)))
+    {
+        GTEST_SKIP() << "Inflight batching requires packed input and (paged KV cache or disabled KV cache).";
     }
 
     if (!modelSpec.mUsePackedInput && modelSpec.mRandomEndId)
@@ -888,38 +913,35 @@ auto constexpr gptModelParams = ModelParams{GPT_MODEL_DIR, ModelIds{50256, 50256
 
 std::shared_ptr<ModelSpec> getGptDraftTestsCompareModelSpec()
 {
-    ModelSpec* pModelSpec = new ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF};
+    auto pModelSpec = std::make_shared<ModelSpec>(INPUT_FILE, nvinfer1::DataType::kHALF);
     pModelSpec->useGptAttentionPlugin();
     pModelSpec->gatherLogits();
     pModelSpec->usePackedInput();
     pModelSpec->setKVCacheType(KVCacheType::kPAGED);
-    std::shared_ptr<ModelSpec> ret(pModelSpec);
 
-    return ret;
+    return pModelSpec;
 }
 
 std::shared_ptr<ModelSpec> getMedusaTestsCompareModelSpec()
 {
-    ModelSpec* pModelSpec = new ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF};
+    auto pModelSpec = std::make_shared<ModelSpec>(LONG_INPUT_FILE, nvinfer1::DataType::kHALF);
     pModelSpec->useGptAttentionPlugin();
     pModelSpec->usePackedInput();
     pModelSpec->setKVCacheType(KVCacheType::kPAGED);
     pModelSpec->setMaxOutputLength(128);
-    std::shared_ptr<ModelSpec> ret(pModelSpec);
 
-    return ret;
+    return pModelSpec;
 }
 
 std::shared_ptr<ModelSpec> getGptChunkedContextTestsCompareModelSpec()
 {
-    ModelSpec* pModelSpec = new ModelSpec{LONG_INPUT_FILE, nvinfer1::DataType::kHALF};
+    auto pModelSpec = std::make_shared<ModelSpec>(LONG_INPUT_FILE, nvinfer1::DataType::kHALF);
     pModelSpec->useGptAttentionPlugin();
     pModelSpec->usePackedInput();
     pModelSpec->setKVCacheType(KVCacheType::kPAGED);
     pModelSpec->setMaxInputLength(128);
-    std::shared_ptr<ModelSpec> ret(pModelSpec);
 
-    return ret;
+    return pModelSpec;
 }
 
 INSTANTIATE_TEST_SUITE_P(GptV1Tests, ParamTest,
@@ -967,7 +989,17 @@ INSTANTIATE_TEST_SUITE_P(GptTests, ParamTest,
                 .useGptAttentionPlugin()
                 .setKVCacheType(KVCacheType::kPAGED)
                 .usePackedInput()
-                .useRandomEndId()),
+                .useRandomEndId(),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF,
+                []() -> std::shared_ptr<ModelSpec>
+                {
+                    auto pModelSpec = std::make_shared<ModelSpec>(INPUT_FILE, nvinfer1::DataType::kHALF);
+                    pModelSpec->useGptAttentionPlugin().setKVCacheType(KVCacheType::kPAGED).usePackedInput();
+                    return pModelSpec;
+                }()}
+                .useGptAttentionPlugin()
+                .setKVCacheType(KVCacheType::kDISABLED)
+                .usePackedInput()),
         testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
@@ -1032,7 +1064,21 @@ INSTANTIATE_TEST_SUITE_P(GptSqTests, ParamTest,
                             .useGptAttentionPlugin()
                             .usePackedInput()
                             .setKVCacheType(KVCacheType::kPAGED)
-                            .setQuantMethod(QuantMethod::kSMOOTH_QUANT)),
+                            .setQuantMethod(QuantMethod::kSMOOTH_QUANT),
+            ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF,
+                []() -> std::shared_ptr<ModelSpec>
+                {
+                    auto pModelSpec = std::make_shared<ModelSpec>(INPUT_FILE, nvinfer1::DataType::kHALF);
+                    pModelSpec->useGptAttentionPlugin()
+                        .usePackedInput()
+                        .setKVCacheType(KVCacheType::kPAGED)
+                        .setQuantMethod(QuantMethod::kSMOOTH_QUANT);
+                    return pModelSpec;
+                }()}
+                .useGptAttentionPlugin()
+                .usePackedInput()
+                .setKVCacheType(KVCacheType::kDISABLED)
+                .setQuantMethod(QuantMethod::kSMOOTH_QUANT)),
         testing::Values(TrtGptModelType::InflightBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),

@@ -74,6 +74,8 @@ class MaxRequestsScheduler : public CapacityScheduler
 {
 public:
     explicit MaxRequestsScheduler(SizeType32 maxNumRequests,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
         LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
         LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
 
@@ -82,6 +84,8 @@ public:
 
 private:
     SizeType32 mMaxNumRequests;
+    std::shared_ptr<kv_cache_manager::KVCacheManager> mKvCacheManager{nullptr};
+    std::shared_ptr<kv_cache_manager::KVCacheManager> mCrossKvCacheManager{nullptr};
 };
 
 /// @brief   Schedule requests using the MAX_UTILIZATION policy

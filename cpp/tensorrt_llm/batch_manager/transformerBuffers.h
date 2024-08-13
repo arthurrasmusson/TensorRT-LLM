@@ -65,8 +65,9 @@ public:
     TensorPtr seqSlotsAlt;
     TensorPtr seqSlotsAltDevice;
 
-    TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+    TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
+        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
 

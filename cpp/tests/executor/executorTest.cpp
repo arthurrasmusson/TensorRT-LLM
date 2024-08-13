@@ -572,6 +572,7 @@ using ParamCancelReqType = std::tuple<bool, bool, int, std::string>;
 using ParamStatsType = std::tuple<int, bool>;
 using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool>;
 using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32>;
+using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
 
 // requestSize, beam_width
 
@@ -615,6 +616,24 @@ std::string generateTestNameCancelReq(testing::TestParamInfo<ParamCancelReqType>
     else
     {
         name.append("LeaderMode");
+    }
+    return name;
+}
+
+std::string generateTestNameLogitsProc(testing::TestParamInfo<LogitsProcParamsType> const& info)
+{
+    auto const modelName = std::get<0>(info.param);
+    bool const batched = std::get<1>(info.param);
+    bool const replicated = std::get<2>(info.param);
+    std::string name = "ExecutorTest";
+    name.append("_" + modelName);
+    if (batched)
+    {
+        name.append("_Batched");
+    }
+    if (replicated)
+    {
+        name.append("_Replicated");
     }
     return name;
 }
@@ -735,6 +754,10 @@ class ParamCancelReqTest : public GptExecutorTest, public ::testing::WithParamIn
 };
 
 class EncDecParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<EncDecParamsType>
+{
+};
+
+class LogitsProcParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<LogitsProcParamsType>
 {
 };
 
@@ -2159,10 +2182,82 @@ TEST_F(GptExecutorTest, TimedOut)
     EXPECT_EQ(responses.size(), 0);
 }
 
-TEST_F(GptExecutorTest, LogitsPostProcessor)
+TEST_P(LogitsProcParamsTest, All)
 {
-    SizeType32 constexpr endId{50256};
-    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+    auto const modelName = std::get<0>(GetParam());
+    auto const batched = std::get<1>(GetParam());
+    auto const replicated = std::get<2>(GetParam());
+
+    std::string modelDir;
+    int tp_size = 1, pp_size = 1;
+    if (modelName == "llama_tp1_pp1")
+    {
+        modelDir = "tp1-pp1-gpu";
+    }
+    else if (modelName == "llama_tp4_pp1")
+    {
+        modelDir = "tp4-pp1-gpu";
+        tp_size = 4;
+    }
+    else if (modelName == "llama_tp1_pp4")
+    {
+        modelDir = "tp1-pp4-gpu";
+        pp_size = 4;
+    }
+    else if (modelName == "llama_tp2_pp2")
+    {
+        modelDir = "tp2-pp2-gpu";
+        tp_size = pp_size = 2;
+    }
+    else
+    {
+        TLLM_THROW("Unrecognized modelName");
+    }
+    std::filesystem::path modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / modelDir;
+
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
+
+    if (tp_size * pp_size != 1)
+    {
+        // Run multi GPU test only when env variable is set
+        char const* val = getenv("RUN_LLAMA_MULTI_GPU");
+        if (val == NULL)
+        {
+            GTEST_SKIP() << "Skipping multi-gpu logits post processor test";
+        }
+        else
+        {
+            if (worldSize != 4)
+            {
+                FAIL() << "Leader mode and world size is not equal to 4";
+            }
+        }
+    }
+    else
+    {
+        // This has no effect for single-GPU tests
+        if (replicated)
+        {
+            GTEST_SKIP() << "Skipping single-gpu replicated logits post processor test";
+        }
+    }
+
+    // Configuration options
+    bool const streaming = false;
+    bool excludeInputFromOutput = false;
+    OutputConfig outConfig;
+    outConfig.excludeInputFromOutput = excludeInputFromOutput;
+    SizeType32 numRequests = 20;
+    IdType const kClientId = 1234;
+
+    SizeType32 beamWidth = 1;
+    SizeType32 maxPromptLen = 20;
+    SizeType32 maxMaxNewTokens = 20;
+
+    SizeType32 constexpr endId{2};
+    SizeType32 constexpr vocabSizePadded{32000}; // llama-7b vocabSizePadded
     // We just use tokenIdCalculator to generate a token_id based on request index, output position and max new tokens.
     // Then LogitsPostProcessor set all other logits except the generated token_id to large negative value.
     // So the output token should be the generated token by tokenIdCalculator.
@@ -2176,23 +2271,9 @@ TEST_F(GptExecutorTest, LogitsPostProcessor)
         return tokenId;
     };
 
-    // Configuration options common to batched and non-batched logits processor test
-    bool const streaming = false;
-    bool excludeInputFromOutput = false;
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputFromOutput;
-    SizeType32 numRequests = 20;
-    IdType const kClientId = 1234;
-
-    SizeType32 beamWidth = 1;
-    SizeType32 maxPromptLen = 20;
-    SizeType32 maxMaxNewTokens = 20;
-
     std::unordered_map<IdType, VecTokens> tokens;
     std::unordered_map<IdType, SizeType32> expectedNumTokens;
     std::unordered_map<IdType, VecTokens> expectedOutputTokens;
-
-    // Define helper lambdas used by batched and non-batched test
 
     // Enqueue the requests
     auto enqueueRequests = [&](Executor& executor, std::string const logitsProcessorName)
@@ -2279,9 +2360,17 @@ TEST_F(GptExecutorTest, LogitsPostProcessor)
     // Test non-batched logits processor
     std::string const logitsProcessorName = "SelectToken";
 
-    auto logitsPostProcessorFn = [kClientId, tokenIdCalculator](IdType reqId, Tensor& logits, BeamTokens const& tokens,
-                                     StreamPtr const& streamPtr, std::optional<IdType> clientId)
+    auto logitsPostProcessorFn = [&](IdType reqId, Tensor& logits, BeamTokens const& tokens, StreamPtr const& streamPtr,
+                                     std::optional<IdType> clientId)
     {
+        if (replicated)
+        {
+            EXPECT_TRUE(worldRank >= (pp_size - 1) * tp_size);
+        }
+        else
+        {
+            EXPECT_TRUE(worldRank == (pp_size - 1) * tp_size);
+        }
         EXPECT_TRUE(clientId.value() == kClientId);
         SizeType32 numTokens = tokens.at(0).size();
         SizeType32 pos = numTokens;
@@ -2317,16 +2406,22 @@ TEST_F(GptExecutorTest, LogitsPostProcessor)
         logits.setFrom(logitsCpu, streamPtr);
     };
 
-    auto executorConfig = ExecutorConfig(beamWidth);
-    executorConfig.setLogitsPostProcessorMap(
-        std::unordered_map<std::string, tensorrt_llm::executor::LogitsPostProcessor>{
-            {logitsProcessorName, logitsPostProcessorFn}});
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
-    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+    if (!batched)
+    {
+        auto executorConfig = ExecutorConfig(beamWidth);
+        executorConfig.setLogitsPostProcessorMap(
+            std::unordered_map<std::string, tensorrt_llm::executor::LogitsPostProcessor>{
+                {logitsProcessorName, logitsPostProcessorFn}});
+        executorConfig.setReplicateLogitsPostProcessor(replicated);
+        auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
-    enqueueRequests(executor, logitsProcessorName);
-    collectResponses(executor);
-    checkOutput();
+        if (worldRank == 0)
+        {
+            enqueueRequests(executor, logitsProcessorName);
+            collectResponses(executor);
+            checkOutput();
+        }
+    }
 
     // Test batched logits processor
     auto logitsPostProcessorBatchedFn
@@ -2341,13 +2436,20 @@ TEST_F(GptExecutorTest, LogitsPostProcessor)
         }
     };
 
-    auto batchedExecutorConfig = ExecutorConfig(beamWidth);
-    batchedExecutorConfig.setLogitsPostProcessorBatched(logitsPostProcessorBatchedFn);
-    auto batchedExecutor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, batchedExecutorConfig);
+    if (batched)
+    {
+        auto batchedExecutorConfig = ExecutorConfig(beamWidth);
+        batchedExecutorConfig.setLogitsPostProcessorBatched(logitsPostProcessorBatchedFn);
+        batchedExecutorConfig.setReplicateLogitsPostProcessor(replicated);
+        auto batchedExecutor = Executor(modelPath, ModelType::kDECODER_ONLY, batchedExecutorConfig);
 
-    enqueueRequests(batchedExecutor, Request::kBatchedPostProcessorName);
-    collectResponses(batchedExecutor);
-    checkOutput();
+        if (worldRank == 0)
+        {
+            enqueueRequests(batchedExecutor, Request::kBatchedPostProcessorName);
+            collectResponses(batchedExecutor);
+            checkOutput();
+        }
+    }
 }
 
 TEST_F(GptExecutorTest, LogitsPostProcessorThrow)
@@ -2389,6 +2491,7 @@ public:
     MOCK_METHOD(tr::BufferManager::CudaStreamPtr, getRuntimeStreamPtr, (), (const));
     MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
     MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
+    MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
 };
 
 TEST_P(ParamTest, MockedModel)
@@ -3871,3 +3974,8 @@ INSTANTIATE_TEST_SUITE_P(BartMultiGPUTest, EncDecParamsTest,
     testing::Combine(
         testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(4), testing::Values(1)),
     generateTestNameEncDec);
+
+INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LogitsProcParamsTest,
+    testing::Combine(testing::Values("llama_tp1_pp1", "llama_tp4_pp1", "llama_tp2_pp2"), testing::Values(false, true),
+        testing::Values(false, true)),
+    generateTestNameLogitsProc);

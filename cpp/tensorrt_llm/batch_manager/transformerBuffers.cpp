@@ -25,10 +25,10 @@ namespace tk = tensorrt_llm::kernels;
 namespace tensorrt_llm::batch_manager
 {
 
-TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-    runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-    runtime::WorldConfig const& worldConfig)
+TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
+    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, runtime::TllmRuntime const& runtime,
+    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -36,18 +36,22 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     positionIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
     auto const localNbLayers = modelConfig.getNbAttentionLayers(worldConfig.getPipelineParallelism());
+    auto const firstLayerId = worldConfig.getPipelineParallelRank() * localNbLayers;
 
     cacheIndirection
         = manager.gpu(ITensor::makeShape({maxBatchSize, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
 
-    auto const kvCacheBlockOffsetsType = engine.getTensorDataType("kv_cache_block_offsets");
-    kvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNED, kvCacheBlockOffsetsType);
-    kvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
-
-    if (modelConfig.useCrossAttention())
+    if (modelConfig.isKVCacheEnabled())
     {
-        crossKvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNED, kvCacheBlockOffsetsType);
-        crossKvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
+        auto const kvCacheBlockOffsetsType = engine.getTensorDataType("kv_cache_block_offsets");
+        kvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNEDPOOL, kvCacheBlockOffsetsType);
+        kvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
+
+        if (modelConfig.useCrossAttention())
+        {
+            crossKvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNEDPOOL, kvCacheBlockOffsetsType);
+            crossKvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
+        }
     }
 
     fillValuesAlt = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
@@ -64,8 +68,12 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
     maxAttentionWindows = BufferManager::cpu(ITensor::makeShape({localNbLayers}), nvinfer1::DataType::kINT32);
-    auto maxAttentionWindowsRange = BufferRange<SizeType32>(*maxAttentionWindows);
-    std::fill(maxAttentionWindowsRange.begin(), maxAttentionWindowsRange.end(), maxAttentionWindow);
+    auto maxAttentionWindowsPtr = bufferCast<SizeType32>(*maxAttentionWindows);
+    auto const attentionWindowLength = maxAttentionWindowVec.size();
+    for (SizeType32 i = 0; i < localNbLayers; ++i)
+    {
+        maxAttentionWindowsPtr[i] = maxAttentionWindowVec[(firstLayerId + i) % attentionWindowLength];
+    }
 
     sinkTokenLengths = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
     bufferCast<SizeType32>(*sinkTokenLengths)[0] = sinkTokenLen;
@@ -84,16 +92,19 @@ void TransformerBuffers::reshape(SizeType32 numSequences)
 {
     pastKeyValueLengths->reshape(ITensor::makeShape({numSequences}));
 
-    auto cacheBlockOffsetsShape = kvCacheBlockOffsetsHost->getShape();
-    if (cacheBlockOffsetsShape.nbDims > 0)
+    if (kvCacheBlockOffsetsHost)
     {
-        cacheBlockOffsetsShape.d[0] = numSequences;
-        kvCacheBlockOffsetsHost->reshape(cacheBlockOffsetsShape);
-        kvCacheBlockOffsetsDevice->reshape(cacheBlockOffsetsShape);
-    }
-    else
-    {
-        TLLM_LOG_DEBUG("kvCacheBlockOffsets not allocated yet");
+        auto cacheBlockOffsetsShape = kvCacheBlockOffsetsHost->getShape();
+        if (cacheBlockOffsetsShape.nbDims > 0)
+        {
+            cacheBlockOffsetsShape.d[0] = numSequences;
+            kvCacheBlockOffsetsHost->reshape(cacheBlockOffsetsShape);
+            kvCacheBlockOffsetsDevice->reshape(cacheBlockOffsetsShape);
+        }
+        else
+        {
+            TLLM_LOG_DEBUG("kvCacheBlockOffsets not allocated yet");
+        }
     }
 
     if (crossKvCacheBlockOffsetsHost)

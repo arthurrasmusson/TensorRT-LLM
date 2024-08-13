@@ -26,6 +26,8 @@
 
 #include <memory>
 
+namespace tc = tensorrt_llm::common;
+
 namespace tensorrt_llm::batch_manager
 {
 
@@ -58,18 +60,30 @@ public:
         TLLM_CHECK_WITH_INFO(mMaxBatchSize <= modelConfig.getMaxBatchSize(),
             "Runtime configured max batch size (%d) must not exceed engine max batch size (%d)", mMaxBatchSize,
             modelConfig.getMaxBatchSize());
-
-        if (optionalParams.kvCacheConfig.maxAttentionWindow.has_value()
-            && optionalParams.kvCacheConfig.maxAttentionWindow.value() > mMaxSequenceLen)
+        mMaxAttentionWindow = 0;
+        if (optionalParams.kvCacheConfig.maxAttentionWindowVec.has_value())
         {
-            TLLM_LOG_WARNING(
-                "The value of maxAttentionWindow cannot exceed mMaxSequenceLen. "
-                "Therefore, it has been adjusted to match the value of mMaxSequenceLen.");
+            bool warning = false;
+            for (int maxAttenWin : optionalParams.kvCacheConfig.maxAttentionWindowVec.value())
+            {
+                mMaxAttentionWindowVec.push_back(std::min(maxAttenWin, mMaxSequenceLen));
+                mMaxAttentionWindow = std::max(mMaxAttentionWindow, mMaxAttentionWindowVec.back());
+                if (maxAttenWin > mMaxSequenceLen)
+                    warning = true;
+                TLLM_CHECK_WITH_INFO(mMaxAttentionWindowVec.back() > 0,
+                    "Attention window sizes (elements in maxAttentionWindowVec) must be > 0");
+            }
+            if (warning)
+                TLLM_LOG_WARNING(
+                    "The value of maxAttentionWindow cannot exceed mMaxSequenceLen. "
+                    "Therefore, it has been adjusted to match the value of mMaxSequenceLen.");
         }
-        mMaxAttentionWindow = optionalParams.kvCacheConfig.maxAttentionWindow.has_value()
-            ? std::min(optionalParams.kvCacheConfig.maxAttentionWindow.value(), mMaxSequenceLen)
-            : mMaxSequenceLen;
-        TLLM_CHECK_WITH_INFO(mMaxAttentionWindow > 0, "Attention window size (mMaxAttentionWindow) must be > 0");
+        else
+        {
+            mMaxAttentionWindowVec.push_back(mMaxSequenceLen);
+            mMaxAttentionWindow = mMaxSequenceLen;
+        }
+
         mSinkTokenLen = optionalParams.kvCacheConfig.sinkTokenLength.has_value()
             ? optionalParams.kvCacheConfig.sinkTokenLength.value()
             : 0;
@@ -78,14 +92,20 @@ public:
             = worldConfig.isPipelineParallel() ? worldConfig.getPipelineParallelism() : (mEnableTrtOverlap ? 2 : 1);
         mMaxNumSequences = numBatches * mMaxBatchSize;
 
+        auto const numTotalAttenLayers = modelConfig.getNbAttentionLayers();
+        auto const numRepeatsAttenWindow = numTotalAttenLayers / mMaxAttentionWindowVec.size();
+        auto const numRemainsAttenWindow = numTotalAttenLayers % mMaxAttentionWindowVec.size();
+        std::string attenWindowRemainInfo = numRemainsAttenWindow > 0
+            ? " + " + tc::arr2str(mMaxAttentionWindowVec.data(), numRemainsAttenWindow)
+            : "";
+
         TLLM_LOG_INFO("TRTGptModel maxNumSequences: %d", mMaxNumSequences);
         TLLM_LOG_INFO("TRTGptModel maxBatchSize: %d", mMaxBatchSize);
         TLLM_LOG_INFO("TRTGptModel maxBeamWidth: %d", mMaxBeamWidth);
         TLLM_LOG_INFO("TRTGptModel maxSequenceLen: %d", mMaxSequenceLen);
         TLLM_LOG_INFO("TRTGptModel maxDraftLen: %d", mMaxDraftLen);
-
-        TLLM_LOG_INFO("TRTGptModel mMaxAttentionWindowSize: %d", mMaxAttentionWindow);
-
+        TLLM_LOG_INFO("TRTGptModel mMaxAttentionWindowSize: %s * %d%s", tc::vec2str(mMaxAttentionWindowVec).c_str(),
+            numRepeatsAttenWindow, attenWindowRemainInfo.c_str());
         TLLM_LOG_INFO("TRTGptModel enableTrtOverlap: %d", mEnableTrtOverlap);
         TLLM_LOG_INFO("TRTGptModel normalizeLogProbs: %d", mNormalizeLogProbs);
 
@@ -191,12 +211,22 @@ public:
     virtual void setLayerProfiler() = 0;
     [[nodiscard]] virtual std::string getLayerProfileInfo() const = 0;
 
+    [[nodiscard]] bool hasKVCacheManager() const
+    {
+        return getKVCacheManager() != nullptr;
+    }
+
 protected:
     friend class GptManager;
 
     [[nodiscard]] SizeType32 getMaxBeamWidth() const
     {
         return mMaxBeamWidth;
+    }
+
+    [[nodiscard]] std::vector<SizeType32> getMaxAttentionWindowVec() const
+    {
+        return mMaxAttentionWindowVec;
     }
 
     [[nodiscard]] SizeType32 getMaxAttentionWindow() const
@@ -250,6 +280,7 @@ private:
     SizeType32 mMaxDraftLen;
 
     SizeType32 mVocabSizePadded;
+    std::vector<SizeType32> mMaxAttentionWindowVec;
     SizeType32 mMaxAttentionWindow;
     SizeType32 mSinkTokenLen;
 

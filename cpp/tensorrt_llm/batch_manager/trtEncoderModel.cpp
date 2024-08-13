@@ -502,4 +502,9 @@ void TrtEncoderModel::setLogitsPostProcessorBatched(
     TLLM_CHECK_WITH_INFO(!logitsPostProcessorBatched.has_value(), "TrtEncoderModel does not use logits processor.");
 }
 
+void TrtEncoderModel::setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor)
+{
+    TLLM_THROW("TrtEncoderModel does not use logits processor.");
+}
+
 } //  namespace tensorrt_llm::batch_manager

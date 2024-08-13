@@ -98,6 +98,7 @@ private:
 
     /// @brief Index of selected runtime context.
     SizeType32 contextIndex{};
+    SizeType32 maxContextLength{};
 
 public:
     TensorPtr sequenceLengthsDevice;
@@ -105,7 +106,6 @@ public:
 private:
     // runtime
     TensorPtr requestTypes; // Host tensor, 0: context, 1: generation
-    TensorPtr maxInputLength;
     TensorPtr lastTokenIdsHost;
     TensorPtr lastTokenIdsDevice;
     TensorPtr logitsIdsHost;
@@ -185,9 +185,10 @@ private:
     TensorMap outputMap;
 
 public:
-    RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-        TensorPtr allReduceWorkspace, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+    RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
+        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
+        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
         std::optional<SizeType32> maxNumTokens = std::nullopt);
 
@@ -207,8 +208,9 @@ public:
     };
 
 private:
-    void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
+    void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
+        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig);
 

@@ -46,7 +46,8 @@ template <typename T>
 std::list<std::vector<T>> chopVectorIntoBlocks(
     std::vector<T> const& vec, SizeType32 usableSize, SizeType32 elementsPerBlock, bool allowPartial)
 {
-    TLLM_CHECK(usableSize <= static_cast<SizeType32>(vec.size()));
+    TLLM_CHECK_WITH_INFO(
+        usableSize <= static_cast<SizeType32>(vec.size()), "usableSize=%d > %ld=vec.size()", usableSize, vec.size());
     std::list<std::vector<T>> blockedVectors;
     auto const vecEnd = vec.begin() + usableSize;
     for (auto begin = vec.begin(); begin < vecEnd; begin += elementsPerBlock)
@@ -423,20 +424,42 @@ void BlockManager::onboardBlock(BlockPtr offloadBlock)
     }
 }
 
-SizeType32 BlockManager::loadOrAllocateBlocks(std::list<VecTokens> const& blockedTokens, GenerationRequest& sequence)
+VecTokens BlockManager::findNewContextBlock(VecTokens const& inputTokens) const
+{
+    auto const blockedTokens
+        = chopVectorIntoBlocks<TokenIdType>(inputTokens, inputTokens.size(), mTokensPerBlock, false);
+    VecTokens concatTokens;
+    auto searchRoot = mCachedBlocksRoot;
+    for (auto const& blockTokens : blockedTokens)
+    {
+        concatTokens.insert(concatTokens.end(), blockTokens.begin(), blockTokens.end());
+        auto matchingBlock = searchRoot != nullptr ? searchRoot->findMatchingBlock(blockTokens) : nullptr;
+        if (matchingBlock == nullptr)
+        {
+            return concatTokens;
+        }
+    }
+    return {};
+}
+
+SizeType32 BlockManager::loadOrAllocateBlocks(
+    std::list<VecTokens> const& blockedTokens, SizeType32 numContextBlocks, GenerationRequest& sequence)
 {
     SizeType32 numMatchedTokens{0};
     auto searchRoot = mCachedBlocksRoot;
 
-    for (auto const& blockTokens : blockedTokens)
+    auto blockItr = blockedTokens.begin();
+    for (int block = 0; block < numContextBlocks; ++block)
     {
-        auto matchingBlock = searchRoot != nullptr ? searchRoot->findMatchingBlock(blockTokens) : nullptr;
+        auto matchingBlock = searchRoot != nullptr && blockItr != blockedTokens.end()
+            ? searchRoot->findMatchingBlock(*blockItr)
+            : nullptr;
         if (matchingBlock != nullptr)
         {
             TLLM_CHECK_WITH_INFO(matchingBlock->isFull() || !matchingBlock->hasRefs(),
                 "Found matching partially filled block, but somebody else is using it. This should not happen.");
 
-            numMatchedTokens += blockTokens.size();
+            numMatchedTokens += blockItr->size();
             if (!matchingBlock->isFull())
             {
                 // Make block private and reuse
@@ -455,6 +478,7 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::list<VecTokens> const& blocke
             addBlockToAllBeams(matchingBlock, sequence);
             searchRoot = matchingBlock;
             ++mReusedBlocks;
+            ++blockItr;
         }
         else
         {
@@ -468,8 +492,8 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::list<VecTokens> const& blocke
     return numMatchedTokens;
 }
 
-void BlockManager::addSequence(
-    GenerationRequest& sequence, SizeType32 inputLength, std::shared_ptr<LlmRequest> const& llmRequest)
+void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLength, SizeType32 numContextBlocks,
+    std::shared_ptr<LlmRequest> const& llmRequest)
 {
     TLLM_CHECK(llmRequest);
 
@@ -492,7 +516,7 @@ void BlockManager::addSequence(
         blockedTokens.emplace_back();
     }
 
-    auto const prepopulatedPromptLen = loadOrAllocateBlocks(blockedTokens, sequence);
+    auto const prepopulatedPromptLen = loadOrAllocateBlocks(blockedTokens, numContextBlocks, sequence);
     llmRequest->setPrepopulatedPromptLen(prepopulatedPromptLen);
     TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest->mRequestId,
         inputLength, prepopulatedPromptLen);
@@ -996,6 +1020,12 @@ void KVCacheManager::addToken(SizeType32 seqSlotIdx)
     updateToken(seqSlotIdx, true);
 }
 
+VecTokens KVCacheManager::findNewContextBlock(VecTokens const& inputTokens) const
+{
+    auto newContextBlocks = mBlockManager.findNewContextBlock(inputTokens);
+    return newContextBlocks;
+}
+
 void KVCacheManager::addSequence(
     SizeType32 seqSlotIdx, SizeType32 inputLength, SizeType32 beamWidth, std::shared_ptr<LlmRequest> const& llmRequest)
 {
@@ -1029,7 +1059,7 @@ void KVCacheManager::addSequence(
 
     if (!enableCyclicKvCache && mEnableBlockReuse)
     {
-        mBlockManager.addSequence(*sequence, inputLength, llmRequest);
+        mBlockManager.addSequence(*sequence, inputLength, numContextBlocks, llmRequest);
     }
     else
     {
@@ -1037,6 +1067,23 @@ void KVCacheManager::addSequence(
     }
     cacheBlockOffsets(*sequence, seqSlotIdx);
     mSequences[sequence->getSequenceSlotIdx()] = std::move(sequence);
+}
+
+void KVCacheManager::storeContextBlocks(SizeType32 seqSlotIdx, std::shared_ptr<LlmRequest> const& llmRequest)
+{
+    if (mEnableBlockReuse)
+    {
+        auto& sequence = mSequences.at(seqSlotIdx);
+        if (sequence)
+        {
+            constexpr int beamIdx = 0; // no need to consider more than one beam for input tokens
+            auto cacheBlockIds = sequence->getCacheBlockIds();
+            auto const& tokens = llmRequest->getTokens(beamIdx);
+            auto blockedTokens
+                = chopVectorIntoBlocks<TokenIdType>(tokens, tokens.size() - 1, getTokensPerBlock(), false);
+            mBlockManager.storeBlocks(std::move(blockedTokens), cacheBlockIds[beamIdx]);
+        }
+    }
 }
 
 void KVCacheManager::removeSequence(SizeType32 seqSlotIdx, std::shared_ptr<LlmRequest> const& llmRequest)

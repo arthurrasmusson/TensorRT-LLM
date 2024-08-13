@@ -78,6 +78,7 @@ public:
 
     virtual void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched)
         = 0;
+    virtual void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) = 0;
 };
 
 } // namespace tensorrt_llm::executor

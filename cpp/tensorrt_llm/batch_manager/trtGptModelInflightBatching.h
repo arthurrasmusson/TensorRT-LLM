@@ -145,6 +145,10 @@ private:
         return mMicroBatchId;
     }
 
+    //! @brief Store full kv cache blocks contributed by req.
+    //! These blocks become reusable from next step.
+    void storeContextBlocks(std::shared_ptr<LlmRequest> const& req);
+
     //! @brief Set LayerProfiler to collect performance per layer.
     void setLayerProfiler() override;
 
@@ -190,11 +194,15 @@ private:
 
     void setupDecoderStep(RequestVector const& contextRequests);
     TokenPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
-    std::unique_ptr<DecoderStepAsyncSend> decoderSync(
+    std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, TokenPtr const& decoderToken);
+    /// @brief It gathers the logits if they need to be returned, calls getDecoderSlotHostOutputs,
+    /// and overwrites the llmRequest tokens buffer.
+    /// Called either on request finishing, or at every step when doing beam search and streaming.
     void postProcessRequest(LlmRequest& llmReq, SizeType32 bid, std::vector<SizeType32> const& numDroppedTokens);
+    /// @brief Calls gatherTree (via finalize) and transmits the reveived data across ranks if PP>1
     void getDecoderSlotHostOutputs(
-        SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig);
+        SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig, bool streaming);
     void rewindKVCacheBlocks(SizeType32 numSequences);
     void setupSpeculativeDecodingModule(executor::DecodingConfig const& decodingConfig);
 
@@ -255,12 +263,18 @@ protected:
         mLogitsPostProcessorBatched = logitsPostProcessorBatched;
     }
 
+    void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) override
+    {
+        mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
+    }
+
 private:
     runtime::ModelConfig mModelConfig;
     runtime::WorldConfig mWorldConfig;
     executor::DecodingConfig mDecodingConfig;
     int mDevice{-1};
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommTensorPara;
 
     std::shared_ptr<runtime::AllReduceBuffers> mAllReduceBuffers;
 
@@ -300,11 +314,21 @@ private:
     IterationStatsIFB mLastIterationStatsIFB;
 
     std::vector<PeftTable> mPeftTables;
-    std::unique_ptr<DecoderStepAsyncSend> mDecStepAsyncSndHdl;
+    std::vector<std::unique_ptr<DecoderStepAsyncSend>> mDecStepAsyncSndHdls;
     std::vector<std::unique_ptr<DecoderSlotAsyncSend>> mDecSlotAsyncSndHdls;
     std::unique_ptr<std::thread> mMpiWaitThread;
 
+    runtime::StringPtrMap<runtime::ITensor> mWeightsMap{};
+    std::optional<std::filesystem::path> mEnginePath; // Points to the engine file
+
     std::optional<LogitsPostProcessorBatched> mLogitsPostProcessorBatched;
+    bool mReplicateLogitsPostProcessor;
+    bool mLogitsPostProcessorIsApplied; // Set if any request invoked a logits processor in current step
+
+    constexpr bool broadcastPostDecoder()
+    {
+        return mWorldConfig.isTensorParallel() && !mReplicateLogitsPostProcessor && mLogitsPostProcessorIsApplied;
+    }
 };
 
 } // namespace tensorrt_llm::batch_manager

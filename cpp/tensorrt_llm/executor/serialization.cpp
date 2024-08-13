@@ -487,6 +487,8 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getParallelConfig), ExecutorConfig>>(is);
     auto peftCacheConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getPeftCacheConfig), ExecutorConfig>>(is);
+    auto replicateLogitsPostProcessor = su::deserialize<
+        std::invoke_result_t<decltype(&ExecutorConfig::getReplicateLogitsPostProcessor), ExecutorConfig>>(is);
     auto decodingConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDecodingConfig), ExecutorConfig>>(is);
     auto gpuWeightsPercent
@@ -498,8 +500,8 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
-        peftCacheConfig, std::nullopt, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize,
-        extendedRuntimePerfKnobConfig};
+        peftCacheConfig, std::nullopt, std::nullopt, replicateLogitsPostProcessor, decodingConfig, gpuWeightsPercent,
+        maxQueueSize, extendedRuntimePerfKnobConfig};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -521,6 +523,7 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getBatchingType());
     totalSize += su::serializedSize(executorConfig.getParallelConfig());
     totalSize += su::serializedSize(executorConfig.getPeftCacheConfig());
+    totalSize += su::serializedSize(executorConfig.getReplicateLogitsPostProcessor());
     totalSize += su::serializedSize(executorConfig.getDecodingConfig());
     totalSize += su::serializedSize(executorConfig.getGpuWeightsPercent());
     totalSize += su::serializedSize(executorConfig.getMaxQueueSize());
@@ -546,6 +549,7 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getBatchingType(), os);
     su::serialize(executorConfig.getParallelConfig(), os);
     su::serialize(executorConfig.getPeftCacheConfig(), os);
+    su::serialize(executorConfig.getReplicateLogitsPostProcessor(), os);
     su::serialize(executorConfig.getDecodingConfig(), os);
     su::serialize(executorConfig.getGpuWeightsPercent(), os);
     su::serialize(executorConfig.getMaxQueueSize(), os);
@@ -557,13 +561,13 @@ KvCacheConfig Serialization::deserializeKvCacheConfig(std::istream& is)
 {
     auto enableBlockReuse = su::deserialize<bool>(is);
     auto maxTokens = su::deserialize<std::optional<SizeType32>>(is);
-    auto maxAttentionWindow = su::deserialize<std::optional<SizeType32>>(is);
+    auto maxAttentionWindowVec = su::deserialize<std::optional<std::vector<SizeType32>>>(is);
     auto sinkTokenLength = su::deserialize<std::optional<SizeType32>>(is);
     auto freeGpuMemoryFraction = su::deserialize<std::optional<FloatType>>(is);
     auto hostCacheSize = su::deserialize<std::optional<size_t>>(is);
     auto onboardBlocks = su::deserialize<bool>(is);
 
-    return KvCacheConfig{enableBlockReuse, maxTokens, maxAttentionWindow, sinkTokenLength, freeGpuMemoryFraction,
+    return KvCacheConfig{enableBlockReuse, maxTokens, maxAttentionWindowVec, sinkTokenLength, freeGpuMemoryFraction,
         hostCacheSize, onboardBlocks};
 }
 
@@ -571,7 +575,7 @@ void Serialization::serialize(KvCacheConfig const& kvCacheConfig, std::ostream& 
 {
     su::serialize(kvCacheConfig.getEnableBlockReuse(), os);
     su::serialize(kvCacheConfig.getMaxTokens(), os);
-    su::serialize(kvCacheConfig.getMaxAttentionWindow(), os);
+    su::serialize(kvCacheConfig.getMaxAttentionWindowVec(), os);
     su::serialize(kvCacheConfig.getSinkTokenLength(), os);
     su::serialize(kvCacheConfig.getFreeGpuMemoryFraction(), os);
     su::serialize(kvCacheConfig.getHostCacheSize(), os);
@@ -584,7 +588,7 @@ size_t Serialization::serializedSize(KvCacheConfig const& kvCacheConfig)
     size_t totalSize = 0;
     totalSize += su::serializedSize(kvCacheConfig.getEnableBlockReuse());
     totalSize += su::serializedSize(kvCacheConfig.getMaxTokens());
-    totalSize += su::serializedSize(kvCacheConfig.getMaxAttentionWindow());
+    totalSize += su::serializedSize(kvCacheConfig.getMaxAttentionWindowVec());
     totalSize += su::serializedSize(kvCacheConfig.getSinkTokenLength());
     totalSize += su::serializedSize(kvCacheConfig.getFreeGpuMemoryFraction());
     totalSize += su::serializedSize(kvCacheConfig.getHostCacheSize());

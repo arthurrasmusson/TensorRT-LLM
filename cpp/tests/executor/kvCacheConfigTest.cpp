@@ -35,26 +35,26 @@ TEST(KvCacheConfigTest, validInputs)
             auto kvCacheConfig = KvCacheConfig(true, 1);
         }
         {
-            auto kvCacheConfig = KvCacheConfig(true, 100, 1000);
+            auto kvCacheConfig = KvCacheConfig(true, 100, std::vector(1, 1000));
         }
         {
-            auto kvCacheConfig = KvCacheConfig(true, 100, 1000, 1000);
+            auto kvCacheConfig = KvCacheConfig(true, 100, std::vector(1, 1000), 1000);
         }
         {
-            auto kvCacheConfig = KvCacheConfig(true, 100, 1000, 1000, 0.1);
+            auto kvCacheConfig = KvCacheConfig(true, 100, std::vector(1, 1000), 1000, 0.1);
         }
     }
 }
 
 void testInvalid(bool enableBlockReuse = false, std::optional<SizeType32> maxTokens = std::nullopt,
-    std::optional<SizeType32> maxAttentionWindow = std::nullopt,
+    std::optional<std::vector<SizeType32>> maxAttentionWindowVec = std::nullopt,
     std::optional<SizeType32> sinkTokenLength = std::nullopt,
     std::optional<FloatType> freeGpuMemoryFraction = std::nullopt)
 {
     try
     {
         auto kvCacheConfig
-            = KvCacheConfig(enableBlockReuse, maxTokens, maxAttentionWindow, sinkTokenLength, freeGpuMemoryFraction);
+            = KvCacheConfig(enableBlockReuse, maxTokens, maxAttentionWindowVec, sinkTokenLength, freeGpuMemoryFraction);
         FAIL() << "Expected TllmException";
     }
     catch (TllmException& e)
@@ -74,8 +74,8 @@ TEST(KvCacheConfigTest, invalidInputs)
     testInvalid(true, -1);
 
     // Negative maxAttentionWindow
-    testInvalid(true, std::nullopt, 0);
-    testInvalid(true, std::nullopt, -1);
+    testInvalid(true, std::nullopt, std::vector(1, 0));
+    testInvalid(true, std::nullopt, std::vector(1, -1));
 
     // Negative sink token
     testInvalid(true, std::nullopt, std::nullopt, 0);

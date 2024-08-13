@@ -95,9 +95,9 @@ protected:
 
         mPeftManager = std::make_unique<PeftCacheManager>(config, *mModelConfig, *mWorldConfig, *mManager);
 
-        loraWeightsTp2 = utils::loadNpy(*mManager, TEST_SOURCE_LORA_TP2.string(), MemoryType::kPINNED);
+        loraWeightsTp2 = utils::loadNpy(*mManager, TEST_SOURCE_LORA_TP2.string(), MemoryType::kPINNEDPOOL);
         loraWeightsTp2->unsqueeze(0);
-        loraConfigTp2 = utils::loadNpy(*mManager, TEST_KEYS_LORA_TP2.string(), MemoryType::kPINNED);
+        loraConfigTp2 = utils::loadNpy(*mManager, TEST_KEYS_LORA_TP2.string(), MemoryType::kPINNEDPOOL);
         loraConfigTp2->unsqueeze(0);
     }
 

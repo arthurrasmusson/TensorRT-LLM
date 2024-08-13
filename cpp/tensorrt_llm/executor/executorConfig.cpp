@@ -23,8 +23,8 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     std::optional<SizeType32> maxBatchSize, std::optional<SizeType32> maxNumTokens,
     std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
     std::optional<LogitsPostProcessorMap> logitsPostProcessorMap,
-    std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched, std::optional<DecodingConfig> decodingConfig,
-    float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
+    std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched, bool replicateLogitsPostProcessor,
+    std::optional<DecodingConfig> decodingConfig, float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
@@ -40,6 +40,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mPeftCacheConfig(peftCacheConfig)
     , mLogitsPostProcessorMap(std::move(logitsPostProcessorMap))
     , mLogitsPostProcessorBatched(std::move(logitsPostProcessorBatched))
+    , mReplicateLogitsPostProcessor(replicateLogitsPostProcessor)
     , mDecodingConfig(std::move(decodingConfig))
     , mGpuWeightsPercent(gpuWeightPercent)
     , mMaxQueueSize(maxQueueSize)
@@ -118,6 +119,11 @@ std::optional<LogitsPostProcessorMap> ExecutorConfig::getLogitsPostProcessorMap(
 std::optional<LogitsPostProcessorBatched> ExecutorConfig::getLogitsPostProcessorBatched() const
 {
     return mLogitsPostProcessorBatched;
+}
+
+bool ExecutorConfig::getReplicateLogitsPostProcessor() const
+{
+    return mReplicateLogitsPostProcessor;
 }
 
 std::optional<DecodingConfig> ExecutorConfig::getDecodingConfig() const
@@ -213,6 +219,11 @@ void ExecutorConfig::setLogitsPostProcessorMap(LogitsPostProcessorMap const& log
 void ExecutorConfig::setLogitsPostProcessorBatched(LogitsPostProcessorBatched const& logitsPostProcessorBatched)
 {
     mLogitsPostProcessorBatched = logitsPostProcessorBatched;
+}
+
+void ExecutorConfig::setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor)
+{
+    mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
 }
 
 void ExecutorConfig::setDecodingConfig(DecodingConfig const& decodingConfig)

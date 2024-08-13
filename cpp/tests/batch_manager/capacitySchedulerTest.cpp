@@ -115,7 +115,7 @@ protected:
 
     static std::shared_ptr<kv_cache_manager::KVCacheManager> getKvCacheManager(SizeType32 maxNumRequests,
         SizeType32 tokensPerBlock, SizeType32 maxNumTokens, SizeType32 maxNumTokensPerSeq,
-        SizeType32 sinkTokenLength = 0)
+        SizeType32 sinkTokenLength = 0, bool enableReuse = false)
     {
         auto const numLayers = 10;
         auto const nbKvHeads = 10;
@@ -128,7 +128,8 @@ protected:
 
         // init KV cache block manager
         return std::make_shared<kv_cache_manager::KVCacheManager>(numLayers, nbKvHeads, sizePerHead, tokensPerBlock,
-            maxNumBlocks, 0, maxNumRequests, 1, maxNumTokensPerSeq, sinkTokenLength, useOneMoreBlock, streamPtr);
+            maxNumBlocks, 0, maxNumRequests, 1, maxNumTokensPerSeq, sinkTokenLength, useOneMoreBlock, streamPtr,
+            enableReuse);
     }
 
     static std::shared_ptr<BasePeftCacheManager> getPeftCacheManager()
@@ -136,13 +137,12 @@ protected:
         return std::make_shared<MockPeftCacheManager>();
     }
 
-    static std::shared_ptr<LlmRequest> createRequest(int32_t promptLen, int32_t maxNewTokens,
-        std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
+    static std::shared_ptr<LlmRequest> createRequest(std::shared_ptr<std::vector<int32_t>> inputTokens,
+        int32_t maxNewTokens, std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
         tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority)
     {
         tensorrt_llm::runtime::SamplingConfig samplingConfig;
         uint64_t reqId = optionalReqId.value_or((rand() % INT64_MAX) + 1);
-        auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
         auto req = std::make_shared<LlmRequest>(reqId, maxNewTokens, inputTokens, samplingConfig, false);
         req->setPriority(priority);
 
@@ -151,6 +151,14 @@ protected:
             req->setLoraTaskId(loraTaskId.value());
         }
         return req;
+    }
+
+    static std::shared_ptr<LlmRequest> createRequest(int32_t promptLen, int32_t maxNewTokens,
+        std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
+        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority)
+    {
+        auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+        return createRequest(inputTokens, maxNewTokens, optionalReqId, loraTaskId, priority);
     }
 };
 
@@ -270,6 +278,7 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
             llmReq->mSeqSlot = seqSlotManager->getSequenceSlot(isReqNew, reqId);
 
             auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const promptLen = llmReq->mPromptLen;
             if (llmReq->isContextInitState())
             {
                 if (!llmReq->isFullContextRequest())
@@ -284,25 +293,55 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
                     if (llmReq->isFirstContextChunk())
                     {
                         // We need to perform initialization work for the first context chunk.
-                        kvCacheManager->addSequence(
-                            seqSlot, llmReq->getContextChunkSize(), llmReq->mSamplingConfig.beamWidth);
-                    }
-                    else
-                    {
-                        kvCacheManager->addContextTokens(seqSlot, llmReq->getContextChunkSize());
+                        kvCacheManager->addSequence(seqSlot, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
+
+                        // Advance chunked context position if we have prepoluated tokens
+                        auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
+                        TLLM_CHECK(prepopulatedPromptLen < promptLen);
+
+                        if (prepopulatedPromptLen > 0)
+                        {
+                            // Currently, the runtime process is to apply for cache first and then determine
+                            // prepopulation. Use the prepopulated length to advance the context position and decrease
+                            // chunk size if necessary.
+                            auto chunkSize = llmReq->getContextChunkSize();
+                            if (prepopulatedPromptLen + chunkSize < promptLen)
+                            {
+                                // make sure to end at block boundary after current chunk
+                                auto const flooredEndPosition = (prepopulatedPromptLen + chunkSize)
+                                    / kvCacheManager->getTokensPerBlock() * kvCacheManager->getTokensPerBlock();
+                                chunkSize = flooredEndPosition - prepopulatedPromptLen;
+                                TLLM_CHECK(chunkSize <= llmReq->getContextChunkSize());
+                            }
+                            llmReq->setContextCurrentPosition(prepopulatedPromptLen);
+                            llmReq->setContextChunkSize(chunkSize);
+                            if (!llmReq->isLastContextChunk())
+                            {
+                                TLLM_CHECK_WITH_INFO(
+                                    (llmReq->getContextCurrentPosition() + llmReq->getContextChunkSize())
+                                            % kvCacheManager->getTokensPerBlock()
+                                        == 0,
+                                    "To prevent cache fragmentation, the context position after current chunk should "
+                                    "be divisible "
+                                    "by the number of tokens per block, except for the last chunk.");
+                            }
+                        }
                     }
                     auto preContextLength = llmReq->getContextChunkSize();
+                    // Values returned by isFirstContextChunk and isLastContextChunk will change after this call.
+                    // This call resets context chunk size to zero for some reason, so need to set it again.
                     llmReq->moveToNextContextChunk();
                     llmReq->setContextChunkSize(preContextLength);
                 }
                 else
                 {
-                    kvCacheManager->addSequence(seqSlot, llmReq->mPromptLen, llmReq->mSamplingConfig.beamWidth);
+                    kvCacheManager->addSequence(seqSlot, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
                     llmReq->moveToNextContextChunk();
                 }
 
-                if (!llmReq->getContextRemainingLength())
+                if (llmReq->getContextRemainingLength() == 0)
                 {
+                    kvCacheManager->storeContextBlocks(reqId, llmReq);
                     llmReq->addNewTokens({itCount});
                     llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
                 }
@@ -312,12 +351,12 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
                 kvCacheManager->addToken(seqSlot);
                 llmReq->addNewTokens({itCount});
             }
-            if (llmReq->getNumTokens(0) == llmReq->mPromptLen + llmReq->mMaxNewTokens)
+            if (llmReq->getNumTokens(0) == promptLen + llmReq->mMaxNewTokens)
             {
                 llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
                 if (llmReq->mSeqSlot)
                 {
-                    kvCacheManager->removeSequence(llmReq->mSeqSlot.value());
+                    kvCacheManager->removeSequence(llmReq->mSeqSlot.value(), llmReq);
                 }
             }
         }
@@ -1377,5 +1416,195 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsGuaranteedCompleti
             expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 244);
+    }
+}
+
+TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
+{
+    SizeType32 kvCacheMaxNumTokens = 200;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+    bool enableReuse = true;
+
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT};
+    auto sinkTokenLens = std::vector<SizeType32>{0}; // sinkTokenLen > 0 is not supported with KV cache reuse
+    for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
+    {
+        for (auto sinkTokenLen : sinkTokenLens)
+        {
+            auto kvCacheManager = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens,
+                kvCacheMaxNumTokensPerSeq, sinkTokenLen, enableReuse);
+            auto peftCacheManager = getPeftCacheManager();
+            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
+            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+            // Create two requests that should fit in kvCache for entire duration
+            int32_t maxNewTokens = 80;
+            int32_t promptLen = kvCacheTokensPerBlock
+                + 1; // must be one greater than kvCacheTokensPerBlock because we don't reuse last input token
+
+            RequestList activeRequests;
+            auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+            std::iota(inputTokens->begin(), inputTokens->end(), 0);
+            activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 0, 1234));
+            activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 1, 6789));
+
+            std::vector<ExpectedState> expectedStates;
+            expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 80, promptLen, 0}}});
+            expectedStates.push_back(
+                ExpectedState{1, 80, {0, 1}, {{0, 80, promptLen, 1, promptLen}, {1, 80, promptLen, 0}}});
+            expectedStates.push_back(ExpectedState{80, 81, {1}, {{1, 80, promptLen, 79, promptLen}}});
+
+            // Callback to call at each iteration, to have option to add new active Requests
+            auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
+                expectedStates, addNewRequestsCb, maxInputLen);
+
+            EXPECT_EQ(numIterations, 81);
+            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 1);
+        }
+    }
+}
+
+TEST_F(CapacitySchedulerTest, DelayDuplicateRequestChunked)
+{
+    SizeType32 kvCacheMaxNumTokens = 200;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+    bool enableReuse = true;
+
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
+        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
+    for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
+    {
+        auto kvCacheManager = getKvCacheManager(
+            maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, 0, enableReuse);
+        auto peftCacheManager = getPeftCacheManager();
+        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
+        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+        // Create two requests that should fit in kvCache for entire duration
+        int32_t maxNewTokens = 40;
+        int32_t promptLen = 50;
+
+        RequestList activeRequests;
+        auto inputTokens0 = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+        std::iota(inputTokens0->begin(), inputTokens0->end(), 0);
+        auto request0 = createRequest(inputTokens0, maxNewTokens, 0, 1234);
+        auto inputTokens1 = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+        std::iota(inputTokens1->begin(), inputTokens1->end(), 0);
+        auto request1 = createRequest(inputTokens1, maxNewTokens, 1, 6789);
+        request0->setContextChunkSize(20);
+        request1->setContextChunkSize(20);
+        activeRequests.push_back(std::move(request0));
+        activeRequests.push_back(std::move(request1));
+
+        std::vector<ExpectedState> expectedStates;
+        expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 40, 50, 0, 0}}});
+        expectedStates.push_back(ExpectedState{1, 2, {0, 1}, {{0, 40, 50, 0, 20}}});
+        expectedStates.push_back(ExpectedState{2, 3, {0, 1}, {{0, 40, 50, 0, 40}}});
+        expectedStates.push_back(ExpectedState{3, 4, {0, 1}, {{0, 40, 50, 1, 50}, {1, 40, 50, 0, 0}}});
+        expectedStates.push_back(ExpectedState{4, 42, {0, 1}, {{0, 40, 50, 2, 50}, {1, 40, 50, 1, 50}}});
+        expectedStates.push_back(ExpectedState{42, 43,
+            {
+                1,
+            },
+            {{1, 40, 50, 39, 50}}});
+        // Callback to call at each iteration, to have option to add new active Requests
+        auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
+            addNewRequestsCb, maxInputLen);
+
+        EXPECT_EQ(numIterations, 43);
+        EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 4);
+    }
+}
+
+TEST_F(CapacitySchedulerTest, DelayFiveRequestsComplicated)
+{
+    SizeType32 kvCacheMaxNumTokens = 1000;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 150;
+    SizeType32 maxNumRequests = 5;
+    SizeType32 maxInputLen = 1000;
+    bool enableReuse = true;
+
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT};
+    auto sinkTokenLens = std::vector<SizeType32>{0}; // sinkTokenLen > 0 is not supported with KV cache reuse
+    for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
+    {
+        for (auto sinkTokenLen : sinkTokenLens)
+        {
+            auto kvCacheManager = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens,
+                kvCacheMaxNumTokensPerSeq, sinkTokenLen, enableReuse);
+            auto peftCacheManager = getPeftCacheManager();
+            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
+            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+            // Create two requests that should fit in kvCache for entire duration
+            int32_t maxNewTokens = 80;
+            int32_t promptLen = kvCacheTokensPerBlock
+                + 1; // must be one greater than kvCacheTokensPerBlock because we don't reuse last input token
+
+            std::vector<int32_t> promptLens(5);
+            RequestList activeRequests;
+            // produce 2 requests with unique system prompts
+            for (int i = 0; i < 2; ++i)
+            {
+                int32_t promptLen = kvCacheTokensPerBlock * (i + 1) + 1;
+                promptLens[i] = promptLen;
+                auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+                std::iota(inputTokens->begin(), inputTokens->end(), i + 1);
+                activeRequests.push_back(createRequest(inputTokens, maxNewTokens, i, 1234));
+            }
+            // produce 3 requests with matching system prompts
+            for (int i = 0; i < 3; ++i)
+            {
+                int32_t promptLen = kvCacheTokensPerBlock * (i + 1) + 1;
+                promptLens[2 + i] = promptLen;
+                auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
+                std::iota(inputTokens->begin(), inputTokens->end(), 0);
+                activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 2 + i, 1234));
+            }
+
+            std::vector<ExpectedState> expectedStates;
+            expectedStates.push_back(ExpectedState{0, 1, {0, 1, 2, 3, 4},
+                {{0, maxNewTokens, promptLens[0], 0, 0}, {1, maxNewTokens, promptLens[1], 0, 0},
+                    {2, maxNewTokens, promptLens[2], 0, 0}}});
+            expectedStates.push_back(ExpectedState{1, 2, {0, 1, 2, 3, 4},
+                {{0, maxNewTokens, promptLens[0], 1, promptLens[0]}, {1, maxNewTokens, promptLens[1], 1, promptLens[1]},
+                    {2, maxNewTokens, promptLens[2], 1, promptLens[2]}, {3, maxNewTokens, promptLens[3], 0, 0}}});
+            expectedStates.push_back(ExpectedState{2, 80, {0, 1, 2, 3, 4},
+                {{0, maxNewTokens, promptLens[0], 2, promptLens[0]}, {1, maxNewTokens, promptLens[1], 2, promptLens[1]},
+                    {2, maxNewTokens, promptLens[2], 2, promptLens[2]},
+                    {3, maxNewTokens, promptLens[3], 1, promptLens[3]}, {4, maxNewTokens, promptLens[4], 0, 0}}});
+            expectedStates.push_back(ExpectedState{80, 81, {3, 4},
+                {{3, maxNewTokens, promptLens[3], 79, promptLens[3]},
+                    {4, maxNewTokens, promptLens[4], 78, promptLens[4]}}});
+            expectedStates.push_back(ExpectedState{81, 82, {4}, {{4, maxNewTokens, promptLens[4], 79, promptLens[4]}}});
+
+            // Callback to call at each iteration, to have option to add new active Requests
+            auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
+                expectedStates, addNewRequestsCb, maxInputLen);
+
+            EXPECT_EQ(numIterations, 82);
+            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 3);
+        }
     }
 }

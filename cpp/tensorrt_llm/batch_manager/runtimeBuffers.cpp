@@ -37,11 +37,11 @@ using namespace tensorrt_llm::runtime;
 namespace tensorrt_llm::batch_manager
 {
 
-RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-    TensorPtr allReduceWorkspace, TllmRuntime const& runtime, ModelConfig const& modelConfig,
-    WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
-    std::optional<SizeType32> maxNumTokens)
+RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
+    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
+    TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+    executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens)
     : mAllReduceWorkspace{std::move(allReduceWorkspace)}
 {
     if (worldConfig.isTensorParallel())
@@ -49,8 +49,8 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         TLLM_CHECK(mAllReduceWorkspace);
     }
 
-    create(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen, extendedRuntimePerfKnobConfig, runtime,
-        modelConfig, worldConfig, decodingConfig);
+    create(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen,
+        extendedRuntimePerfKnobConfig, runtime, modelConfig, worldConfig, decodingConfig);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
@@ -159,17 +159,17 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-    SizeType32 sinkTokenLen, executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-    TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig)
+void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
+    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TllmRuntime const& runtime,
+    ModelConfig const& modelConfig, WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
 
     if (modelConfig.isTransformerBased())
     {
-        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindow, sinkTokenLen,
+        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen,
             extendedRuntimePerfKnobConfig, runtime, modelConfig, worldConfig);
     }
     if (modelConfig.isRnnBased())
@@ -187,7 +187,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, Si
         logits = manager.emptyTensor(MemoryType::kGPU, logitsType);
     }
 
-    seqSlotRemappingHost = manager.emptyTensor(MemoryType::kPINNED, nvinfer1::DataType::kINT32);
+    seqSlotRemappingHost = manager.emptyTensor(MemoryType::kPINNEDPOOL, nvinfer1::DataType::kINT32);
     seqSlotRemappingDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
     // TODO(rkobus) check which tensors can be allocated as pinned for max size
@@ -325,6 +325,7 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     numContextRequests = static_cast<SizeType32>(contextRequests.size());
     auto numContextLogits = numContextRequests;
     numContextTokens = 0;
+    maxContextLength = 0;
     for (auto const& llmReq : contextRequests)
     {
         auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
@@ -333,6 +334,8 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
         auto const contextChunkSize
             = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
         numContextTokens += contextChunkSize + draftLength;
+        if (maxContextLength < llmReq->mPromptLen)
+            maxContextLength = llmReq->mPromptLen;
     }
 
     // set generation sizes
@@ -487,14 +490,13 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 }
                 else
                 {
-                    // glm-10b requires mask in input sentence
-                    TLLM_THROW("no mask in GLM-10B input sentence!");
+                    llmReq->mMaskPosition = maxContextLength;
                 }
 
                 // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
                 positionIdsHost.resize(totalInputSize + inputLength);
                 std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                positionIdsHost.back() = std::distance(start, it);
+                positionIdsHost.back() = llmReq->mMaskPosition;
 
                 positionIdsHostRow2.resize(totalInputSize + inputLength);
                 positionIdsHostRow2.back() = 1;
@@ -548,8 +550,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
             for (int beam = 0; beam < reqBeamWidth; ++beam)
             {
-                auto lastToken = llmReq->getLastTokens(beam);
-                auto numTokens = llmReq->getNumTokens(beam);
+                auto const lastToken = llmReq->getLastTokens(beam);
+                auto const numTokens = llmReq->getNumTokens(beam);
                 inputHost.push_back(lastToken);
                 decoderInputHost.push_back(lastToken);
 
@@ -642,7 +644,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         positionIdsHost.insert(positionIdsHost.end(), positionIdsHostRow2.begin(), positionIdsHostRow2.end());
     }
 
-    if (transformerBuffers)
+    if (transformerBuffers && kvCacheManagerPtr)
     {
         transformerBuffers->copyKvBlockOffsets(
             contextRequests, genRequests, kvCacheManagerPtr, crossKvCacheManagerPtr, runtime);

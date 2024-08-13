@@ -267,6 +267,7 @@ private:
 
     std::unordered_map<std::string, LogitsPostProcessor> mLogitsPostProcessorMap;
     std::optional<Model::LogitsPostProcessorBatched> mLogitsPostProcessorBatched;
+    bool mReplicateLogitsPostProcessor;
 
     bool mIsOrchestrator = false;
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mOrchLeaderComm;

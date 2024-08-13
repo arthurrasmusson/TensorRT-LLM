@@ -74,6 +74,7 @@ MemoryType Tensor::getMemoryType() const
     case runtime::MemoryType::kCPU: return MemoryType::kCPU;
     case runtime::MemoryType::kPINNED: return MemoryType::kCPU_PINNED;
     case runtime::MemoryType::kUVM: return MemoryType::kUVM;
+    case runtime::MemoryType::kPINNEDPOOL: return MemoryType::kCPU_PINNEDPOOL;
     }
 
     TLLM_THROW("Unsupported memory type");

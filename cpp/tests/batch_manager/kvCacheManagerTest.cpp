@@ -151,7 +151,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     ///////////////////////////////////////////////////////////////////////////
     // add request and then remove it
     auto constexpr beamIdx = 0;
-    blockManager.addSequence(seq0, llmRequest0->getNumTokens(beamIdx), llmRequest0);
+    auto promptLen0 = llmRequest0->getNumTokens(beamIdx);
+    auto numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
     EXPECT_EQ(llmRequest0->getPrepopulatedPromptLen(), 0);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest0->addNewToken(9, beamIdx);
@@ -175,7 +177,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     GenerationRequest seq1{seqSlotIdx, inputLength, beamWidth};
 
     // reuse blocks 0, 1 and get new block 3
-    blockManager.addSequence(seq1, llmRequest1->getNumTokens(beamIdx), llmRequest1);
+    auto promptLen1 = llmRequest1->getNumTokens(beamIdx);
+    auto numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
     EXPECT_EQ(llmRequest1->getPrepopulatedPromptLen(), 2 * tokensPerBlock);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
     llmRequest1->addNewToken(9, beamIdx);
@@ -193,14 +197,18 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse blocks 0, 1 and get new block 4
     llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
     llmRequest0->addNewToken(9, beamIdx);
-    blockManager.addSequence(seq0, llmRequest0->getNumTokens(beamIdx), llmRequest0);
+    promptLen0 = llmRequest0->getNumTokens(beamIdx);
+    numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
     EXPECT_EQ(llmRequest0->getPrepopulatedPromptLen(), 2 * tokensPerBlock);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 4}));
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numBlocks);
 
     // reuse blocks 0, 1 and reuse block 2
-    blockManager.addSequence(seq1, llmRequest1->getNumTokens(beamIdx), llmRequest1);
+    promptLen1 = llmRequest1->getNumTokens(beamIdx);
+    numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
     EXPECT_EQ(llmRequest1->getPrepopulatedPromptLen(), llmRequest1->getNumTokens(beamIdx) - 1);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest1->addNewToken(10, beamIdx);
@@ -227,7 +235,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     seqSlotIdx = 2;
     GenerationRequest seq2{seqSlotIdx, numTokens, beamWidth};
     // reuse block 0, get new block 5
-    blockManager.addSequence(seq2, llmRequest2->getNumTokens(beamIdx), llmRequest2);
+    auto promptLen2 = llmRequest2->getNumTokens(beamIdx);
+    auto numContextBlocks2 = tc::ceilDiv(promptLen2, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, llmRequest2);
     EXPECT_EQ(llmRequest2->getPrepopulatedPromptLen(), tokensPerBlock);
     EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 5}));
     llmRequest2->addNewToken(5, beamIdx);
@@ -247,7 +257,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     seqSlotIdx = 3;
     GenerationRequest seq3{seqSlotIdx, numTokens, beamWidth};
     // reuse blocks 0, 1, get new block 6
-    blockManager.addSequence(seq3, llmRequest3->getNumTokens(beamIdx), llmRequest3);
+    auto promptLen3 = llmRequest3->getNumTokens(beamIdx);
+    auto numContextBlocks3 = tc::ceilDiv(promptLen3, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, llmRequest3);
     EXPECT_EQ(llmRequest3->getPrepopulatedPromptLen(), 2 * tokensPerBlock);
     EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 6}));
     llmRequest3->addNewToken(11, beamIdx);
@@ -274,7 +286,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     GenerationRequest seq4{seqSlotIdx, numTokens, beamWidth};
 
     // reuse blocks 0, 1 and add new block 7
-    blockManager.addSequence(seq4, llmRequest4->getNumTokens(beamIdx), llmRequest4);
+    auto promptLen4 = llmRequest4->getNumTokens(beamIdx);
+    auto numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
     EXPECT_EQ(llmRequest4->getPrepopulatedPromptLen(), 2 * tokensPerBlock);
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 7}));
     numTokens = llmRequest4->getNumTokens(beamIdx);
@@ -292,7 +306,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     ///////////////////////////////////////////////////////////////////////////
     // add request with 11 tokens again and make sure no discarded tokens reuse happens
     // reuse blocks 0, 1 and add block 3
-    blockManager.addSequence(seq4, llmRequest4->getNumTokens(beamIdx), llmRequest4);
+    promptLen4 = llmRequest4->getNumTokens(beamIdx);
+    numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
     EXPECT_EQ(llmRequest4->getPrepopulatedPromptLen(), 2 * tokensPerBlock);
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
     numTokens = llmRequest4->getNumTokens(beamIdx);
@@ -315,7 +331,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     seqSlotIdx = 6;
     GenerationRequest seq5{seqSlotIdx, numTokens, beamWidth};
     // no reuse, all blocks need to be freed
-    blockManager.addSequence(seq5, llmRequest5->getNumTokens(beamIdx), llmRequest5);
+    auto promptLen5 = llmRequest5->getNumTokens(beamIdx);
+    auto numContextBlocks5 = tc::ceilDiv(promptLen5, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, llmRequest5);
     llmRequest5->addNewToken(0, beamIdx);
     EXPECT_EQ(llmRequest5->getPrepopulatedPromptLen(), 0);
 
@@ -337,7 +355,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     seqSlotIdx = 7;
     GenerationRequest seq6{seqSlotIdx, numTokens, beamWidth};
     // no reuse, all blocks need to be freed
-    blockManager.addSequence(seq6, llmRequest6->getNumTokens(beamIdx), llmRequest6);
+    auto promptLen6 = llmRequest6->getNumTokens(beamIdx);
+    auto numContextBlocks6 = tc::ceilDiv(promptLen6, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq6, promptLen6, numContextBlocks6, llmRequest6);
     llmRequest6->addNewToken(0, beamIdx);
     EXPECT_EQ(llmRequest6->getPrepopulatedPromptLen(), 0);
 

@@ -16,9 +16,9 @@ namespace tensorrt_llm::executor
 {
 
 KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> const& maxTokens,
-    std::optional<SizeType32> const& maxAttentionWindow, std::optional<SizeType32> const& sinkTokenLength,
-    std::optional<FloatType> const& freeGpuMemoryFraction, std::optional<size_t> const& hostCacheSize,
-    bool onboardBlocks)
+    std::optional<std::vector<SizeType32>> const& maxAttentionWindowVec,
+    std::optional<SizeType32> const& sinkTokenLength, std::optional<FloatType> const& freeGpuMemoryFraction,
+    std::optional<size_t> const& hostCacheSize, bool onboardBlocks)
     : mEnableBlockReuse(enableBlockReuse)
     , mHostCacheSize(hostCacheSize)
     , mOnboardBlocks(onboardBlocks)
@@ -27,9 +27,9 @@ KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> co
     {
         setMaxTokens(maxTokens.value());
     }
-    if (maxAttentionWindow)
+    if (maxAttentionWindowVec)
     {
-        setMaxAttentionWindow(maxAttentionWindow.value());
+        setMaxAttentionWindowVec(maxAttentionWindowVec.value());
     }
     if (sinkTokenLength)
     {
@@ -51,9 +51,9 @@ std::optional<SizeType32> KvCacheConfig::getMaxTokens() const
     return mMaxTokens;
 }
 
-std::optional<SizeType32> KvCacheConfig::getMaxAttentionWindow() const
+std::optional<std::vector<SizeType32>> KvCacheConfig::getMaxAttentionWindowVec() const
 {
-    return mMaxAttentionWindow;
+    return mMaxAttentionWindowVec;
 }
 
 std::optional<SizeType32> KvCacheConfig::getSinkTokenLength() const
@@ -87,10 +87,13 @@ void KvCacheConfig::setMaxTokens(SizeType32 maxTokens)
     mMaxTokens = maxTokens;
 }
 
-void KvCacheConfig::setMaxAttentionWindow(SizeType32 maxAttentionWindow)
+void KvCacheConfig::setMaxAttentionWindowVec(std::vector<SizeType32> maxAttentionWindowVec)
 {
-    TLLM_CHECK(maxAttentionWindow > 0);
-    mMaxAttentionWindow = maxAttentionWindow;
+    for (SizeType32 maxAttentionWindow : maxAttentionWindowVec)
+    {
+        TLLM_CHECK(maxAttentionWindow > 0);
+    }
+    mMaxAttentionWindowVec = maxAttentionWindowVec;
 }
 
 void KvCacheConfig::setSinkTokenLength(SizeType32 sinkTokenLength)

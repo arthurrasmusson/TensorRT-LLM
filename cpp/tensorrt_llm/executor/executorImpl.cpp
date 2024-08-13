@@ -170,9 +170,14 @@ void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& model
 
     TLLM_CHECK_WITH_INFO(modelPathOpt.has_value() || engineBufferOpt.has_value(),
         "Either engine path or deserialized engine buffer should be given to load the model properly.");
-    auto const rawEngine = engineBufferOpt.has_value()
+    auto rawEngine = engineBufferOpt.has_value()
         ? runtime::RawEngine(engineBufferOpt.value().data(), engineBufferOpt.value().size())
         : runtime::RawEngine(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
+
+    if (rawEngine.getType() != tensorrt_llm::runtime::RawEngine::FilePath && modelPathOpt.has_value())
+    {
+        rawEngine.setPath(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
+    }
 
     auto const& modelConfig = jsonConfig.getModelConfig();
 
@@ -291,6 +296,10 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     {
         mModel->setLogitsPostProcessorBatched(mLogitsPostProcessorBatched);
     }
+    if (!executorConfig.getReplicateLogitsPostProcessor())
+    {
+        mModel->setReplicateLogitsPostProcessor(false);
+    }
 
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
     int32_t const worldSize = worldComm.getSize();
@@ -328,7 +337,7 @@ std::shared_ptr<Model> Executor::Impl::createModel(runtime::RawEngine const& raw
         }
     }();
 
-    auto const optionalParams = batch_manager::TrtGptModelOptionalParams(executorConfig);
+    auto optionalParams = batch_manager::TrtGptModelOptionalParams(executorConfig);
     return batch_manager::TrtGptModelFactory::create(rawEngine, modelConfig, worldConfig, gptModelType, optionalParams);
 }
 

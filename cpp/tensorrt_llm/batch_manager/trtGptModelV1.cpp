@@ -19,6 +19,7 @@
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/stlUtils.h"
 #include "tensorrt_llm/runtime/gptSession.h"
+#include "tensorrt_llm/runtime/rawEngine.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
 #include <algorithm>
@@ -226,6 +227,7 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     sessionConfig.normalizeLogProbs = optionalParams.normalizeLogProbs;
     sessionConfig.gpuWeightsPercent = optionalParams.gpuWeightsPercent;
     sessionConfig.cudaGraphMode = true;
+    sessionConfig.enginePath = rawEngine.getPathOpt();
 
     mSession = std::make_shared<GptSession>(sessionConfig, modelConfig, worldConfig, rawEngine, logger);
 
@@ -466,9 +468,9 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     auto const& outputIds = generationOutput.ids;
     auto const& outputDims = outputIds->getShape();
 
-    auto outputHost = bufferManager.copyFrom(*outputIds, MemoryType::kPINNED);
+    auto outputHost = bufferManager.copyFrom(*outputIds, MemoryType::kPINNEDPOOL);
     auto output = bufferCast<TokenIdType>(*outputHost);
-    auto outputLengthsHost = bufferManager.copyFrom(*generationOutput.lengths, MemoryType::kPINNED);
+    auto outputLengthsHost = bufferManager.copyFrom(*generationOutput.lengths, MemoryType::kPINNEDPOOL);
     auto outputLengths = bufferCast<SizeType32>(*outputLengthsHost);
 
     float* cumLogProbsHostData = nullptr;
@@ -476,12 +478,12 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     GenerationOutput::TensorPtr cumLogProbsHost, logProbsHost;
     if (generationOutput.cumLogProbs)
     {
-        cumLogProbsHost = bufferManager.copyFrom(*generationOutput.cumLogProbs, MemoryType::kPINNED);
+        cumLogProbsHost = bufferManager.copyFrom(*generationOutput.cumLogProbs, MemoryType::kPINNEDPOOL);
         cumLogProbsHostData = bufferCast<float>(*cumLogProbsHost);
     }
     if (generationOutput.logProbs)
     {
-        logProbsHost = bufferManager.copyFrom(*generationOutput.logProbs, MemoryType::kPINNED);
+        logProbsHost = bufferManager.copyFrom(*generationOutput.logProbs, MemoryType::kPINNEDPOOL);
         logProbsHostData = bufferCast<float>(*logProbsHost);
     }
     bufferManager.getStream().synchronize();
@@ -531,7 +533,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
                 TensorPtr contextLogitsView
                     = ITensor::slice(generationOutput.contextLogits, inputOffset, llmReq->mPromptLen);
 
-                TensorPtr contextLogitsHost = bufferManager.copyFrom(*contextLogitsView, MemoryType::kPINNED);
+                TensorPtr contextLogitsHost = bufferManager.copyFrom(*contextLogitsView, MemoryType::kPINNEDPOOL);
                 llmReq->setContextLogitsHost(contextLogitsHost);
             }
             inputOffset += llmReq->mPromptLen;
@@ -568,7 +570,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
                 TensorPtr genLogitsViewNoPad = ITensor::slice(genLogitsViewWithPad, 0, llmReqBeamWidth * llmReqOutLen);
                 genLogitsViewNoPad->reshape(ITensor::makeShape({llmReqBeamWidth, llmReqOutLen, vocabSizePadded}));
 
-                TensorPtr genLogitsHost = bufferManager.copyFrom(*genLogitsViewNoPad, MemoryType::kPINNED);
+                TensorPtr genLogitsHost = bufferManager.copyFrom(*genLogitsViewNoPad, MemoryType::kPINNEDPOOL);
                 llmReq->setGenerationLogitsHost(genLogitsHost);
             }
             reqOffset += 1;
@@ -637,6 +639,11 @@ void TrtGptModelV1::setLogitsPostProcessorBatched(std::optional<LogitsPostProces
 {
     TLLM_CHECK_WITH_INFO(
         !logitsPostProcessorBatched.has_value(), "Batched logits post processor is not supported in V1 batcher");
+}
+
+void TrtGptModelV1::setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor)
+{
+    TLLM_THROW("Logits post processor is not supported in V1 batcher.");
 }
 
 } // namespace tensorrt_llm::batch_manager
