@@ -28,7 +28,7 @@ public:
     explicit MpiComm(mpi::MpiComm const& comm)
         : mComm{std::addressof(comm)}
     {
-        cudaGetDevice(&mDeviceId);
+        TLLM_CUDA_CHECK(cudaGetDevice(&mDeviceId));
     }
 
     virtual ~MpiComm() = default;
@@ -51,7 +51,7 @@ public:
 
     virtual void setCudaDevice() const
     {
-        cudaSetDevice(mDeviceId);
+        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
     }
 
     [[nodiscard]] virtual int getRank() const
@@ -89,7 +89,7 @@ public:
     using RequestIdType = LlmRequest::RequestIdType;
 
     MpiResponder(std::vector<std::unique_ptr<DataSender>> senders, MpiComm const& comm,
-        std::vector<std::unique_ptr<DataContext>> requesterContexts);
+        std::unique_ptr<DataContext> selfContext);
 
     [[nodiscard]] std::future<void> respondAndSendAsync(LlmRequest const& llmRequest) override;
 
@@ -140,6 +140,8 @@ private:
         DataSender* mSender{};
     };
 
+    void addRequesterContext(std::unique_ptr<DataContext> context);
+
     void response();
 
     void terminate();
@@ -173,6 +175,7 @@ private:
     std::map<int, RequestHandler const*> mRankToHandler;
     std::optional<std::pair<RequestIdType, RequestHandler const*>> mCurrentRequest;
     std::map<RequestIdType, Response> mReadyResponses;
+    std::unique_ptr<DataContext> mSelfContext;
 
     std::mutex mResponderMutex, mCondMutex;
     std::atomic<bool> mAnyReady{false}, mTerminate{false};
@@ -186,14 +189,21 @@ public:
     using RankIdType = int;
 
     MpiRequester(std::vector<std::unique_ptr<DataReceiver>> receivers, MpiComm const& comm,
-        std::vector<std::unique_ptr<DataContext>> responderContexts);
+        std::unique_ptr<DataContext> selfContext);
 
-    [[nodiscard]] std::future<void> requestAndReceiveAsync(
-        LlmRequest const& llmRequest, DataContext const& context) override
+    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest, DataContext context) override
     {
+        // TODO: Add support for multi-node, multi-executor, and data context serialization.
+        auto responderRank = context.getSelfRank();
+        if (mRankToHandler.find(responderRank) == mRankToHandler.end())
+        {
+            auto context = mSelfContext->clone();
+            context->reset({responderRank}, {0});
+            addResponderContext(std::move(context));
+        }
         // TODO: Modify the implementation here to avoid frequent thread creation.
         return std::async(
-            std::launch::async, &MpiRequester::requestSync, this, std::cref(llmRequest), std::cref(context));
+            std::launch::async, &MpiRequester::requestSync, this, std::cref(llmRequest), std::move(context));
     }
 
 private:
@@ -232,11 +242,16 @@ private:
         DataReceiver* mReceiver{};
     };
 
-    void requestSync(LlmRequest const& llmRequest, DataContext const& context);
+    void addResponderContext(std::unique_ptr<DataContext> context);
+
+    void requestSync(LlmRequest const& llmRequest, DataContext context);
 
     MpiComm const* mComm{};
     std::vector<std::unique_ptr<DataReceiver>> mReceivers;
+    std::unique_ptr<DataContext> mSelfContext;
+    std::map<int, ResponseHandler const*> mRankToHandler;
     std::vector<std::unique_ptr<ResponseHandler>> mResponseHandlers;
+    std::mutex mRequesterMutex;
 };
 
 } // namespace tensorrt_llm::batch_manager

@@ -13,6 +13,8 @@
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -22,6 +24,7 @@ using SizeType32 = tensorrt_llm::runtime::SizeType32;
 using LlmRequest = tensorrt_llm::batch_manager::LlmRequest;
 using namespace tensorrt_llm::batch_manager::kv_cache_manager;
 using namespace tensorrt_llm::batch_manager;
+namespace texec = tensorrt_llm::executor;
 
 using testing::Return;
 using testing::ReturnRef;
@@ -110,12 +113,10 @@ public:
 
     struct Params
     {
-        Params(int numPeerContexts, int numTransceiver)
+        Params(int numTransceiver)
             : mComm{std::make_unique<MockMpiComm>()}
             , mSelfContext{std::make_unique<DataContext>(std::vector<SizeType32>{0})}
         {
-            std::generate_n(std::back_inserter(mPeerContexts), numPeerContexts,
-                [] { return std::make_unique<DataContext>(std::vector<SizeType32>{1}); });
             std::generate_n(
                 std::back_inserter(mSenders), numTransceiver, [] { return std::make_unique<MockDataSender>(); });
             std::generate_n(
@@ -124,7 +125,6 @@ public:
 
         std::unique_ptr<MockMpiComm> mComm;
         std::unique_ptr<DataContext> mSelfContext;
-        std::vector<std::unique_ptr<DataContext>> mPeerContexts;
         std::vector<std::unique_ptr<MockDataSender>> mSenders;
         std::vector<std::unique_ptr<MockDataReceiver>> mReceivers;
     };
@@ -139,48 +139,52 @@ public:
 
     static auto makeResponder(Params&& params)
     {
-        return MpiResponder{move<DataSender>(params.mSenders), *params.mComm, move<DataContext>(params.mPeerContexts)};
+        return MpiResponder{
+            move<DataSender>(params.mSenders), *params.mComm, std::make_unique<DataContext>(*params.mSelfContext)};
     }
 
     static auto makeRequester(Params&& params)
     {
         return MpiRequester{
-            move<DataReceiver>(params.mReceivers), *params.mComm, move<DataContext>(params.mPeerContexts)};
+            move<DataReceiver>(params.mReceivers), *params.mComm, std::make_unique<DataContext>(*params.mSelfContext)};
     }
 
-    static auto makeLlmRequest(LlmRequest::RequestIdType requestId = 0, SizeType32 maxNewTokens = 0,
-        std::shared_ptr<VecTokens> inputTokens = std::make_shared<VecTokens>(),
-        tr::SamplingConfig samplingConfig = tr::SamplingConfig{1}, bool isStreaming = false)
+    static auto makeLlmRequest(
+        LlmRequest::RequestIdType requestId = 0, SizeType32 maxNewTokens = 1, VecTokens inputTokens = {-1})
     {
-        return LlmRequest{requestId, maxNewTokens, std::move(inputTokens), std::move(samplingConfig), isStreaming};
+        texec::Request request{std::move(inputTokens), maxNewTokens};
+        auto state = std::make_unique<texec::ContextPhaseState>(requestId, std::vector<texec::SizeType32>{});
+        auto stats = texec::ContextPhaseParams({}, state.release());
+        request.setContextPhaseParams(std::move(stats));
+        return std::make_unique<LlmRequest>(requestId, std::move(request));
     }
 };
 
 TEST_F(MockTransceiverTest, MpiResponderBasic)
 {
-    Params params{1, 1};
+    Params params{1};
     ON_CALL(*params.mSenders.front(), inquireSupport).WillByDefault(Return(true));
     EXPECT_CALL(*params.mSenders.front(), inquireSupport).WillOnce(Return(true));
     EXPECT_CALL(*params.mSenders.front(), send).WillOnce(Return());
     EXPECT_CALL(*params.mComm, setCudaDevice).WillOnce(Return());
     EXPECT_CALL(*params.mComm, recvRequestId()).WillOnce(Return(std::pair<int, LlmRequest::RequestIdType>{1, 0}));
     auto responder = makeResponder(std::move(params));
-    auto future = responder.respondAndSendAsync(makeLlmRequest(0));
+    auto request = makeLlmRequest(0);
+    auto future = responder.respondAndSendAsync(*request);
     future.get();
 }
 
 TEST_F(MockTransceiverTest, MpiRequesterBasic)
 {
-    Params params{1, 1};
+    Params params{1};
     ON_CALL(*params.mReceivers.front(), inquireSupport).WillByDefault(Return(true));
     EXPECT_CALL(*params.mReceivers.front(), inquireSupport).WillOnce(Return(true));
     EXPECT_CALL(*params.mReceivers.front(), receive).WillOnce(Return());
     EXPECT_CALL(*params.mComm, setCudaDevice).WillOnce(Return());
     EXPECT_CALL(*params.mComm, sendRequestId).WillOnce(Return());
     auto requester = makeRequester(std::move(params));
-    auto llmRequest = makeLlmRequest(0);
-    auto context = DataContext{{1}};
-    auto future = requester.requestAndReceiveAsync(llmRequest, context);
+    auto request = makeLlmRequest(0);
+    auto future = requester.requestAndReceiveAsync(*request, DataContext{{1}, 0});
     future.get();
 }
 
@@ -257,10 +261,9 @@ protected:
                 = std::distance(mSenderRanks.begin(), std::find(mSenderRanks.begin(), mSenderRanks.end(), selfRank));
             CacheContext selfContext{*mCacheConfig, mSenderRanks, selfIdx};
             std::vector<std::unique_ptr<DataSender>> senders;
-            senders.emplace_back(std::make_unique<CacheBlockSender>(mManager.get(), *mComm, std::move(selfContext)));
-            std::vector<std::unique_ptr<DataContext>> requesterContexts;
-            requesterContexts.emplace_back(std::make_unique<CacheContext>(*mCacheConfig, mReceiverRanks));
-            mResponder = std::make_unique<MpiResponder>(std::move(senders), *mComm, std::move(requesterContexts));
+            senders.emplace_back(std::make_unique<CacheBlockSender>(mManager.get(), *mComm, selfContext));
+            mResponder = std::make_unique<MpiResponder>(
+                std::move(senders), *mComm, std::make_unique<CacheContext>(selfContext));
         }
         else
         {
@@ -268,25 +271,23 @@ protected:
                 mReceiverRanks.begin(), std::find(mReceiverRanks.begin(), mReceiverRanks.end(), selfRank));
             CacheContext selfContext{*mCacheConfig, mReceiverRanks, selfIdx};
             std::vector<std::unique_ptr<DataReceiver>> receivers;
-            receivers.emplace_back(
-                std::make_unique<CacheBlockReceiver>(mManager.get(), *mComm, std::move(selfContext)));
-            std::vector<std::unique_ptr<DataContext>> responderContexts;
-            responderContexts.emplace_back(std::make_unique<CacheContext>(*mCacheConfig, mSenderRanks));
-            mRequester = std::make_unique<MpiRequester>(std::move(receivers), *mComm, std::move(responderContexts));
+            receivers.emplace_back(std::make_unique<CacheBlockReceiver>(mManager.get(), *mComm, selfContext));
+            mRequester = std::make_unique<MpiRequester>(
+                std::move(receivers), *mComm, std::make_unique<CacheContext>(selfContext));
         }
     }
 
-    std::unique_ptr<LlmRequest> makeLlmRequest(SizeType32 length)
+    auto makeLlmRequest(SizeType32 length)
     {
-        SizeType32 constexpr maxNewTokens{0};
-        auto constexpr beamWidth{1};
-        bool constexpr isStreaming{false};
-        auto request = std::make_unique<LlmRequest>(mRequestId++, maxNewTokens, std::make_shared<VecTokens>(length),
-            tr::SamplingConfig{beamWidth}, isStreaming);
-        return request;
+        constexpr SizeType32 maxNewTokens{1};
+        texec::Request request{VecTokens(length), maxNewTokens};
+        auto state = std::make_unique<texec::ContextPhaseState>(mRequestId, std::vector<texec::SizeType32>{});
+        auto stats = texec::ContextPhaseParams({}, state.release());
+        request.setContextPhaseParams(std::move(stats));
+        return std::make_unique<LlmRequest>(mRequestId++, std::move(request));
     }
 
-    void addRequestAndTransportCache(std::shared_ptr<LlmRequest> llmRequest)
+    void addRequestAndTransportCache(std::shared_ptr<LlmRequest> const& llmRequest)
     {
         auto constexpr beamIdx{0};
         auto constexpr beamWidth{1};
@@ -305,7 +306,7 @@ protected:
         }
         else
         {
-            DataContext context{mSenderRanks};
+            DataContext context{mSenderRanks, 0};
             auto future = mRequester->requestAndReceiveAsync(*llmRequest, context);
             future.get();
             auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx);

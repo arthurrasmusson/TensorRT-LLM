@@ -32,7 +32,7 @@ find_package(pybind11 REQUIRED)
 add_library(modelSpec SHARED modelSpec.cpp modelSpecBinding.cpp)
 set_target_properties(modelSpec PROPERTIES PREFIX "")
 set_target_properties(modelSpec PROPERTIES OUTPUT_NAME "model_spec")
-target_link_libraries(modelSpec)
+target_link_libraries(modelSpec PRIVATE tensorrt_llm)
 
 # Static lib for other test to link
 add_library(modelSpecStatic STATIC modelSpec.cpp)

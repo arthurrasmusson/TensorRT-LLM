@@ -13,16 +13,17 @@ set(BATCH_MANAGER_STATIC_TARGET ${BATCH_MANAGER_TARGET_NAME}_static)
 
 set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
+# keep this list sorted alphabetically
 set(SRCS
     cacheTransceiver.cpp
     capacityScheduler.cpp
+    debugUtils.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp
     GptManager.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
     kvCacheUtils.cpp
-    lookaheadDecodingBuffers.cpp
     loraBuffers.cpp
     medusaBuffers.cpp
     microBatchScheduler.cpp
@@ -30,10 +31,10 @@ set(SRCS
     namedTensor.cpp
     peftCacheManager.cpp
     promptTuningBuffers.cpp
-    runtimeBuffers.cpp
-    sequenceSlotManager.cpp
     rnnStateBuffers.cpp
     rnnStateManager.cpp
+    runtimeBuffers.cpp
+    sequenceSlotManager.cpp
     transformerBuffers.cpp
     trtEncoderModel.cpp
     trtGptModelInflightBatching.cpp

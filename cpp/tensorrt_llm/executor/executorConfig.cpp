@@ -22,10 +22,9 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     SizeType32 iterStatsMaxIterations, SizeType32 requestStatsMaxIterations, BatchingType batchingType,
     std::optional<SizeType32> maxBatchSize, std::optional<SizeType32> maxNumTokens,
     std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
-    std::optional<LogitsPostProcessorMap> logitsPostProcessorMap,
-    std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched, bool replicateLogitsPostProcessor,
-    std::optional<DecodingConfig> decodingConfig, float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
-    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
+    std::optional<LogitsPostProcessorConfig> logitsPostProcessorConfig, std::optional<DecodingConfig> decodingConfig,
+    float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
+    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -38,13 +37,12 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mMaxNumTokens(maxNumTokens)
     , mParallelConfig(std::move(parallelConfig))
     , mPeftCacheConfig(peftCacheConfig)
-    , mLogitsPostProcessorMap(std::move(logitsPostProcessorMap))
-    , mLogitsPostProcessorBatched(std::move(logitsPostProcessorBatched))
-    , mReplicateLogitsPostProcessor(replicateLogitsPostProcessor)
+    , mLogitsPostProcessorConfig(std::move(logitsPostProcessorConfig))
     , mDecodingConfig(std::move(decodingConfig))
     , mGpuWeightsPercent(gpuWeightPercent)
     , mMaxQueueSize(maxQueueSize)
     , mExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig)
+    , mDebugConfig(std::move(debugConfig))
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -111,19 +109,9 @@ std::optional<PeftCacheConfig> ExecutorConfig::getPeftCacheConfig() const
     return mPeftCacheConfig;
 }
 
-std::optional<LogitsPostProcessorMap> ExecutorConfig::getLogitsPostProcessorMap() const
+std::optional<LogitsPostProcessorConfig> ExecutorConfig::getLogitsPostProcessorConfig() const
 {
-    return mLogitsPostProcessorMap;
-}
-
-std::optional<LogitsPostProcessorBatched> ExecutorConfig::getLogitsPostProcessorBatched() const
-{
-    return mLogitsPostProcessorBatched;
-}
-
-bool ExecutorConfig::getReplicateLogitsPostProcessor() const
-{
-    return mReplicateLogitsPostProcessor;
+    return mLogitsPostProcessorConfig;
 }
 
 std::optional<DecodingConfig> ExecutorConfig::getDecodingConfig() const
@@ -144,6 +132,11 @@ std::optional<SizeType32> ExecutorConfig::getMaxQueueSize() const
 ExtendedRuntimePerfKnobConfig ExecutorConfig::getExtendedRuntimePerfKnobConfig() const
 {
     return mExtendedRuntimePerfKnobConfig;
+}
+
+std::optional<DebugConfig> ExecutorConfig::getDebugConfig() const
+{
+    return mDebugConfig;
 }
 
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
@@ -211,19 +204,9 @@ void ExecutorConfig::setPeftCacheConfig(PeftCacheConfig const& peftCacheConfig)
     mPeftCacheConfig = peftCacheConfig;
 }
 
-void ExecutorConfig::setLogitsPostProcessorMap(LogitsPostProcessorMap const& logitsPostProcessorMap)
+void ExecutorConfig::setLogitsPostProcessorConfig(LogitsPostProcessorConfig const& logitsPostProcessorConfig)
 {
-    mLogitsPostProcessorMap = logitsPostProcessorMap;
-}
-
-void ExecutorConfig::setLogitsPostProcessorBatched(LogitsPostProcessorBatched const& logitsPostProcessorBatched)
-{
-    mLogitsPostProcessorBatched = logitsPostProcessorBatched;
-}
-
-void ExecutorConfig::setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor)
-{
-    mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
+    mLogitsPostProcessorConfig = logitsPostProcessorConfig;
 }
 
 void ExecutorConfig::setDecodingConfig(DecodingConfig const& decodingConfig)
@@ -245,6 +228,11 @@ void ExecutorConfig::setExtendedRuntimePerfKnobConfig(
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
 {
     mExtendedRuntimePerfKnobConfig = extendedRuntimePerfKnobConfig;
+}
+
+void ExecutorConfig::setDebugConfig(DebugConfig const& debugConfig)
+{
+    mDebugConfig = debugConfig;
 }
 
 } // namespace tensorrt_llm::executor

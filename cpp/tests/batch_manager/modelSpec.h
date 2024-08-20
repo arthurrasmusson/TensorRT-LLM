@@ -14,6 +14,7 @@
 
 #include "NvInfer.h"
 #include "tensorrt_llm/runtime/common.h"
+#include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/speculativeDecodingMode.h"
 
 #include <filesystem>
@@ -24,13 +25,7 @@ namespace tensorrt_llm::testing
 
 using tensorrt_llm::runtime::SizeType32;
 using tensorrt_llm::runtime::SpeculativeDecodingMode;
-
-enum class KVCacheType
-{
-    kDISABLED,
-    kPAGED,
-    kCONTINUOUS
-};
+using KVCacheType = tensorrt_llm::runtime::ModelConfig::KVCacheType;
 
 enum class QuantMethod
 {
@@ -252,6 +247,11 @@ public:
     {
         mCollectLogProbs = true;
         return *this;
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, ModelSpec const& modelSpec)
+    {
+        return os << modelSpec.getModelPath();
     }
 
     // Computed properties

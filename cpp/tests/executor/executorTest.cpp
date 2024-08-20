@@ -513,6 +513,10 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     expectedNewTokens[requestIds.at(0)] = endPos - inputLen;
     expectedNewTokens[requestIds.at(1)] = endPos - inputLen + 1;
 
+    std::map<IdType, FinishReason> expectedFinishReason;
+    expectedFinishReason[requestIds.at(0)] = FinishReason::kEND_ID;
+    expectedFinishReason[requestIds.at(1)] = FinishReason::kSTOP_WORDS;
+
     std::map<IdType, bool> done;
     std::for_each(requestIds.begin(), requestIds.end(), [&done](auto id) { done[id] = false; });
     int iter = 0;
@@ -536,6 +540,9 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
                 // only 1 beam
                 auto const& outputIds = result.outputTokenIds.at(0);
                 EXPECT_EQ(outputIds.size(), expectedNewTokens.at(reqId)) << "req " << reqId;
+
+                auto const& finishReason = result.finishReasons.at(0);
+                EXPECT_EQ(finishReason, expectedFinishReason.at(reqId)) << "req " << reqId;
 
                 auto const& genLogits = result.generationLogits;
                 EXPECT_TRUE(genLogits.has_value());
@@ -570,7 +577,7 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
 using ParamType = std::tuple<bool, bool, int>;
 using ParamCancelReqType = std::tuple<bool, bool, int, std::string>;
 using ParamStatsType = std::tuple<int, bool>;
-using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool>;
+using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool, bool>;
 using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32>;
 using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
 
@@ -666,6 +673,7 @@ std::string generateTestNameAllParams(testing::TestParamInfo<AllParamsType> cons
     auto const& returnGenerationLogits = std::get<6>(info.param);
     auto const modelName = std::get<7>(info.param);
     auto const& useOrchestratorMode = std::get<8>(info.param);
+    auto const& returnAllGeneratedTokens = std::get<9>(info.param);
 
     std::string name = "ExecutorTest_";
 
@@ -707,6 +715,11 @@ std::string generateTestNameAllParams(testing::TestParamInfo<AllParamsType> cons
     else
     {
         name.append("LeaderMode");
+    }
+
+    if (returnAllGeneratedTokens)
+    {
+        name.append("returnAllGeneratedTokens");
     }
     return name;
 }
@@ -1237,6 +1250,12 @@ TEST_P(ParamTest, MultipleRequestDemo)
                 {
                     reqTokens.insert(reqTokens.end(), newTokens.begin(), newTokens.end());
                 }
+
+                for (SizeType32 b = 0; b < beamWidth; ++b)
+                {
+                    EXPECT_EQ(result.finishReasons.at(b),
+                        result.isFinal ? FinishReason::kLENGTH : FinishReason::kNOT_FINISHED);
+                }
             }
             else
             {
@@ -1550,7 +1569,7 @@ struct FlakyTestInfo
 
 void verifyOutput(std::unordered_map<SizeType32, BeamTokens> const& beamTokens, TestData const& testData,
     std::vector<SizeType32> const& givenInputLengths, SizeType32 nbGivenInputs, bool streaming,
-    bool excludeInputFromOutput, FlakyTestInfo flakyTestInfo, bool isSpeculativeDecoding)
+    bool excludeInputFromOutput, FlakyTestInfo flakyTestInfo, bool isSpeculativeDecoding, bool returnAllGeneratedTokens)
 {
     for (auto const& [batchId, tokens] : beamTokens)
     {
@@ -1569,8 +1588,15 @@ void verifyOutput(std::unordered_map<SizeType32, BeamTokens> const& beamTokens, 
                 TLLM_LOG_WARNING("Disabling token comparison for batchId %d beam %d, test if flaky", batchId, beam);
             }
 
-            auto expectedOutputLength = expectedOutputLengths[batchId * reqBeamWidth + beam];
-            expectedOutputLength -= inputLength;
+            auto const expectInputOutputLength
+                = expectedOutputLengths[batchId * reqBeamWidth + beam];        // Ground truth output length
+            auto expectedOutputLength = expectInputOutputLength - inputLength; // Number of new generated output tokens
+            if (returnAllGeneratedTokens)
+            {
+                // If returnAllGeneratedTokens, then the tokens of each iteration will contain all the previously
+                // generated tokens. Such as: [(a), (a, b), (a, b, c), (a, b, c, d), ...]
+                expectedOutputLength = (1 + expectedOutputLength) * expectedOutputLength / 2;
+            }
 
             bool inputNotIncluded = (streaming || excludeInputFromOutput);
             bool anyMismatch = false;
@@ -1580,9 +1606,15 @@ void verifyOutput(std::unordered_map<SizeType32, BeamTokens> const& beamTokens, 
             {
                 predictedTokens.erase(predictedTokens.begin(), predictedTokens.begin() + inputLength);
             }
-            auto const numTokensToRemove = 0;
-            auto numPredTokens = static_cast<SizeType32>(predictedTokens.size());
             EXPECT_EQ(predictedTokens.size(), expectedOutputLength) << "b: " << batchId << " beam: " << beam;
+
+            if (returnAllGeneratedTokens)
+            {
+                // If returnAllGeneratedTokens, the output of the last iteration will contain all the output tokens
+                predictedTokens.erase(
+                    predictedTokens.begin(), predictedTokens.end() - (expectInputOutputLength - inputLength));
+            }
+            auto numPredTokens = static_cast<SizeType32>(predictedTokens.size());
 
             if (isSpeculativeDecoding)
             {
@@ -1683,8 +1715,9 @@ void verifyLogProbs(bool computeLogProbs, TestData const& testData, bool streami
     }
 }
 
-void validateContextLogitsShape(bool getContextLogits, SizeType32 inputLength,
-    std::optional<Tensor> const& contextLogits, SizeType32 vocabSizePadded, SizeType32 batchId)
+void validateContextLogits(bool getContextLogits, TestData const& testData, SizeType32 inputLength,
+    SizeType32 beamWidth, std::optional<Tensor> const& contextLogits, SizeType32 vocabSizePadded, SizeType32 batchId,
+    BatchingType batchingType)
 {
     if (getContextLogits)
     {
@@ -1692,6 +1725,13 @@ void validateContextLogitsShape(bool getContextLogits, SizeType32 inputLength,
         EXPECT_EQ(contextLogits.value().getShape().size(), 2);
         EXPECT_EQ(contextLogits.value().getShape()[0], inputLength);
         EXPECT_EQ(contextLogits.value().getShape()[1], vocabSizePadded);
+        auto const expectedContextLogits = testData.expectedContextLogits[batchId];
+
+        if (batchingType != BatchingType::kSTATIC && beamWidth == 1)
+        {
+            cudaDeviceSynchronize(); // Make sure the logits copy is complete.
+            EXPECT_TRUE(compareLogits(*expectedContextLogits, *(detail::toITensor(contextLogits.value()))));
+        }
     }
     else
     {
@@ -1699,16 +1739,63 @@ void validateContextLogitsShape(bool getContextLogits, SizeType32 inputLength,
     }
 }
 
-void validateGenerationLogitsShape(bool getGenLogits, bool streaming, bool excludeInputFromOutput,
-    SizeType32 inputLength, SizeType32 maxOutputLen, SizeType32 beamWidth, BeamTokens const& beamTokens,
-    std::optional<Tensor> const& genLogits, SizeType32 vocabSizePadded, SizeType32 batchId)
+void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool isFinal, bool streaming,
+    bool excludeInputFromOutput, SizeType32 inputLength, SizeType32 maxOutputLen, SizeType32 beamWidth,
+    BeamTokens const& beamTokens, std::optional<Tensor> const& genLogits, SizeType32 vocabSizePadded,
+    SizeType32 batchId, BatchingType batchingType, bool const returnAllGeneratedTokens)
 {
     if (getGenLogits)
     {
         EXPECT_TRUE(genLogits.has_value()) << "bid: " << batchId;
         EXPECT_EQ(genLogits.value().getShape().size(), 3);
-        EXPECT_EQ(genLogits.value().getShape()[0], beamWidth);
-        EXPECT_EQ(genLogits.value().getShape()[1], maxOutputLen);
+
+        // Expected generation logits
+        auto const& expectedGenerationLogits
+            = testData.expectedGenerationLogits[batchId]; // [maxOutputLen, vocabSizePadded]
+        // Output generation logits
+        // 1. non-streaming: [beamWidth, maxOutputLen, vocabSizePadded]
+        // 2. streaming: [maxOutputLen (or 1), beamWidth, vocabSizePadded]
+        auto const& outputGenerationLogits = detail::toITensor(genLogits.value());
+
+        if (streaming && batchingType != BatchingType::kSTATIC)
+        {
+            EXPECT_EQ(genLogits.value().getShape()[1], beamWidth);
+            EXPECT_EQ(beamWidth, 1); // Only support streaming && beamWidth == 1
+
+            SizeType32 const beamIdx = 0;
+            bool removeInput = !excludeInputFromOutput && !streaming;
+            // If returnAllGeneratedTokens, will contain duplicate tokens
+            auto const& numPredTokens = beamTokens.at(beamIdx).size() - (removeInput ? inputLength : 0);
+
+            SizeType32 numGeneratedToken = genLogits.value().getShape()[0];
+            if (returnAllGeneratedTokens)
+            {
+                EXPECT_EQ((numGeneratedToken + 1) * numGeneratedToken / 2, numPredTokens);
+            }
+            else
+            {
+                EXPECT_EQ(numGeneratedToken, 1);
+            }
+            SizeType32 sliceOffset = returnAllGeneratedTokens ? 0 : numPredTokens - 1;
+
+            auto const& expectedGenerationLogitsSlice = std::shared_ptr(ITensor::slice(
+                expectedGenerationLogits, sliceOffset, numGeneratedToken)); // [numGeneratedToken, vocabSizePadded]
+
+            cudaDeviceSynchronize();                                        // Make sure the logits copy is complete.
+            EXPECT_TRUE(compareLogits(*expectedGenerationLogitsSlice, *outputGenerationLogits));
+        }
+        else
+        {
+            // Non-streaming
+            EXPECT_EQ(genLogits.value().getShape()[0], beamWidth);
+            EXPECT_EQ(genLogits.value().getShape()[1], maxOutputLen);
+
+            if (isFinal && batchingType != BatchingType::kSTATIC && beamWidth == 1)
+            {
+                cudaDeviceSynchronize(); // Make sure the logits copy is complete.
+                EXPECT_TRUE(compareLogits(*expectedGenerationLogits, *outputGenerationLogits));
+            }
+        }
         EXPECT_EQ(genLogits.value().getShape()[2], vocabSizePadded);
     }
     else
@@ -1719,7 +1806,8 @@ void validateGenerationLogitsShape(bool getGenLogits, bool streaming, bool exclu
 
 void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& modelIds,
     FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
-    OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs)
+    OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
+    bool returnAllGeneratedTokens)
 {
     auto const beamWidth = beamResult.beamWidth;
 
@@ -1741,6 +1829,7 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
 
     // Load expected outputs and inputs
     SizeType32 numRequests = static_cast<SizeType32>(givenInputLengths.size());
+    // numRequests = 1;
     SizeType32 maxRequests = numRequests;
     std::vector<Request> requests;
     std::vector<SizeType32> reqMaxNewTokens;
@@ -1754,6 +1843,7 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
         VecTokens tokens(seqBegin, seqBegin + inputLen);
         requests.emplace_back(VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming,
             tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig, endId);
+        requests.back().setReturnAllGeneratedTokens(returnAllGeneratedTokens);
     }
 
     auto& comm = tensorrt_llm::mpi::MpiComm::world();
@@ -1792,12 +1882,19 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
                     auto& genLogits = result.generationLogits;
                     auto& outputTokenIds = result.outputTokenIds;
 
+                    EXPECT_EQ(result.finishReasons.size(), beamWidth);
                     for (SizeType32 beam = 0; beam < beamWidth; ++beam)
                     {
                         auto& newTokens = outputTokenIds.at(beam);
                         auto& reqTokens = tokens.at(batchId).at(beam);
 
                         reqTokens.insert(reqTokens.end(), newTokens.begin(), newTokens.end());
+                        // FinishReason is only supported for bw=1 and inflight batching.
+                        if (beamWidth == 1 && batchingType == BatchingType::kINFLIGHT)
+                        {
+                            EXPECT_EQ(result.finishReasons.at(beam),
+                                result.isFinal ? FinishReason::kLENGTH : FinishReason::kNOT_FINISHED);
+                        }
                     }
 
                     auto& cumLogProbs = result.cumLogProbs;
@@ -1805,11 +1902,13 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
                     verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
                         givenInputLengths.at(batchId), beamWidth, tokens.at(batchId), cumLogProbs, logProbs, batchId,
                         flakyTestInfo);
-                    validateContextLogitsShape(outConfig.returnContextLogits, givenInputLengths.at(batchId),
-                        contextLogits, vocabSizePadded, batchId);
-                    validateGenerationLogitsShape(outConfig.returnGenerationLogits, streaming,
+
+                    validateContextLogits(outConfig.returnContextLogits, testData, givenInputLengths.at(batchId),
+                        beamWidth, contextLogits, vocabSizePadded, batchId, batchingType);
+                    validateGenerationLogits(outConfig.returnGenerationLogits, testData, result.isFinal, streaming,
                         outConfig.excludeInputFromOutput, givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId),
-                        beamWidth, tokens.at(batchId), genLogits, vocabSizePadded, batchId);
+                        beamWidth, tokens.at(batchId), genLogits, vocabSizePadded, batchId, batchingType,
+                        returnAllGeneratedTokens);
                 }
                 else
                 {
@@ -1823,18 +1922,19 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
         }
         EXPECT_LT(iter, maxWaitMs);
         verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
-            flakyTestInfo, isSpeculativeDecoding);
+            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens);
     }
 }
 
 void runTest(fs::path const& modelPath, ExecutorConfig const& executorConfig, fs::path const& inputPath,
     ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded,
-    BeamResult const& beamResult, OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs)
+    BeamResult const& beamResult, OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs,
+    bool returnAllGeneratedTokens)
 {
     auto executor = Executor{modelPath, ModelType::kDECODER_ONLY, executorConfig};
 
     runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
-        isSpeculativeDecoding, maxWaitMs);
+        isSpeculativeDecoding, maxWaitMs, executorConfig.getBatchingType(), returnAllGeneratedTokens);
 }
 
 ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBeamWidth, bool useOrchestratorMode,
@@ -1877,6 +1977,20 @@ TEST_P(AllParamsTest, TokenComparison)
     outConfig.returnGenerationLogits = std::get<6>(GetParam());
     auto const modelName = std::get<7>(GetParam());
     auto const useOrchestratorMode = std::get<8>(GetParam());
+    auto const returnAllGeneratedTokens = std::get<9>(GetParam());
+    if (returnAllGeneratedTokens && batchingType == BatchingType::kSTATIC)
+    {
+        GTEST_SKIP() << "Test does not support returnAllGeneratedTokens with static batching";
+    }
+    if (returnAllGeneratedTokens && !streaming)
+    {
+        GTEST_SKIP() << "Test does not support returnAllGeneratedTokens without streaming";
+    }
+    if (returnAllGeneratedTokens && outConfig.returnLogProbs)
+    {
+        GTEST_SKIP() << "Skip returnAllGeneratedTokens with outConfig.returnLogProbs to reduce number of tests";
+    }
+
     std::optional<std::vector<SizeType32>> participantIds = std::nullopt;
 
     BeamResult beamResult{beamWidth};
@@ -2081,10 +2195,16 @@ TEST_P(AllParamsTest, TokenComparison)
     }
 
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+
+    // Returning logits will bring higher latency
+    if (streaming && (outConfig.returnContextLogits || outConfig.returnGenerationLogits))
+    {
+        mMaxWaitMs = 20000;
+    }
     auto executorConfig
         = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode, std::nullopt, std::move(participantIds));
     runTest(modelPath, std::move(executorConfig), inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded,
-        beamResult, outConfig, isSpeculativeDecoding, mMaxWaitMs);
+        beamResult, outConfig, isSpeculativeDecoding, mMaxWaitMs, returnAllGeneratedTokens);
 }
 
 TEST_F(GptExecutorTest, ChangeBwError)
@@ -2162,7 +2282,7 @@ TEST_F(GptExecutorTest, TokenComparisonChangeBw)
         beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
 
         runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
-            isSpeculativeDecoding, mMaxWaitMs);
+            isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false);
     }
 }
 
@@ -2409,10 +2529,11 @@ TEST_P(LogitsProcParamsTest, All)
     if (!batched)
     {
         auto executorConfig = ExecutorConfig(beamWidth);
-        executorConfig.setLogitsPostProcessorMap(
+        LogitsPostProcessorConfig logitsProcConfig{
             std::unordered_map<std::string, tensorrt_llm::executor::LogitsPostProcessor>{
-                {logitsProcessorName, logitsPostProcessorFn}});
-        executorConfig.setReplicateLogitsPostProcessor(replicated);
+                {logitsProcessorName, logitsPostProcessorFn}},
+            std::nullopt, replicated};
+        executorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
         auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
         if (worldRank == 0)
@@ -2439,8 +2560,9 @@ TEST_P(LogitsProcParamsTest, All)
     if (batched)
     {
         auto batchedExecutorConfig = ExecutorConfig(beamWidth);
-        batchedExecutorConfig.setLogitsPostProcessorBatched(logitsPostProcessorBatchedFn);
-        batchedExecutorConfig.setReplicateLogitsPostProcessor(replicated);
+        LogitsPostProcessorConfig logitsProcConfig{std::nullopt, logitsPostProcessorBatchedFn, replicated};
+        batchedExecutorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
+
         auto batchedExecutor = Executor(modelPath, ModelType::kDECODER_ONLY, batchedExecutorConfig);
 
         if (worldRank == 0)
@@ -3900,20 +4022,21 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, ParamCancelReqTest,
 INSTANTIATE_TEST_SUITE_P(GptExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kSTATIC, BatchingType::kINFLIGHT), testing::Values(false, true),
         testing::Values(1, 2), testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
-        testing::Values(false, true), testing::Values("gpt"), testing::Values(false, true)),
+        testing::Values(false, true), testing::Values("gpt"), testing::Values(false, true),
+        testing::Values(false, true)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false, true), testing::Values(1, 2),
         testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
         testing::Values(false, true), testing::Values("llama_tp1_pp4", "llama_tp4_pp1", "llama_tp2_pp2"),
-        testing::Values(false, true)),
+        testing::Values(false, true), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaMultiExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false, true), testing::Values(1, 2),
         testing::Values(false), testing::Values(false, true), testing::Values(false), testing::Values(false),
-        testing::Values("llama_tp1_pp2"), testing::Values(false)),
+        testing::Values("llama_tp1_pp2"), testing::Values(false), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(MedusaExecutorTest, AllParamsTest,
@@ -3925,7 +4048,8 @@ INSTANTIATE_TEST_SUITE_P(MedusaExecutorTest, AllParamsTest,
         testing::Values(false),                                // returnContextLogits
         testing::Values(false),                                // returnGenerationLogits
         testing::Values("medusa"),                             // modelName
-        testing::Values(false, true)                           // useOrchestratorMode
+        testing::Values(false, true),                          // useOrchestratorMode
+        testing::Values(false)                                 // returnAllGeneratedTokens
         ),
     generateTestNameAllParams);
 
@@ -3933,26 +4057,26 @@ INSTANTIATE_TEST_SUITE_P(MedusaExecutorTest, AllParamsTest,
 INSTANTIATE_TEST_SUITE_P(ChatGlmExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kSTATIC, BatchingType::kINFLIGHT), testing::Values(false),
         testing::Values(1, 2), testing::Values(false), testing::Values(false), testing::Values(false),
-        testing::Values(false), testing::Values("chatglm"), testing::Values(false)),
+        testing::Values(false), testing::Values("chatglm"), testing::Values(false), testing::Values(false)),
     generateTestNameAllParams);
 
 // ChatGlm0 Test is for glm-10b.
 INSTANTIATE_TEST_SUITE_P(ChatGlm0ExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false), testing::Values(1),
         testing::Values(false), testing::Values(false), testing::Values(false), testing::Values(false),
-        testing::Values("glm"), testing::Values(false)),
+        testing::Values("glm"), testing::Values(false), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(ChatGlm2ExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kSTATIC), testing::Values(false), testing::Values(1),
         testing::Values(false), testing::Values(false), testing::Values(false), testing::Values(false),
-        testing::Values("chatglm2"), testing::Values(false)),
+        testing::Values("chatglm2"), testing::Values(false), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(ChatGlm3ExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kSTATIC), testing::Values(false), testing::Values(1),
         testing::Values(false), testing::Values(false), testing::Values(false), testing::Values(false),
-        testing::Values("chatglm3"), testing::Values(false)),
+        testing::Values("chatglm3"), testing::Values(false), testing::Values(false)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(T5BasicTest, EncDecParamsTest,

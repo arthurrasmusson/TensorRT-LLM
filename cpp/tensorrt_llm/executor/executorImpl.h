@@ -151,7 +151,7 @@ private:
 
     void initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig);
 
-    void initializeLogitsPostProcessorBatched(ExecutorConfig const& executorConfig);
+    void initializeLogitsPostProcessorBatched(LogitsPostProcessorConfig const& logitsProcConfig);
 
     IdType generateReqId()
     {
@@ -183,8 +183,6 @@ private:
         RequestList const& activeRequests, IterationType iterCounter, RequestList const& finishedRequests);
 
     void terminateCancelledRequests(RequestList& activeRequests);
-
-    void broadcastCancelledRequests(RequestList& activeRequests);
 
     void appendNewResponses(std::vector<Response>&& newResponses);
 

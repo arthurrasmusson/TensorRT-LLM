@@ -54,7 +54,7 @@ protected:
             /*badWordsList=*/std::nullopt, /*stopWordsList=*/std::nullopt,
             /*promptEmbeddingTable=*/std::nullopt, /*promptVocabSize=*/std::nullopt,
             /*loraTaskId=*/std::nullopt, /*loraWeights=*/std::nullopt,
-            /*loraConfig=*/std::nullopt, /*returnLogProbs=*/false,
+            /*loraConfig=*/std::nullopt, /*lookaheadConfig=*/std::nullopt, /*returnLogProbs=*/false,
             /*returnContextLogits=*/false, /*returnGenerationLogits=*/false,
             draftTokens /*,std::optional<TensorPtr> draftLogits = std::nullopt*/);
     }

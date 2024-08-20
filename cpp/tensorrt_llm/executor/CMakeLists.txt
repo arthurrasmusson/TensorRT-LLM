@@ -13,12 +13,18 @@ set(EXECUTOR_STATIC_TARGET ${EXECUTOR_TARGET_NAME}_static)
 
 set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
+# keep this list sorted alphabetically
 set(SRCS
-    executorConfig.cpp
+    contextPhaseParams.cpp
+    debugConfig.cpp
+    decodingConfig.cpp
     executor.cpp
+    executorConfig.cpp
     executorImpl.cpp
+    extendedRuntimePerfKnobConfig.cpp
     jsonSerialization.cpp
     kvCacheConfig.cpp
+    logitsPostProcessorConfig.cpp
     loraConfig.cpp
     orchestratorConfig.cpp
     outputConfig.cpp
@@ -26,16 +32,14 @@ set(SRCS
     peftCacheConfig.cpp
     promptTuningConfig.cpp
     request.cpp
+    requestUtils.cpp
     requestWithId.cpp
     response.cpp
-    extendedRuntimePerfKnobConfig.cpp
     samplingConfig.cpp
-    serialization.cpp
-    decodingConfig.cpp
     schedulerConfig.cpp
-    types.cpp
+    serialization.cpp
     tensor.cpp
-    requestUtils.cpp)
+    types.cpp)
 
 if(NOT WIN32)
   # additional warnings

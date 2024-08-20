@@ -95,6 +95,11 @@ public:
         return mConfig;
     }
 
+    [[nodiscard]] std::unique_ptr<DataContext> clone() const override
+    {
+        return std::make_unique<CacheContext>(*this);
+    }
+
 private:
     bool isEqual(DataContext const& obj) const override
     {

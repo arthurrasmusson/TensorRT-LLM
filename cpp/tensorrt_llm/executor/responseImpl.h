@@ -51,7 +51,7 @@ public:
     }
 
     /// Could throw exception if no result is available
-    [[nodiscard]] Result getResult() const
+    [[nodiscard]] Result const& getResult() const
     {
         if (hasResult())
         {
@@ -63,7 +63,7 @@ public:
         }
     }
 
-    [[nodiscard]] std::string getErrorMsg() const
+    [[nodiscard]] std::string const& getErrorMsg() const
     {
         if (hasError())
         {

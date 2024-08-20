@@ -33,8 +33,9 @@ public:
         std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
         std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-        std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
-        std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority)
+        std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
+        std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
+        PriorityType priority, std::optional<ContextPhaseParams> contextPhaseParams)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -48,11 +49,13 @@ public:
         , mExternalDraftTokensConfig(std::move(externalDraftTokensConfig))
         , mPTuningConfig(std::move(pTuningConfig))
         , mLoraConfig(std::move(loraConfig))
+        , mLookaheadConfig(std::move(lookaheadConfig))
         , mLogitsPostProcessorName(std::move(logitsPostProcessorName))
         , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
         , mClientId(clientId)
         , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
         , mPriority(priority)
+        , mContextPhaseParams(contextPhaseParams)
     {
         validate();
     }
@@ -136,6 +139,11 @@ public:
         return mLoraConfig;
     }
 
+    std::optional<LookaheadDecodingConfig> getLookaheadConfig() const
+    {
+        return mLookaheadConfig;
+    }
+
     std::optional<std::string> getLogitsPostProcessorName() const
     {
         return mLogitsPostProcessorName;
@@ -159,6 +167,11 @@ public:
     [[nodiscard]] bool getReturnAllGeneratedTokens() const
     {
         return mReturnAllGeneratedTokens;
+    }
+
+    std::optional<ContextPhaseParams> const& getContextPhaseParams() const
+    {
+        return mContextPhaseParams;
     }
 
     void setStreaming(bool streaming)
@@ -216,6 +229,11 @@ public:
         mLoraConfig = loraConfig;
     }
 
+    void setLookaheadConfig(LookaheadDecodingConfig const& lookaheadConfig)
+    {
+        mLookaheadConfig = lookaheadConfig;
+    }
+
     void setLogitsPostProcessorName(std::string const& logitsPostProcessorName)
     {
         mLogitsPostProcessorName = logitsPostProcessorName;
@@ -239,6 +257,11 @@ public:
     void setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)
     {
         mReturnAllGeneratedTokens = returnAllGeneratedTokens;
+    }
+
+    void setContextPhaseParams(ContextPhaseParams contextPhaseParams)
+    {
+        mContextPhaseParams = std::move(contextPhaseParams);
     }
 
 private:
@@ -274,11 +297,13 @@ private:
         lambda(mExternalDraftTokensConfig);
         lambda(mPTuningConfig);
         lambda(mLoraConfig);
+        lambda(mLookaheadConfig);
         lambda(mLogitsPostProcessorName);
         lambda(mEncoderInputTokenIds);
         lambda(mClientId);
         lambda(mReturnAllGeneratedTokens);
         lambda(mPriority);
+        lambda(mContextPhaseParams);
     }
 
     VecTokens mInputTokenIds;
@@ -294,11 +319,13 @@ private:
     std::optional<ExternalDraftTokensConfig> mExternalDraftTokensConfig;
     std::optional<PromptTuningConfig> mPTuningConfig;
     std::optional<LoraConfig> mLoraConfig;
+    std::optional<LookaheadDecodingConfig> mLookaheadConfig;
     std::optional<std::string> mLogitsPostProcessorName;
     std::optional<VecTokens> mEncoderInputTokenIds;
     std::optional<IdType> mClientId;
     bool mReturnAllGeneratedTokens;
     PriorityType mPriority;
+    std::optional<ContextPhaseParams> mContextPhaseParams;
 };
 
 } // namespace tensorrt_llm::executor

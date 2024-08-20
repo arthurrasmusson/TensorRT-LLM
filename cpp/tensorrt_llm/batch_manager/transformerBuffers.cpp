@@ -16,6 +16,8 @@
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 
@@ -204,6 +206,31 @@ void TransformerBuffers::copyPositionIds(
         positionIds->reshape(ITensor::makeShape({static_cast<int>(positionIdsHost.size())}));
     }
     manager.copy(positionIdsHost.data(), *positionIds);
+}
+
+void TransformerBuffers::copyPositionIds(runtime::TllmRuntime const& runtime,
+    std::vector<SizeType32> const& positionIdsHost, bool isChatGlm, TensorPtr decoderPositionIds)
+{
+    auto const& manager = runtime.getBufferManager();
+    if (isChatGlm)
+    {
+        positionIds->reshape(ITensor::makeShape({2, static_cast<int>(positionIdsHost.size()) / 2}));
+        manager.copy(positionIdsHost.data(), *positionIds);
+    }
+    else if (decoderPositionIds == nullptr)
+    {
+        positionIds->reshape(ITensor::makeShape({static_cast<int>(positionIdsHost.size())}));
+        manager.copy(positionIdsHost.data(), *positionIds);
+    }
+    else
+    {
+        // concat context phase and generation phase positionIds.
+        ITensor::DimType64 contextPositionIdsLen = static_cast<ITensor::DimType64>(positionIdsHost.size());
+        ITensor::DimType64 generationPositionIdsLen = ITensor::volume(decoderPositionIds->getShape());
+        positionIds->reshape(ITensor::makeShape({contextPositionIdsLen + generationPositionIdsLen}));
+        manager.copy(positionIdsHost.data(), *ITensor::slice(positionIds, 0, contextPositionIdsLen));
+        manager.copy(*decoderPositionIds, *ITensor::slice(positionIds, contextPositionIdsLen));
+    }
 }
 
 void TransformerBuffers::resetCacheIndirection(RequestVector const& contextRequests, SizeType32 maxBeamWidth,

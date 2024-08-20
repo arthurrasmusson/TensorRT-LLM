@@ -83,6 +83,9 @@ public:
     void copyPositionIds(
         runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost, bool isChatGlm);
 
+    void copyPositionIds(runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost,
+        bool isChatGlm, TensorPtr decoderPositionIds);
+
     void resetCacheIndirection(RequestVector const& contextRequests, SizeType32 maxBeamWidth,
         SizeType32 maxAttentionWindow, TensorPtr const& decoderCacheIndirectionInput,
         TensorPtr const& decoderCacheIndirectionOutput, runtime::TllmRuntime const& runtime);

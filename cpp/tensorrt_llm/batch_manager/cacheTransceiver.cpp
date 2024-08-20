@@ -30,8 +30,6 @@ void CacheBlockSender::send(LlmRequest const& request, DataContext const& destin
 {
     auto const& dst = dynamic_cast<CacheContext const&>(destination);
     auto dstRank = dst.getRanks().at(mSelfContext.getSelfIdx());
-    TLLM_CHECK_WITH_INFO(
-        request.isContextInitState(), "Currently only supports sending the cache in the context phase.");
     TLLM_CHECK_WITH_INFO(request.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
     constexpr SizeType32 beam{0};
     auto endIt = getBlockEndIt(*mCacheManager, request, beam);
@@ -54,6 +52,7 @@ bool CacheBlockReceiver::inquireSupport(DataContext const* senderContext)
 void CacheBlockReceiver::receive(LlmRequest const& request, DataContext const& source)
 {
     auto const& src = dynamic_cast<CacheContext const&>(source);
+    TLLM_CHECK(src.getRanks().size() > static_cast<size_t>(mSelfContext.getSelfIdx()));
     auto srcRank = src.getRanks().at(mSelfContext.getSelfIdx());
     TLLM_CHECK_WITH_INFO(request.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
     constexpr SizeType32 beam{0};

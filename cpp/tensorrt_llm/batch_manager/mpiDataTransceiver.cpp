@@ -11,6 +11,7 @@
  */
 
 #include "mpiDataTransceiver.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -49,30 +50,29 @@ LlmRequest::RequestIdType MpiComm::recvRequestId(const SizeType32 requesterRank)
     return requestId;
 }
 
-MpiResponder::MpiResponder(std::vector<std::unique_ptr<DataSender>> senders, MpiComm const& comm,
-    std::vector<std::unique_ptr<DataContext>> requesterContexts)
+MpiResponder::MpiResponder(
+    std::vector<std::unique_ptr<DataSender>> senders, MpiComm const& comm, std::unique_ptr<DataContext> selfContext)
     : mComm{std::addressof(comm)}
     , mSenders{std::move(senders)}
+    , mSelfContext{std::move(selfContext)}
 {
 #if !ENABLE_MULTI_DEVICE
     TLLM_THROW("MPI responder requires multi-device support.");
 #endif
-    TLLM_CHECK_WITH_INFO(
-        (requesterContexts.size() == 1 && mSenders.size() == 1), "Currently only one engine transfer is supported.");
-    for (auto& context : requesterContexts)
-    {
-        TLLM_CHECK(context);
-        auto handler = std::make_unique<RequestHandler>(std::move(context), mSenders);
-        for (auto const rank : handler->getContext().getRanks())
-        {
-            bool success{false};
-            std::tie(std::ignore, success) = mRankToHandler.insert({rank, handler.get()});
-            TLLM_CHECK(success);
-        }
-        mRequestHandlers.emplace_back(std::move(handler));
-    }
+    TLLM_CHECK_WITH_INFO((mSenders.size() == 1), "Currently only one engine transfer is supported.");
     // TODO: Supports multiple engines and allocates a thread to each engine.
     mResponseFuture = std::async(std::launch::async, &MpiResponder::response, this);
+}
+
+void MpiResponder::addRequesterContext(std::unique_ptr<DataContext> context)
+{
+    TLLM_CHECK(context);
+    auto handler = std::make_unique<RequestHandler>(std::move(context), mSenders);
+    bool success{false};
+    auto rank{handler->getContext().getSelfRank()};
+    std::tie(std::ignore, success) = mRankToHandler.insert({rank, handler.get()});
+    TLLM_CHECK(success);
+    mRequestHandlers.emplace_back(std::move(handler));
 }
 
 void MpiResponder::response()
@@ -163,6 +163,14 @@ std::future<void> MpiResponder::respondAndSendAsync(LlmRequest const& llmRequest
 std::pair<MpiResponder::RequestIdType, MpiResponder::RequestHandler const*> MpiResponder::recvRequestId()
 {
     auto const [requesterRank, requestId] = mComm->recvRequestId();
+    std::unique_lock lk(mResponderMutex);
+    // TODO: Add support for multi-node, multi-executor, and data context serialization.
+    if (mRankToHandler.find(requesterRank) == mRankToHandler.end())
+    {
+        auto context = mSelfContext->clone();
+        context->reset({requesterRank}, {0});
+        addRequesterContext(std::move(context));
+    }
     for (auto const rank : mRankToHandler.at(requesterRank)->getContext().getRanks())
     {
         if (rank == requesterRank)
@@ -184,31 +192,39 @@ void MpiResponder::send(std::map<RequestIdType, Response>::iterator it)
     mCurrentRequest = std::nullopt;
 }
 
-MpiRequester::MpiRequester(std::vector<std::unique_ptr<DataReceiver>> receivers, MpiComm const& comm,
-    std::vector<std::unique_ptr<DataContext>> responderContexts)
+MpiRequester::MpiRequester(
+    std::vector<std::unique_ptr<DataReceiver>> receivers, MpiComm const& comm, std::unique_ptr<DataContext> selfContext)
     : mComm{std::addressof(comm)}
     , mReceivers{std::move(receivers)}
+    , mSelfContext{std::move(selfContext)}
 {
 #if !ENABLE_MULTI_DEVICE
     TLLM_THROW("MPI requester requires multi-device support.");
 #endif
-    TLLM_CHECK_WITH_INFO(
-        (responderContexts.size() == 1 && mReceivers.size() == 1), "Currently only one engine transfer is supported.");
-    for (auto& context : responderContexts)
-    {
-        TLLM_CHECK(context);
-        mResponseHandlers.emplace_back(std::make_unique<ResponseHandler>(std::move(context), mReceivers));
-    }
+    TLLM_CHECK_WITH_INFO((mReceivers.size() == 1), "Currently only one engine transfer is supported.");
 }
 
-void MpiRequester::requestSync(LlmRequest const& llmRequest, DataContext const& context)
+void MpiRequester::addResponderContext(std::unique_ptr<DataContext> context)
+{
+    TLLM_CHECK(context);
+    auto handler = std::make_unique<ResponseHandler>(std::move(context), mReceivers);
+    bool success{false};
+    auto rank{handler->getContext().getSelfRank()};
+    std::unique_lock lk(mRequesterMutex);
+    std::tie(std::ignore, success) = mRankToHandler.insert({rank, handler.get()});
+    TLLM_CHECK(success);
+    mResponseHandlers.emplace_back(std::move(handler));
+}
+
+void MpiRequester::requestSync(LlmRequest const& llmRequest, DataContext context)
 {
     mComm->setCudaDevice();
     auto const& responders = context.getRanks();
     for (auto const responderRank : responders)
     {
-        mComm->sendRequestId(llmRequest.mRequestId, responderRank);
+        mComm->sendRequestId(llmRequest.getContextPhaseState().getReqId(), responderRank);
     }
+    std::unique_lock lk(mRequesterMutex);
     for (auto const& handler : mResponseHandlers)
     {
         if (handler->getContext().getRanks() == context.getRanks())

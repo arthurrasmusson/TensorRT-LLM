@@ -160,6 +160,10 @@ private:
     void executeStep(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
+    //! @brief Dump engine IO tensors.
+    void dumpIOTensors(RequestVector const& contextRequests, RequestVector const& generationRequests,
+        TensorMap const& inputMap, TensorMap const& outputMap);
+
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
     void createBuffers(executor::DecodingConfig const& decodingConfig,
@@ -269,66 +273,102 @@ protected:
     }
 
 private:
+    /******************** Configs ********************/
+    // Parameters of the model (TRT engine)
     runtime::ModelConfig mModelConfig;
+    // Parameters of the execution environment
     runtime::WorldConfig mWorldConfig;
-    executor::DecodingConfig mDecodingConfig;
+    // Device ID of this instance
     int mDevice{-1};
-    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;
-    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommTensorPara;
-
-    std::shared_ptr<runtime::AllReduceBuffers> mAllReduceBuffers;
-
-    std::shared_ptr<nvinfer1::ILogger> mLogger;
-    std::shared_ptr<runtime::TllmRuntime> mRuntime;
-    std::shared_ptr<runtime::IGptDecoderBatched> mDecoder;
-
-    SizeType32 mMicroBatchId;
-    bool mCtxGenFusion;
+    // Config for (speculative) decoding
+    executor::DecodingConfig mDecodingConfig;
+    // Performance knobs for the engine.
     executor::ExtendedRuntimePerfKnobConfig mExtendedRuntimePerfKnobConfig;
+    // Config for debugging output
+    std::optional<executor::DebugConfig> mDebugConfig;
 
-    std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
-
-    SizeType32 mNumMicroBatches;
-    SizeType32 mNumBuffers;
-    SizeType32 mOperatingBeamWidth;
-
-    std::vector<ScheduledRequests> mMicroBatchScheduledRequests;
+    /******************** Components ********************/
+    std::shared_ptr<nvinfer1::ILogger> mLogger;
+    // Runner for the TRT engine. The engine produces logits.
+    std::shared_ptr<runtime::TllmRuntime> mRuntime;
+    // Decoder that generates new tokens from the logits.
+    std::shared_ptr<runtime::IGptDecoderBatched> mDecoder;
+    // Synchronization handles for decoder
     std::vector<TokenPtr> mDecoderWaitEvents;
-    ReqIdsSet mInflightReqIds;
-    ReqIdsSet mReqIdsToPause;
 
+    // Manager that maps requests to slots
     std::shared_ptr<SequenceSlotManager> mSeqSlotManager;
+    // Scheduler that selects which requests to run in each iteration
     std::shared_ptr<batch_scheduler::RequestScheduler> mRequestScheduler;
+    // KV cache manager for attention layers (optional)
     std::shared_ptr<KVCacheManager> mKvCacheManager;
+    // KV cache manager for cross attention in enc-dec models (optional)
     std::shared_ptr<KVCacheManager> mCrossKvCacheManager = nullptr;
+    // RNN state manager for recurrent layers (optional)
     std::shared_ptr<RnnStateManager> mRnnStateManager;
+    // PEFT cache manager for LoRA tasks (optional)
     std::shared_ptr<BasePeftCacheManager> mPeftCacheManager;
-
-    std::shared_ptr<DecoderBuffers> mDecoderBuffers;
-    std::vector<std::shared_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
-    std::shared_ptr<runtime::decoder_batch::Output> mDecodingOutput;
-    std::vector<std::shared_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
-
+    // BufferManager using a separate stream for async copy operations.
     runtime::BufferManager mCopyBufferManager;
 
-    IterationStatsIFB mLastIterationStatsIFB;
-
-    std::vector<PeftTable> mPeftTables;
-    std::vector<std::unique_ptr<DecoderStepAsyncSend>> mDecStepAsyncSndHdls;
-    std::vector<std::unique_ptr<DecoderSlotAsyncSend>> mDecSlotAsyncSndHdls;
-    std::unique_ptr<std::thread> mMpiWaitThread;
-
-    runtime::StringPtrMap<runtime::ITensor> mWeightsMap{};
-    std::optional<std::filesystem::path> mEnginePath; // Points to the engine file
-
+    /******************** Logits Post-Processor ********************/
     std::optional<LogitsPostProcessorBatched> mLogitsPostProcessorBatched;
-    bool mReplicateLogitsPostProcessor;
-    bool mLogitsPostProcessorIsApplied; // Set if any request invoked a logits processor in current step
+    bool mReplicateLogitsPostProcessor{true};
+    // Set if any request invoked a logits processor in current step
+    bool mLogitsPostProcessorIsApplied{false};
 
     constexpr bool broadcastPostDecoder()
     {
         return mWorldConfig.isTensorParallel() && !mReplicateLogitsPostProcessor && mLogitsPostProcessorIsApplied;
     }
+
+    /******************** Pipeline parallelism ********************/
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;
+    std::vector<std::unique_ptr<DecoderStepAsyncSend>> mDecStepAsyncSndHdls;
+    std::vector<std::unique_ptr<DecoderSlotAsyncSend>> mDecSlotAsyncSndHdls;
+    std::unique_ptr<std::thread> mMpiWaitThread;
+
+    /******************** Tensor parallelism ********************/
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommTensorPara;
+    std::shared_ptr<runtime::AllReduceBuffers> mAllReduceBuffers;
+
+    /******************** Runtime parameters ********************/
+    // Flag to select fused or unfused context+generation execution
+    bool mCtxGenFusion;
+    // ID of current micro batch, changes after each iteration
+    SizeType32 mMicroBatchId{0};
+    // Number of micro batches. Multiple batches are used for overlapping setup and execution,
+    // and in pipeline parallelism.
+    SizeType32 mNumMicroBatches;
+    // Number of buffers to be added to mBuffers.
+    SizeType32 mNumBuffers;
+    // Current operating beam width. Can be changed with changeBeamWidth function.
+    SizeType32 mOperatingBeamWidth;
+
+    /******************** Buffers ********************/
+    // Buffers for each micro batch. Unfused path (mCtxGenFusion==false) uses two times the buffers.
+    std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
+    // Global buffer to interface with decoder. Slots in this buffer are selected by mSeqSlotManager.
+    std::shared_ptr<DecoderBuffers> mDecoderBuffers;
+    // Decoder input for each micro batch
+    std::vector<std::shared_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
+    std::shared_ptr<runtime::decoder_batch::Output> mDecodingOutput;
+    // Buffers for each slot in the decoder
+    std::vector<std::shared_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
+    // PEFT table for each micro batch
+    std::vector<PeftTable> mPeftTables;
+
+    /******************** Book keeping ********************/
+    // List of requests in each micro batch
+    std::vector<ScheduledRequests> mMicroBatchScheduledRequests;
+    // Set of in-flight requests of *all* micro batches
+    ReqIdsSet mInflightReqIds;
+    // Requests that the scheduler selected to be paused
+    ReqIdsSet mReqIdsToPause;
+    // Stats collected in last iteration
+    IterationStatsIFB mLastIterationStatsIFB{-1};
+    // Iteration counter used to distinguish debug output
+    executor::IterationType mIterCounter{0};
 };
 
 } // namespace tensorrt_llm::batch_manager

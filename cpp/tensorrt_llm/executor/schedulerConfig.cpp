@@ -22,6 +22,12 @@ SchedulerConfig::SchedulerConfig(
 {
 }
 
+bool SchedulerConfig::operator==(SchedulerConfig const& other) const
+{
+    return mCapacitySchedulerPolicy == other.mCapacitySchedulerPolicy
+        && mContextChunkingPolicy == other.mContextChunkingPolicy;
+}
+
 [[nodiscard]] CapacitySchedulerPolicy SchedulerConfig::getCapacitySchedulerPolicy() const
 {
     return mCapacitySchedulerPolicy;

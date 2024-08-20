@@ -11,6 +11,7 @@
  */
 
 #include "tensorrt_llm/executor/serializeUtils.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include <gtest/gtest.h>
@@ -74,6 +75,7 @@ void compareResult(texec::Result res, texec::Result res2)
     EXPECT_EQ(res.outputTokenIds, res2.outputTokenIds);
     EXPECT_EQ(res.cumLogProbs, res2.cumLogProbs);
     EXPECT_EQ(res.logProbs, res2.logProbs);
+    EXPECT_EQ(res.finishReasons, res2.finishReasons);
 }
 
 void compareResponse(texec::Response res, texec::Response res2)
@@ -298,8 +300,9 @@ TEST(SerializeUtilsTest, Nested)
 
 TEST(SerializeUtilsTest, ResultResponse)
 {
-    texec::Result res = texec::Result{
-        false, {{1, 2, 3}}, texec::VecLogProbs{1.0, 2.0}, std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}};
+    texec::Result res = texec::Result{false, {{1, 2, 3}}, texec::VecLogProbs{1.0, 2.0},
+        std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
+        std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}};
     {
         testSerializeDeserialize(res);
     }
@@ -322,7 +325,8 @@ TEST(SerializeUtilsTest, VectorResponses)
         if (i < 5)
         {
             texec::Result res = texec::Result{false, {{i + 1, i + 2, i + 3}}, texec::VecLogProbs{1.0, 2.0},
-                std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}};
+                std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
+                std::vector<texec::FinishReason>{texec::FinishReason::kEND_ID}};
             responsesIn.emplace_back(i, res);
         }
         else
@@ -414,6 +418,15 @@ TEST(SerializeUtilsTest, DecodingConfig)
     }
 }
 
+TEST(SerializeUtilsTest, DebugConfig)
+{
+    texec::DebugConfig debugConfig(true, true, {"test"});
+    auto debugConfig2 = serializeDeserialize(debugConfig);
+    EXPECT_EQ(debugConfig.getDumpInputTensors(), debugConfig2.getDumpInputTensors());
+    EXPECT_EQ(debugConfig.getDumpOutputTensors(), debugConfig2.getDumpOutputTensors());
+    EXPECT_EQ(debugConfig.getDebugTensorNames(), debugConfig2.getDebugTensorNames());
+}
+
 TEST(SerializeUtilsTest, OrchestratorConfig)
 {
     auto orchConfig = texec::OrchestratorConfig(false, std::filesystem::current_path().string());
@@ -499,5 +512,21 @@ TEST(SerializeUtilsTest, IterationStats)
                 }
             }
         }
+    }
+}
+
+TEST(SerializeUtilsTest, ContextPhaseParams)
+{
+    {
+        auto stats = texec::ContextPhaseParams({1});
+        auto stats2 = serializeDeserialize(stats);
+        EXPECT_EQ(stats, stats2);
+    }
+
+    {
+        auto state = std::make_unique<texec::ContextPhaseState>(1, std::vector<texec::SizeType32>{10, 20});
+        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
+        auto stats2 = serializeDeserialize(stats);
+        EXPECT_EQ(stats, stats2);
     }
 }

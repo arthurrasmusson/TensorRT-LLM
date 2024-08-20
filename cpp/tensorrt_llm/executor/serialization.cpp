@@ -11,6 +11,7 @@
  */
 
 #include "tensorrt_llm/executor/serialization.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestImpl.h"
 #include "tensorrt_llm/executor/responseImpl.h"
@@ -195,6 +196,47 @@ size_t Serialization::serializedSize(LoraConfig const& config)
     return totalSize;
 }
 
+// ContextPhaseParams
+ContextPhaseParams Serialization::deserializeContextPhaseParams(std::istream& is)
+{
+    auto firstGenTokens = su::deserialize<decltype(ContextPhaseParams::mFirstGenTokens)>(is);
+    auto hasState = su::deserialize<bool>(is);
+    if (hasState)
+    {
+        auto state = std::make_unique<ContextPhaseState>();
+        state->mReqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
+        state->mRanks = su::deserialize<decltype(ContextPhaseState::mRanks)>(is);
+        return ContextPhaseParams{std::move(firstGenTokens), state.release()};
+    }
+    return ContextPhaseParams{std::move(firstGenTokens)};
+}
+
+void Serialization::serialize(ContextPhaseParams const& contextPhaseParams, std::ostream& os)
+{
+    su::serialize(contextPhaseParams.mFirstGenTokens, os);
+    su::serialize(static_cast<bool>(contextPhaseParams.mState), os);
+    if (contextPhaseParams.mState)
+    {
+        auto* state = static_cast<ContextPhaseState*>(contextPhaseParams.mState.get());
+        su::serialize(state->mReqId, os);
+        su::serialize(state->mRanks, os);
+    }
+}
+
+size_t Serialization::serializedSize(ContextPhaseParams const& contextPhaseParams)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(contextPhaseParams.mFirstGenTokens);
+    totalSize += su::serializedSize(bool{});
+    if (contextPhaseParams.mState)
+    {
+        auto* state = static_cast<ContextPhaseState*>(contextPhaseParams.mState.get());
+        totalSize += su::serializedSize(state->mReqId);
+        totalSize += su::serializedSize(state->mRanks);
+    }
+    return totalSize;
+}
+
 // Request
 Request Serialization::deserializeRequest(std::istream& is)
 {
@@ -211,16 +253,18 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto externalDraftTokensConfig = su::deserialize<std::optional<ExternalDraftTokensConfig>>(is);
     auto pTuningConfig = su::deserialize<std::optional<PromptTuningConfig>>(is);
     auto loraConfig = su::deserialize<std::optional<LoraConfig>>(is);
+    auto lookaheadConfig = su::deserialize<std::optional<LookaheadDecodingConfig>>(is);
     auto logitsPostProcessorName = su::deserialize<std::optional<std::string>>(is);
     auto encoderInputTokenIds = su::deserialize<std::optional<VecTokens>>(is);
     auto clientId = su::deserialize<std::optional<IdType>>(is);
     auto returnAllGeneratedTokens = su::deserialize<bool>(is);
     auto priority = su::deserialize<executor::PriorityType>(is);
+    auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(badWords), std::move(stopWords), std::move(embeddingBias), std::move(externalDraftTokensConfig),
-        std::move(pTuningConfig), std::move(loraConfig), std::move(logitsPostProcessorName),
-        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority);
+        std::move(pTuningConfig), std::move(loraConfig), std::move(lookaheadConfig), std::move(logitsPostProcessorName),
+        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, std::move(contextPhaseParams));
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -370,8 +414,10 @@ Result Serialization::deserializeResult(std::istream& is)
     auto contextLogits = su::deserialize<std::optional<Tensor>>(is);
     auto generationLogits = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutput = su::deserialize<std::optional<Tensor>>(is);
+    auto finishReasons = su::deserialize<std::vector<FinishReason>>(is);
 
-    return Result{isFinal, outputTokenIds, cumLogProbs, logProbs, contextLogits, generationLogits, encoderOutput};
+    return Result{
+        isFinal, outputTokenIds, cumLogProbs, logProbs, contextLogits, generationLogits, encoderOutput, finishReasons};
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -383,6 +429,7 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.contextLogits, os);
     su::serialize(result.generationLogits, os);
     su::serialize(result.encoderOutput, os);
+    su::serialize(result.finishReasons, os);
 }
 
 size_t Serialization::serializedSize(Result const& result)
@@ -395,6 +442,7 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.contextLogits);
     totalSize += su::serializedSize(result.generationLogits);
     totalSize += su::serializedSize(result.encoderOutput);
+    totalSize += su::serializedSize(result.finishReasons);
     return totalSize;
 }
 
@@ -487,8 +535,6 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getParallelConfig), ExecutorConfig>>(is);
     auto peftCacheConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getPeftCacheConfig), ExecutorConfig>>(is);
-    auto replicateLogitsPostProcessor = su::deserialize<
-        std::invoke_result_t<decltype(&ExecutorConfig::getReplicateLogitsPostProcessor), ExecutorConfig>>(is);
     auto decodingConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDecodingConfig), ExecutorConfig>>(is);
     auto gpuWeightsPercent
@@ -500,13 +546,12 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
-        peftCacheConfig, std::nullopt, std::nullopt, replicateLogitsPostProcessor, decodingConfig, gpuWeightsPercent,
-        maxQueueSize, extendedRuntimePerfKnobConfig};
+        peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
 {
-    TLLM_CHECK_WITH_INFO(!executorConfig.getLogitsPostProcessorMap().has_value(),
+    TLLM_CHECK_WITH_INFO(!executorConfig.getLogitsPostProcessorConfig().has_value(),
         "Serialization of executorConfig with logitsPostProcessor is currently not supported.");
 
     // Compute the size of serialized buffer
@@ -523,7 +568,6 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getBatchingType());
     totalSize += su::serializedSize(executorConfig.getParallelConfig());
     totalSize += su::serializedSize(executorConfig.getPeftCacheConfig());
-    totalSize += su::serializedSize(executorConfig.getReplicateLogitsPostProcessor());
     totalSize += su::serializedSize(executorConfig.getDecodingConfig());
     totalSize += su::serializedSize(executorConfig.getGpuWeightsPercent());
     totalSize += su::serializedSize(executorConfig.getMaxQueueSize());
@@ -534,7 +578,7 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
 
 void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream& os)
 {
-    TLLM_CHECK_WITH_INFO(!executorConfig.getLogitsPostProcessorMap().has_value(),
+    TLLM_CHECK_WITH_INFO(!executorConfig.getLogitsPostProcessorConfig().has_value(),
         "Serialization of executorConfig with logitsPostProcessor is currently not supported.");
 
     su::serialize(executorConfig.getMaxBeamWidth(), os);
@@ -549,7 +593,6 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getBatchingType(), os);
     su::serialize(executorConfig.getParallelConfig(), os);
     su::serialize(executorConfig.getPeftCacheConfig(), os);
-    su::serialize(executorConfig.getReplicateLogitsPostProcessor(), os);
     su::serialize(executorConfig.getDecodingConfig(), os);
     su::serialize(executorConfig.getGpuWeightsPercent(), os);
     su::serialize(executorConfig.getMaxQueueSize(), os);
@@ -816,6 +859,35 @@ size_t Serialization::serializedSize(DecodingConfig const& decodingConfig)
     totalSize += su::serializedSize(decodingConfig.getDecodingMode());
     totalSize += su::serializedSize(decodingConfig.getLookaheadDecodingConfig());
     totalSize += su::serializedSize(decodingConfig.getMedusaChoices());
+    return totalSize;
+}
+
+// DebugConfig
+DebugConfig Serialization::deserializeDebugConfig(std::istream& is)
+{
+    auto dumpInputTensors
+        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDumpInputTensors), DebugConfig>>(is);
+    auto dumpOutputTensors
+        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDumpOutputTensors), DebugConfig>>(is);
+    auto debugTensorNames = su::deserialize<std::remove_cv_t<
+        std::remove_reference_t<std::invoke_result_t<decltype(&DebugConfig::getDebugTensorNames), DebugConfig>>>>(is);
+
+    return DebugConfig{dumpInputTensors, dumpOutputTensors, debugTensorNames};
+}
+
+void Serialization::serialize(DebugConfig const& debugConfig, std::ostream& os)
+{
+    su::serialize(debugConfig.getDumpInputTensors(), os);
+    su::serialize(debugConfig.getDumpOutputTensors(), os);
+    su::serialize(debugConfig.getDebugTensorNames(), os);
+}
+
+size_t Serialization::serializedSize(DebugConfig const& debugConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(debugConfig.getDumpInputTensors());
+    totalSize += su::serializedSize(debugConfig.getDumpOutputTensors());
+    totalSize += su::serializedSize(debugConfig.getDebugTensorNames());
     return totalSize;
 }
 

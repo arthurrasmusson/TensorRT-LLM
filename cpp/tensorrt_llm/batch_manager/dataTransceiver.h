@@ -40,6 +40,22 @@ public:
         return mSelfIdx.value();
     }
 
+    [[nodiscard]] SizeType32 getSelfRank() const
+    {
+        return getRanks().at(getSelfIdx());
+    }
+
+    void reset(std::vector<SizeType32> ranks, std::optional<SizeType32> selfIdx)
+    {
+        mRanks = std::move(ranks);
+        mSelfIdx = std::move(selfIdx);
+    }
+
+    [[nodiscard]] virtual std::unique_ptr<DataContext> clone() const
+    {
+        return std::make_unique<DataContext>(*this);
+    }
+
     virtual ~DataContext() = default;
 
 protected:
@@ -97,8 +113,7 @@ public:
 class DataResponder
 {
 public:
-    /// @brief Asynchronously respond to the request and send data. For asynchronous reasons, the reference
-    /// parameter must remain valid until the content of the future is fetched.
+    /// @brief Asynchronously respond to the request and send data.
     /// @param llmRequest Request object. Its data should be ready when called, and the data for this request
     /// should remain valid until future synchronization.
     /// @return Once the data is fully sent, the future object will become valid.
@@ -110,14 +125,12 @@ public:
 class DataRequester
 {
 public:
-    /// @brief Asynchronously send a request to receive data. For asynchronous reasons, the reference parameter
-    /// must remain valid until the content of the future is fetched.
+    /// @brief Asynchronously send a request to receive data.
     /// @param llmRequest Request object. Its data should be in an allocated but unwritten state when called, and the
     /// data for this request should remain intact only after future synchronization.
     /// @param context The context which retains information about the resopnder, such as the ranks value.
     /// @return Once the data is fully received, the future object will become valid.
-    [[nodiscard]] virtual std::future<void> requestAndReceiveAsync(
-        LlmRequest const& llmRequest, DataContext const& context)
+    [[nodiscard]] virtual std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest, DataContext context)
         = 0;
 
     virtual ~DataRequester() = default;

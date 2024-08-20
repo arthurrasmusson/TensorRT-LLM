@@ -13,7 +13,6 @@
 #pragma once
 
 #include "encoderBuffers.h"
-#include "lookaheadDecodingBuffers.h"
 #include "loraBuffers.h"
 #include "medusaBuffers.h"
 #include "promptTuningBuffers.h"
@@ -22,6 +21,7 @@
 #include "tensorrt_llm/batch_manager/decoderBuffers.h"
 #include "tensorrt_llm/runtime/explicitDraftTokensBuffers.h"
 #include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/lookaheadBuffers.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 #include "transformerBuffers.h"
@@ -52,7 +52,7 @@ class RuntimeBuffers
 public:
     using SizeType32 = runtime::SizeType32;
     using TensorPtr = runtime::ITensor::SharedPtr;
-    using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
+    using TensorMap = runtime::ITensor::TensorMap;
     using PeftTable = LoraBuffers::PeftTable;
 
     [[nodiscard]] SizeType32 constexpr getContextIndex() const noexcept
@@ -138,7 +138,7 @@ public:
     std::optional<MedusaBuffers> medusaBuffers;
 
     // Lookahead decoding
-    std::optional<LookaheadDecodingBuffers> lookaheadBuffers;
+    std::optional<runtime::LookaheadRuntimeBuffers> lookaheadBuffers;
     // Explicit draft tokens decoding
     std::optional<runtime::ExplicitDraftTokensBuffers> explicitDraftTokensBuffers;
 

@@ -23,11 +23,6 @@ using tensorrt_llm::testing::OutputContentType;
 
 PYBIND11_MODULE(model_spec, m)
 {
-    py::enum_<KVCacheType>(m, "KVCacheType", py::arithmetic(), "KV Cache Type")
-        .value("DISABLED", KVCacheType::kDISABLED, "No KV Cache")
-        .value("PAGED", KVCacheType::kPAGED, "Paged KV Cache")
-        .value("CONTINUOUS", KVCacheType::kCONTINUOUS, "Continuous KV Cache");
-
     py::enum_<QuantMethod>(m, "QuantMethod", py::arithmetic(), "Quantization Method")
         .value("NONE", QuantMethod::kNONE, "No Quantization")
         .value("SMOOTH_QUANT", QuantMethod::kSMOOTH_QUANT, "Smooth Quantization");
@@ -57,7 +52,7 @@ PYBIND11_MODULE(model_spec, m)
         .def("return_log_probs", &ModelSpec::returnLogProbs)
         .def("smoke_test", &ModelSpec::smokeTest)
         .def("use_medusa", &ModelSpec::useMedusa)
-        .def("use_look_ahead_decoding", &ModelSpec::useLookaheadDecoding)
+        .def("use_lookahead_decoding", &ModelSpec::useLookaheadDecoding)
         .def("use_explicit_draft_tokens_decoding", &ModelSpec::useExplicitDraftTokensDecoding)
         .def("use_draft_tokens_external_decoding", &ModelSpec::useDraftTokensExternalDecoding)
         .def("use_logits", &ModelSpec::useLogits)

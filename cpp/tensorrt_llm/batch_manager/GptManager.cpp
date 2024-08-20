@@ -10,12 +10,13 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/common/logger.h"
 #ifndef TOP_LEVEL_DIR
 #error "Define TOP_LEVEL_DIR"
 #endif
 
-#include "tensorrt_llm/batch_manager/GptManager.h"
 #include "tensorrt_llm/batch_manager/BatchManager.h"
+#include "tensorrt_llm/batch_manager/GptManager.h"
 #include "tensorrt_llm/batch_manager/inferenceRequest.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/namedTensor.h"
@@ -389,15 +390,16 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
     auto embeddingBias = getOptionalTensor(newReq->getEmbeddingBiasUnchecked());
     auto badWordsList = getOptionalTensor(newReq->getBadWordsListUnchecked());
     auto stopWordsList = getOptionalTensor(newReq->getStopWordsListUnchecked());
+    auto lookaheadConfig = newReq->getLookaheadConfig();
 
     TLLM_CHECK_WITH_INFO(samplingConfig.beamWidth == 1 || !newReq->isStreaming(),
         "Streaming mode is only supported with beam width of 1.");
 
     auto r = std::make_shared<LlmRequest>(newReq->getRequestId(), maxNewTokens, tokens, samplingConfig,
         newReq->isStreaming(), endId, padId, embeddingBias, badWordsList, stopWordsList, promptEmbeddingTable,
-        promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, returnLogProbs.value(), returnContextLogits.value(),
-        returnGenerationLogits.value(), draftTokens, draftLogits, false /* FIXME: exclude input in output */,
-        newReq->getLogitsPostProcessor());
+        promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig, returnLogProbs.value(),
+        returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
+        false /* FIXME: exclude input in output */, newReq->getLogitsPostProcessor());
 
     return r;
 }
@@ -715,8 +717,9 @@ BatchManagerErrorCode_t GptManager::returnCompletedRequests()
 
             if (llmReq.getReturnGenerationLogits())
             {
-                TLLM_CHECK_WITH_INFO(
-                    !llmReq.isStreaming(), "Return generation logits is not supported with streaming mode");
+                TLLM_CHECK_WITH_INFO(!llmReq.isStreaming(),
+                    "GptManager is deprecated, please use executor API to return generation logits under streaming "
+                    "mode");
 
                 TensorPtr const& generationLogitsHost = llmReq.getGenerationLogitsHost();
                 auto const generationLogitsShape = generationLogitsHost->getShape();

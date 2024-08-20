@@ -15,9 +15,11 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/runtime/explicitDraftTokensBuffers.h"
 #include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/lookaheadBuffers.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 
+#include <optional>
 #include <vector>
 
 namespace tensorrt_llm::runtime
@@ -36,7 +38,7 @@ public:
     DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession, BufferPtr const& newOutputTokensHost,
         BufferPtr const& finished, BufferPtr const& sequenceLengthsHost, BufferPtr const& cumLogProbsHost,
         BufferPtr const& logProbsHost, BufferPtr const& cacheIndirectionOutput, BufferPtr const& acceptedCumSum,
-        BufferPtr const& packedPaths, int peer);
+        BufferPtr const& packedPaths, BufferPtr const& finishReasonsHost, int peer);
 
     ~DecoderStepAsyncSend();
 
@@ -49,6 +51,7 @@ private:
     std::shared_ptr<mpi::MpiRequest> mRequest6;
     std::shared_ptr<mpi::MpiRequest> mRequest7;
     std::shared_ptr<mpi::MpiRequest> mRequest8;
+    std::shared_ptr<mpi::MpiRequest> mRequest9;
 };
 
 class DecoderSlotAsyncSend
@@ -89,6 +92,7 @@ public:
     TensorPtr cumLogProbsHost;     // [mMaxNumRequests, beamWidth]
     TensorPtr logProbs;            // [mMaxNumRequests, beamWidth, maxSeqLen]
     TensorPtr logProbsHost;        // [mMaxNumRequests, beamWidth, maxSeqLen]
+    TensorPtr finishReasonsHost;   // [mMaxNumRequests, beamWidth]
 
     class DraftBuffers
     {
@@ -110,6 +114,7 @@ public:
 
     DraftBuffers draftBuffers;
     runtime::ExplicitDraftTokensBuffers::Inputs explicitDraftTokensBuffers;
+    std::optional<runtime::LookaheadDecodingBuffers> lookaheadBuffers;
 
     DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
         SizeType32 maxSeqLen, SizeType32 maxTokensPerStep, runtime::TllmRuntime const& runtime,
@@ -135,6 +140,7 @@ public:
     TensorPtr cumLogProbsHost;     // [beamWidth]
     TensorPtr logProbs;            // [beamWidth, maxSeqLen]
     TensorPtr logProbsHost;        // [beamWidth, maxSeqLen]
+    TensorPtr finishReasonsHost;   // [beamWidth]
 
     SlotDecoderBuffers(SizeType32 maxBeamWidth, SizeType32 maxSeqLen, runtime::TllmRuntime const& runtime);
 

@@ -52,7 +52,7 @@ bool Response::hasError() const
     return mImpl->hasError();
 }
 
-std::string Response::getErrorMsg() const
+std::string const& Response::getErrorMsg() const
 {
     return mImpl->getErrorMsg();
 }
@@ -62,7 +62,7 @@ IdType Response::getRequestId() const
     return mImpl->getRequestId();
 }
 
-Result Response::getResult() const
+Result const& Response::getResult() const
 {
     return mImpl->getResult();
 }

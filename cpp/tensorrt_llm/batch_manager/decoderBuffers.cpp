@@ -10,10 +10,12 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "decoderBuffers.h"
+#include "tensorrt_llm/batch_manager/decoderBuffers.h"
 
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 
@@ -62,6 +64,9 @@ DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWid
     logProbsHost = BufferManager::pinned(
         ITensor::makeShape({maxNumSequences, maxBeamWidth, maxSeqLen}), nvinfer1::DataType::kFLOAT);
 
+    finishReasonsHost
+        = BufferManager::pinned(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kUINT8);
+
     if (modelConfig.getSpeculativeDecodingMode().needsKVCacheRewind()
         || modelConfig.getSpeculativeDecodingMode().hasDraftLogits()
         || modelConfig.getSpeculativeDecodingMode().predictsDraftTokens())
@@ -72,6 +77,10 @@ DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWid
     if (modelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
     {
         explicitDraftTokensBuffers.create(maxNumSequences, runtime, modelConfig, worldConfig);
+    }
+    if (modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
+    {
+        lookaheadBuffers.emplace(maxNumSequences, maxTokensPerStep, runtime.getBufferManager());
     }
 }
 
@@ -120,7 +129,7 @@ void DecoderBuffers::DraftBuffers::create(
 DecoderStepAsyncSend::DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
     BufferPtr const& newOutputTokensHost, BufferPtr const& finished, BufferPtr const& sequenceLengthsHost,
     BufferPtr const& cumLogProbsHost, BufferPtr const& logProbsHost, BufferPtr const& cacheIndirectionOutput,
-    BufferPtr const& acceptedCumSum, BufferPtr const& packedPaths, int const peer)
+    BufferPtr const& acceptedCumSum, BufferPtr const& packedPaths, BufferPtr const& finishReasonsHost, int const peer)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start send outputs of DecoderBuffers to rank %d", peer);
@@ -133,6 +142,7 @@ DecoderStepAsyncSend::DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& 
     mRequest6 = cacheIndirectionOutput ? commSession->sendAsync(*cacheIndirectionOutput, peer, 5) : nullptr;
     mRequest7 = acceptedCumSum ? commSession->sendAsync(*acceptedCumSum, peer, 6) : nullptr;
     mRequest8 = packedPaths ? commSession->sendAsync(*packedPaths, peer, 7) : nullptr;
+    mRequest9 = commSession->sendAsync(*finishReasonsHost, peer, 8);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -154,6 +164,7 @@ DecoderStepAsyncSend::~DecoderStepAsyncSend()
         mRequest7->wait();
     if (mRequest8)
         mRequest8->wait();
+    mRequest9->wait();
 
     TLLM_LOG_DEBUG("end send outputs of DecoderBuffers");
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -166,10 +177,10 @@ DecoderSlotAsyncSend::DecoderSlotAsyncSend(std::shared_ptr<mpi::MpiComm> const& 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start send outputs of SlotDecoderBuffers to rank %d", peer);
 
-    mRequest1 = commSession->sendAsync(*outputIdsView, peer, 8);
-    mRequest2 = commSession->sendAsync(*sequenceLengthView, peer, 9);
-    mRequest3 = returnLogProbs ? commSession->sendAsync(*cumLogProbsView, peer, 10) : nullptr;
-    mRequest4 = returnLogProbs ? commSession->sendAsync(*logProbsView, peer, 11) : nullptr;
+    mRequest1 = commSession->sendAsync(*outputIdsView, peer, 9);
+    mRequest2 = commSession->sendAsync(*sequenceLengthView, peer, 10);
+    mRequest3 = returnLogProbs ? commSession->sendAsync(*cumLogProbsView, peer, 11) : nullptr;
+    mRequest4 = returnLogProbs ? commSession->sendAsync(*logProbsView, peer, 12) : nullptr;
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -196,7 +207,7 @@ std::unique_ptr<DecoderStepAsyncSend> DecoderBuffers::asyncSend(std::shared_ptr<
         sequenceLengthsHost, returnLogProbs ? cumLogProbsHost : nullptr, returnLogProbs ? logProbsHost : nullptr,
         maxBeamWidth > 1 ? cacheIndirectionOutput : nullptr,
         useMedusa ? draftBuffers.acceptedLengthsCumSumDevice : nullptr,
-        useMedusa ? draftBuffers.acceptedPackedPathsDevice : nullptr, peer);
+        useMedusa ? draftBuffers.acceptedPackedPathsDevice : nullptr, finishReasonsHost, peer);
     return decStepAsyncSndHdl;
 }
 
@@ -223,6 +234,7 @@ void DecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, bool
         commSession->recv(*draftBuffers.acceptedLengthsCumSumDevice, peer, 6);
         commSession->recv(*draftBuffers.acceptedPackedPathsDevice, peer, 7);
     }
+    commSession->recv(*finishReasonsHost, peer, 8);
 
     TLLM_LOG_DEBUG("end recv outputs of DecoderBuffers from rank %d", peer);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -251,12 +263,12 @@ void SlotDecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start recv outputs of SlotDecoderBuffers from rank %d", peer);
 
-    commSession->recv(*outputIds, peer, 8);
-    commSession->recv(*sequenceLengthView, peer, 9);
+    commSession->recv(*outputIds, peer, 9);
+    commSession->recv(*sequenceLengthView, peer, 10);
     if (returnLogProbs)
     {
-        commSession->recv(*cumLogProbs, peer, 10);
-        commSession->recv(*logProbs, peer, 11);
+        commSession->recv(*cumLogProbs, peer, 11);
+        commSession->recv(*logProbs, peer, 12);
     }
 
     TLLM_LOG_DEBUG("end recv outputs of SlotDecoderBuffers from rank %d", peer);

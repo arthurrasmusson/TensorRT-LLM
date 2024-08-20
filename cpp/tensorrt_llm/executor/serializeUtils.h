@@ -86,6 +86,7 @@ static_assert(hasSerializedSize<SamplingConfig>(size_t()));
 static_assert(hasSerializedSize<OutputConfig>(size_t()));
 static_assert(hasSerializedSize<PromptTuningConfig>(size_t()));
 static_assert(hasSerializedSize<LoraConfig>(size_t()));
+static_assert(hasSerializedSize<ContextPhaseParams>(size_t()));
 static_assert(hasSerializedSize<ExternalDraftTokensConfig>(size_t()));
 static_assert(hasSerializedSize<Tensor>(size_t()));
 static_assert(hasSerializedSize<Result>(size_t()));
@@ -97,6 +98,7 @@ static_assert(hasSerializedSize<PeftCacheConfig>(size_t()));
 static_assert(hasSerializedSize<DecodingMode>(size_t()));
 static_assert(hasSerializedSize<LookaheadDecodingConfig>(size_t()));
 static_assert(hasSerializedSize<DecodingConfig>(size_t()));
+static_assert(hasSerializedSize<DebugConfig>(size_t()));
 static_assert(!hasSerializedSize<std::string>(size_t()));
 static_assert(!hasSerializedSize<std::optional<float>>(size_t()));
 
@@ -178,6 +180,7 @@ static_assert(hasSerialize<PeftCacheConfig>(nullptr));
 static_assert(hasSerialize<DecodingMode>(nullptr));
 static_assert(hasSerialize<LookaheadDecodingConfig>(nullptr));
 static_assert(hasSerialize<DecodingConfig>(nullptr));
+static_assert(hasSerialize<ContextPhaseParams>(nullptr));
 static_assert(!hasSerialize<std::string>(nullptr));
 static_assert(!hasSerialize<std::optional<float>>(nullptr));
 
@@ -292,6 +295,10 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializeLoraConfig(is);
     }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::ContextPhaseParams>::value)
+    {
+        return Serialization::deserializeContextPhaseParams(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::Request>::value)
     {
         return Serialization::deserializeRequest(is);
@@ -343,6 +350,10 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::DecodingConfig>::value)
     {
         return Serialization::deserializeDecodingConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::DebugConfig>::value)
+    {
+        return Serialization::deserializeDebugConfig(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheStats>::value)
     {
@@ -419,6 +430,7 @@ T deserialize(std::istream& is)
     else
     {
         static_assert(std::is_same_v<T, void>, "Unsupported type for deserialization");
+        return T();
     }
 }
 

@@ -14,6 +14,7 @@
 
 #include "rnnStateManager.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/transformerBuffers.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
@@ -636,6 +637,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             auto sortedSeqSlotIndices = BufferRange<SizeType32>(*sortedSeqSlots);
             std::sort(sortedSeqSlotIndices.begin(), sortedSeqSlotIndices.end());
         }
+        if (modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
+        {
+            // copy from lookahead decoding buffer
+            lookaheadBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
+                decoderBuffers.lookaheadBuffers.value(), runtime, modelConfig, worldConfig);
+        }
     }
 
     if (isChatGlm || isGlm)
@@ -680,7 +687,10 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         manager.copy(*lastTokenIdsHost, *lastTokenIdsDevice);
         if (transformerBuffers)
         {
-            transformerBuffers->copyPositionIds(runtime, positionIdsHost, isChatGlm || isGlm);
+            TensorPtr decoderPositionIds = modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
+                ? ITensor::slice(lookaheadBuffers->positionIdsDevice, 0, numGenRequests)
+                : nullptr;
+            transformerBuffers->copyPositionIds(runtime, positionIdsHost, isChatGlm || isGlm, decoderPositionIds);
         }
         if (rnnStateBuffers)
         {

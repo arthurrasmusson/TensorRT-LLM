@@ -150,7 +150,7 @@ TEST(RequestTest, serializeDeserialize)
 {
     auto request = Request({1, 2, 3, 4}, 11, true, SamplingConfig(), OutputConfig(), 112, 113,
         std::list<VecTokens>{{1, 2, 3}, {2, 3, 4}}, std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
-        std::nullopt, std::nullopt, "Processor", std::nullopt, 1234);
+        std::nullopt, std::nullopt, std::nullopt, "Processor", std::nullopt, 1234);
 
     auto serializedSize = Serialization::serializedSize(request);
     std::ostringstream os;
