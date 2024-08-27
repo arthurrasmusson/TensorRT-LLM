@@ -76,8 +76,12 @@ public:
         else if ((modelType == TrtGptModelType::InflightBatching)
             || (modelType == TrtGptModelType::InflightFusedBatching))
         {
+            TrtGptModelOptionalParams const& fixedOptionalParams
+                = TrtGptModelInflightBatching::optionalParamsAreValid(modelConfig, optionalParams)
+                ? optionalParams
+                : TrtGptModelInflightBatching::fixOptionalParams(modelConfig, optionalParams);
             return std::make_shared<TrtGptModelInflightBatching>(logger, modelConfig, worldConfig, rawEngine,
-                (modelType == TrtGptModelType::InflightFusedBatching), optionalParams);
+                (modelType == TrtGptModelType::InflightFusedBatching), fixedOptionalParams);
         }
         else
         {

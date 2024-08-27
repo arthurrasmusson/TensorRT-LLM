@@ -260,11 +260,14 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto returnAllGeneratedTokens = su::deserialize<bool>(is);
     auto priority = su::deserialize<executor::PriorityType>(is);
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
+    auto encoderInputFeatures = su::deserialize<std::optional<Tensor>>(is);
+    auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(badWords), std::move(stopWords), std::move(embeddingBias), std::move(externalDraftTokensConfig),
         std::move(pTuningConfig), std::move(loraConfig), std::move(lookaheadConfig), std::move(logitsPostProcessorName),
-        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, std::move(contextPhaseParams));
+        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, std::move(contextPhaseParams),
+        std::move(encoderInputFeatures), encoderOutputLength);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)

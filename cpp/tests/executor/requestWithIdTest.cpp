@@ -28,6 +28,7 @@ TEST(RequestWithIdTest, serializeDeserialize)
     std::list<VecTokens> stopWords2{{2}, {11}};
 
     auto embeddingBias = Tensor::cpu(DataType::kFP32, Shape({4}));
+    auto encoderInputFeatures = Tensor::cpu(DataType::kFP16, Shape({3000, 1280}));
 
     float* biasData = reinterpret_cast<float*>(embeddingBias.getData());
     biasData[0] = 16.f;
@@ -40,6 +41,7 @@ TEST(RequestWithIdTest, serializeDeserialize)
 
     auto request2 = Request({100, 200, 300, 400}, 77, false, SamplingConfig(1, 1, 0.33), OutputConfig(true, false), 66,
         99, badWords2, stopWords2, embeddingBias, ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
+    request2.setEncoderInputFeatures(encoderInputFeatures);
 
     std::vector<RequestWithId> reqWithIds;
     reqWithIds.emplace_back(RequestWithId{request1, 1});

@@ -43,6 +43,10 @@ public:
     // intermediate states in pipeline parallelism
     TensorPtr hiddenStates; // [numTokens, hiddenSize]
 
+    // features for multimodal encoders (audio, image, etc.)
+    TensorPtr
+        inputFeatures; // [totalNumOfFeatures, featureDim] if remove_padding else [batchSize, featureDim, featureLength]
+
     // encoder output
     TensorPtr encoderOutput; // [numEncoderTokens, hiddenSize]
 
@@ -65,7 +69,8 @@ public:
 
 private:
     SizeType32 numRequests{};
-    SizeType32 numTokens{};
+    SizeType32 encoderInputLen{};
+    SizeType32 encoderOutputLen{};
     SizeType32 maxInputLengthInBatch{}; // max input length in a batch
     SizeType32 contextIndex{};          // TRT context index
 

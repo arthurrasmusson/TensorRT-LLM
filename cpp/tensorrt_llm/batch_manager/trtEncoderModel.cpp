@@ -366,7 +366,7 @@ void TrtEncoderModel::fillEncoderOutputSync(RequestVector const& requestList, Te
     auto encoderOutputHostPtr = encoderOutputHost.data();
     for (auto const& llmReq : requestList)
     {
-        SizeType32 const seqLen = llmReq->getEncoderLen();
+        SizeType32 const seqLen = llmReq->getEncoderOutputLen();
         TensorPtr currentEncoderOutput
             = mCopyBufferManager.copyFrom(reinterpret_cast<half const*>(encoderOutputHostPtr),
                 ITensor::makeShape({seqLen, mHiddenSize * mWorldConfig.getTensorParallelism()}), MemoryType::kCPU);
@@ -389,62 +389,101 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(executeBatch);
 
+    auto const modelName = mModelConfig.getModelName();
+    TLLM_CHECK_WITH_INFO(modelName == "EncoderModel" || modelName == "WhisperEncoder", "Model not supported.");
+    TensorMap inputTensors;
+    TensorMap outputTensors;
+    TensorPtr rankOutput;
+
     std::vector<TokenIdType> inputIdsHost;
     std::vector<SizeType32> positionIdsHost;
+    SizeType32 totalLength = 0;
     std::vector<SizeType32> inputLengthsHost;
+    std::vector<std::byte> inputFeaturesHost;
+
     inputLengthsHost.reserve(requestList.size());
-    SizeType32 maxInputLengthHost = 0; // scalar tensor input to engine
+    SizeType32 maxInputLengthHost = 0;
 
     for (auto const& llmReq : requestList)
     {
-        auto const& reqTokens = *(llmReq->getEncoderTokens().value());
-        inputIdsHost.insert(inputIdsHost.end(), reqTokens.begin(), reqTokens.end());
-        positionIdsHost.reserve(positionIdsHost.size() + reqTokens.size());
-        auto const newReqPosBegin = positionIdsHost.end();
-        positionIdsHost.resize(positionIdsHost.size() + reqTokens.size());
-        std::iota(newReqPosBegin, positionIdsHost.end(), 0);
-        inputLengthsHost.push_back(reqTokens.size());
-        maxInputLengthHost = std::max(maxInputLengthHost, static_cast<SizeType32>(reqTokens.size()));
+        SizeType32 length;
+        if (mModelConfig.getModelName() == "EncoderModel")
+        {
+            auto const& reqTokens = *(llmReq->getEncoderTokens().value());
+            length = reqTokens.size();
+
+            inputIdsHost.insert(inputIdsHost.end(), reqTokens.begin(), reqTokens.end());
+            positionIdsHost.reserve(positionIdsHost.size() + length);
+            auto const newReqPosBegin = positionIdsHost.end();
+            positionIdsHost.resize(positionIdsHost.size() + length);
+            std::iota(newReqPosBegin, positionIdsHost.end(), 0);
+            maxInputLengthHost = std::max(maxInputLengthHost, static_cast<SizeType32>(length));
+        }
+        else if (mModelConfig.getModelName() == "WhisperEncoder")
+        {
+            auto const& reqFeatures = llmReq->getEncoderInputFeatures(); // [length, featureDim]
+            length = reqFeatures->getShape().d[0];
+
+            auto const curFeatureBytes = reqFeatures->getSizeInBytes();
+            auto const srcPtr = reinterpret_cast<std::byte*>(reqFeatures->data());
+            inputFeaturesHost.insert(inputFeaturesHost.end(), srcPtr, srcPtr + curFeatureBytes);
+        }
+        totalLength += llmReq->getEncoderOutputLen();
+        inputLengthsHost.push_back(length);
     }
 
-    // Engine inputs
-    TensorPtr inputIds;
-    TensorPtr positionIds;
     TensorPtr hiddenStatesInput;
     TensorPtr inputLengths = getBufferManager().copyFrom(
         inputLengthsHost, ITensor::makeShape({static_cast<SizeType32>(inputLengthsHost.size())}), MemoryType::kGPU);
-    // use shape of maxInputLength to indicates max length, content is not important
-    TensorPtr maxInputLength = getBufferManager().gpu(
-        ITensor::makeShape({maxInputLengthHost}), nvinfer1::DataType::kINT32); // TODO: use view instead?
+    inputTensors.emplace("input_lengths", inputLengths);
 
-    SizeType32 totalNbTokens = inputIdsHost.size();
+    if (mModelConfig.getModelName() == "EncoderModel")
+    {
+        // use shape of maxInputLength to indicates max length, content is not important
+        TensorPtr maxInputLength
+            = getBufferManager().gpu(ITensor::makeShape({maxInputLengthHost}), nvinfer1::DataType::kINT32);
+        inputTensors.emplace("max_input_length", maxInputLength);
+    }
+
     // engine outputs
-    TensorPtr rankOutput
-        = getBufferManager().gpu(ITensor::makeShape({totalNbTokens, mHiddenSize * mWorldConfig.getTensorParallelism()}),
-            mModelConfig.getDataType()); // TODO: use view instead?
-
-    TensorMap inputTensors{
-        std::make_pair("max_input_length", maxInputLength), std::make_pair("input_lengths", inputLengths)};
+    rankOutput
+        = getBufferManager().gpu(ITensor::makeShape({totalLength, mHiddenSize * mWorldConfig.getTensorParallelism()}),
+            mModelConfig.getDataType());
 
     if (mWorldConfig.isFirstPipelineParallelRank())
     {
-        inputIds = getBufferManager().copyFrom(inputIdsHost, ITensor::makeShape({totalNbTokens}), MemoryType::kGPU);
-        positionIds
-            = getBufferManager().copyFrom(positionIdsHost, ITensor::makeShape({totalNbTokens}), MemoryType::kGPU);
-        inputTensors.emplace("input_ids", inputIds);
-        inputTensors.emplace("position_ids", positionIds);
+        if (mModelConfig.getModelName() == "EncoderModel")
+        {
+            // Engine inputs
+            TensorPtr inputIds
+                = getBufferManager().copyFrom(inputIdsHost, ITensor::makeShape({totalLength}), MemoryType::kGPU);
+            TensorPtr positionIds
+                = getBufferManager().copyFrom(positionIdsHost, ITensor::makeShape({totalLength}), MemoryType::kGPU);
+            inputTensors.emplace("input_ids", inputIds);
+            inputTensors.emplace("position_ids", positionIds);
+        }
+        else if (mModelConfig.getModelName() == "WhisperEncoder")
+        {
+            auto inputFeaturesHostPtr = inputFeaturesHost.data();
+            auto const featureDim = requestList.front()->getEncoderInputFeatures()->getShape().d[1];
+            auto const dtype = requestList.front()->getEncoderInputFeatures()->getDataType();
+            TensorPtr inputFeatures = getBufferManager().gpu(ITensor::makeShape({totalLength, featureDim}), dtype);
+            getBufferManager().copy(
+                reinterpret_cast<void const*>(inputFeaturesHostPtr), *inputFeatures, runtime::MemoryType::kCPU);
+            inputTensors.emplace("input_features", inputFeatures);
+        }
     }
     else
     {
         hiddenStatesInput = getBufferManager().gpu(
-            ITensor::makeShape({totalNbTokens, mHiddenSize * mWorldConfig.getTensorParallelism()}),
-            mModelConfig.getDataType()); // TODO: use view instead?
+            ITensor::makeShape({totalLength, mHiddenSize * mWorldConfig.getTensorParallelism()}),
+            mModelConfig.getDataType());
 
         inputTensors.emplace("hidden_states_input", hiddenStatesInput);
     }
 
     auto const outputName = mWorldConfig.isLastPipelineParallelRank() ? "encoder_output" : "hidden_states_output";
-    TensorMap outputTensors{std::make_pair(outputName, rankOutput)};
+    outputTensors.emplace(outputName, rankOutput);
 
     // Set input / output tensors to context, encoder model only have one context
     mRuntime->setInputTensors(0, inputTensors);

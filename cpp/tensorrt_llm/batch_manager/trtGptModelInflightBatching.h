@@ -129,6 +129,11 @@ public:
 
     void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
 
+    [[nodiscard]] static bool optionalParamsAreValid(
+        runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
+    [[nodiscard]] static TrtGptModelOptionalParams const fixOptionalParams(
+        runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
+
 private:
     [[nodiscard]] SizeType32 getContextBufferId() const
     {

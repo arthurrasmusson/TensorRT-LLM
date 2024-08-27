@@ -831,8 +831,8 @@ SizeType32 KVCacheManager::getNeededBlocksOneStep(LlmRequest const& req, bool tw
     {
         // Assumes shared among beam = True
         auto const promptCacheLen
-            = std::min(
-                  (isCrossKv() ? req.getEncoderLen() : req.mPromptLen) + numDraftTokensPerStep, mMaxAttentionWindow)
+            = std::min((isCrossKv() ? req.getEncoderOutputLen() : req.mPromptLen) + numDraftTokensPerStep,
+                  mMaxAttentionWindow)
             + mSinkBubbleLength;
         auto const numSharedBlocks = promptCacheLen / getTokensPerBlock();
         auto const numUnSharedTokens = promptCacheLen % getTokensPerBlock();
@@ -868,7 +868,7 @@ SizeType32 KVCacheManager::getNeededBlocksToCompletion(LlmRequest const& req) co
 {
     if (isCrossKv())
     {
-        return req.getEncoderLen() / getTokensPerBlock();
+        return req.getEncoderOutputLen() / getTokensPerBlock();
     }
     SizeType32 numContextBlocks
         = (std::min(req.mPromptLen, mMaxAttentionWindow) + mSinkBubbleLength) / getTokensPerBlock();
@@ -1088,6 +1088,7 @@ void KVCacheManager::storeContextBlocks(SizeType32 seqSlotIdx, std::shared_ptr<L
 
 void KVCacheManager::removeSequence(SizeType32 seqSlotIdx, std::shared_ptr<LlmRequest> const& llmRequest)
 {
+    TLLM_LOG_TRACE("[%s]::%s stop", isCrossKv() ? "CROSS" : "SELF", __PRETTY_FUNCTION__);
     auto& seq = mSequences.at(seqSlotIdx);
     if (seq)
     {

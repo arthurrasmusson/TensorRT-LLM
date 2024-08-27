@@ -43,7 +43,11 @@ void EncoderBuffers::init(
 
     auto const& manager = runtime.getBufferManager();
 
+    auto hiddenStatesType = modelConfig.getDataType();
+
+    inputFeatures = manager.emptyTensor(MemoryType::kGPU, hiddenStatesType);
     inputIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+
     // in PP, only rank 0 needs the following input fields
     if (modelConfig.usePositionEmbedding() && worldConfig.isFirstPipelineParallelRank())
     {
@@ -61,7 +65,6 @@ void EncoderBuffers::init(
     inputLengths = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     maxInputLength = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
-    auto hiddenStatesType = modelConfig.getDataType();
     if (worldConfig.isPipelineParallel())
     {
         hiddenStates = manager.emptyTensor(MemoryType::kGPU, hiddenStatesType);
@@ -81,7 +84,8 @@ void EncoderBuffers::initBufferSizes(
 
     // get buffer shape based on max values
     numRequests = maxBatchSize;
-    numTokens = maxBatchSize * modelConfig.getMaxInputLen();
+    encoderInputLen = maxBatchSize * modelConfig.getMaxInputLen();
+    encoderOutputLen = maxBatchSize * modelConfig.getMaxInputLen(); // assume output length <= input length
     maxInputLengthInBatch = modelConfig.getMaxInputLen();
 
     // update buffer shapes
@@ -96,26 +100,29 @@ void EncoderBuffers::updateBufferSizes(RequestVector const& requests, ModelConfi
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
     numRequests = requests.size();
-    numTokens = 0;
+    encoderInputLen = 0;
+    encoderOutputLen = 0;
     maxInputLengthInBatch = 0;
 
     // get buffer shape based on actual batched requests
     for (auto const& req : requests)
     {
-        auto reqLength = req->getEncoderLen();
-        numTokens += reqLength;
-        maxInputLengthInBatch = std::max(maxInputLengthInBatch, reqLength);
+        auto encOutLen = req->getEncoderOutputLen();
+        encoderInputLen += req->getEncoderInputLen();
+        encoderOutputLen += req->getEncoderOutputLen();
+        maxInputLengthInBatch
+            = std::max(maxInputLengthInBatch, req->getEncoderInputLen()); // Decoder input is encoder output
 
         // update request-owned external buffer for each request
         if (worldConfig.isPipelineParallel())
         {
             req->getEncoderHiddenStates()->reshape(
-                ITensor::makeShape({reqLength, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+                ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
         }
         if (worldConfig.isLastPipelineParallelRank())
         {
             req->getEncoderOutput()->reshape(
-                ITensor::makeShape({reqLength, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+                ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
         }
     }
 
@@ -129,14 +136,14 @@ void EncoderBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
-    inputIds->reshape(ITensor::makeShape({numTokens}));
+    inputIds->reshape(ITensor::makeShape({encoderInputLen}));
     if (positionIds)
     {
-        positionIds->reshape(ITensor::makeShape({numTokens}));
+        positionIds->reshape(ITensor::makeShape({encoderInputLen}));
     }
     if (tokenTypeIds)
     {
-        tokenTypeIds->reshape(ITensor::makeShape({numTokens}));
+        tokenTypeIds->reshape(ITensor::makeShape({encoderInputLen}));
     }
 
     inputLengths->reshape(ITensor::makeShape({numRequests}));
@@ -145,12 +152,12 @@ void EncoderBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     if (worldConfig.isPipelineParallel())
     {
         hiddenStates->reshape(
-            ITensor::makeShape({numTokens, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+            ITensor::makeShape({encoderOutputLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
     }
     if (worldConfig.isLastPipelineParallelRank())
     {
         encoderOutput->reshape(
-            ITensor::makeShape({numTokens, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+            ITensor::makeShape({encoderOutputLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -177,39 +184,61 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
     // TODO: change to a scalar value for this from engine side
     std::vector<SizeType32> maxInputLengthAll(maxInputLengthInBatch, 0);
 
-    // collect inputs in batched requests
-    for (auto const& req : requests)
+    if (requests.front()->getEncoderInputFeatures())
     {
-        auto const& reqTokens = *req->getEncoderTokens().value();
-        auto reqLength = reqTokens.size();
-        inputIdsAll.insert(inputIdsAll.end(), reqTokens.begin(), reqTokens.end());
-        if (positionIds)
+        SizeType32 const featureDim = requests.front()->getEncoderInputFeatures()->getShape().d[1];
+        TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - featureDim = %d", featureDim);
+        inputFeatures->reshape(ITensor::makeShape({encoderInputLen, featureDim}));
+    }
+
+    SizeType32 offset = 0;
+
+    for (auto const& llmReq : requests)
+    {
+        SizeType32 const length = llmReq->getEncoderInputLen();
+        if (llmReq->getEncoderInputFeatures())
         {
-            positionIdsAll.insert(
-                positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + reqLength);
+            auto const& reqFeatures = llmReq->getEncoderInputFeatures(); // [length, featureDim]
+            TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - request id = %d, input features length = %d",
+                llmReq->mRequestId, length);
+            manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, length));
+            offset += length;
         }
-        if (tokenTypeIds)
+        else
         {
-            tokenTypeIdsAll.insert(
-                tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + reqLength);
+            auto const& reqTokens = *llmReq->getEncoderTokens().value();
+            inputIdsAll.insert(inputIdsAll.end(), reqTokens.begin(), reqTokens.end());
+            if (positionIds)
+            {
+                positionIdsAll.insert(
+                    positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
+            }
+            if (tokenTypeIds)
+            {
+                tokenTypeIdsAll.insert(
+                    tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + length);
+            }
         }
-        inputLengthsAll.emplace_back(reqLength);
+        inputLengthsAll.push_back(llmReq->getEncoderInputLen());
     }
 
     // copy inputs from host to device
     {
         NVTX3_SCOPED_RANGE(bufferCopies);
-        manager.copy(inputIdsAll.data(), *inputIds);
-        if (positionIds)
+        if (requests.front()->getEncoderTokens())
         {
-            manager.copy(positionIdsAll.data(), *positionIds);
-        }
-        if (tokenTypeIds)
-        {
-            manager.copy(tokenTypeIdsAll.data(), *tokenTypeIds);
+            manager.copy(inputIdsAll.data(), *inputIds);
+            if (positionIds)
+            {
+                manager.copy(positionIdsAll.data(), *positionIds);
+            }
+            if (tokenTypeIds)
+            {
+                manager.copy(tokenTypeIdsAll.data(), *tokenTypeIds);
+            }
+            manager.copy(maxInputLengthAll.data(), *maxInputLength);
         }
         manager.copy(inputLengthsAll.data(), *inputLengths);
-        manager.copy(maxInputLengthAll.data(), *maxInputLength);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -224,24 +253,32 @@ void EncoderBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     outputMap.clear();
 
     // inputs
-    if (worldConfig.isFirstPipelineParallelRank())
+    if (modelConfig.getModelName() == "WhisperEncoder")
     {
-        inputMap.insert_or_assign("input_ids", inputIds);
-        if (positionIds)
-        {
-            inputMap.insert_or_assign("position_ids", positionIds);
-        }
-        if (tokenTypeIds)
-        {
-            inputMap.insert_or_assign("token_type_ids", tokenTypeIds);
-        }
+        inputMap.insert_or_assign("input_features", inputFeatures);
+        inputMap.insert_or_assign("input_lengths", inputLengths);
     }
     else
     {
-        inputMap.insert_or_assign("hidden_states_input", hiddenStates);
+        if (worldConfig.isFirstPipelineParallelRank())
+        {
+            inputMap.insert_or_assign("input_ids", inputIds);
+            if (positionIds)
+            {
+                inputMap.insert_or_assign("position_ids", positionIds);
+            }
+            if (tokenTypeIds)
+            {
+                inputMap.insert_or_assign("token_type_ids", tokenTypeIds);
+            }
+        }
+        else
+        {
+            inputMap.insert_or_assign("hidden_states_input", hiddenStates);
+        }
+        inputMap.insert_or_assign("input_lengths", inputLengths);
+        inputMap.insert_or_assign("max_input_length", maxInputLength);
     }
-    inputMap.insert_or_assign("input_lengths", inputLengths);
-    inputMap.insert_or_assign("max_input_length", maxInputLength);
 
     // outputs
     if (worldConfig.isLastPipelineParallelRank())
@@ -285,7 +322,11 @@ void EncoderBuffers::rearrangeOutputs(RequestVector const& requests, ModelConfig
     for (auto const& req : requests)
     {
         // copy from internal buffer to request-owned external buffers
-        size = req->getEncoderLen();
+        size = req->getEncoderOutputLen();
+        TLLM_LOG_DEBUG("EncoderBuffers::rearrangeOutputs - req: %d, encoderOutput shape = (%d, %d)", req->mClientId,
+            req->getEncoderOutput()->getShape().d[0], req->getEncoderOutput()->getShape().d[1]);
+        TLLM_LOG_DEBUG("EncoderBuffers::rearrangeOutputs - req: %d, enc output size = %d", req->mClientId, size);
+
         if (worldConfig.isPipelineParallel())
         {
             manager.copy(*ITensor::slice(hiddenStates, offset, size), *req->getEncoderHiddenStates());
@@ -324,7 +365,8 @@ void EncoderBuffers::setMaxBufferSizes(SizeType32 maxBatchSize, runtime::ModelCo
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
     numRequests = maxBatchSize;
-    numTokens = maxBatchSize * modelConfig.getMaxEncoderLen();
+    encoderInputLen = maxBatchSize * modelConfig.getMaxInputLen();
+    encoderOutputLen = maxBatchSize * modelConfig.getMaxInputLen();
     maxInputLengthInBatch = modelConfig.getMaxEncoderLen();
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -334,23 +376,25 @@ void EncoderBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
-    numRequests = 0;           /// total number of requests that need encoder information (context requests +
-                               /// generation requests * beam width)
-    numTokens = 0;             /// total number of encoder tokens across context requests
+    numRequests = 0; /// total number of requests that need encoder information (context requests +
+                     /// generation requests * beam width)
+    encoderInputLen = 0;
+    encoderOutputLen = 0;
     maxInputLengthInBatch = 1; /// maximum encoder length in a batch
 
     for (auto const& llmReq : contextRequests)
     {
         numRequests += 1;
-        numTokens += llmReq->getEncoderLen();
-        maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderLen());
+        encoderInputLen += llmReq->getEncoderInputLen();
+        encoderOutputLen += llmReq->getEncoderOutputLen();
+        maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderInputLen());
     }
 
     for (auto const& llmReq : genRequests)
     {
         auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
         numRequests += reqBeamWidth; // tile by beam width
-        maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderLen());
+        maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderInputLen());
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -361,7 +405,7 @@ void EncoderBuffers::reshape()
 
     inputLengths->reshape(ITensor::makeShape({numRequests}));
     maxInputLength->reshape(ITensor::makeShape({maxInputLengthInBatch}));
-    encoderOutput->reshape(ITensor::makeShape({numTokens, hiddenSize}));
+    encoderOutput->reshape(ITensor::makeShape({encoderOutputLen, hiddenSize}));
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -385,19 +429,19 @@ void EncoderBuffers::fill(
             bool isCtx = llmReq->isContextInitState();
             if (isCtx)
             {
-                size = llmReq->getEncoderLen();
+                size = llmReq->getEncoderOutputLen();
                 auto const encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
                 manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
                 offset += size;
 
-                inputLengthsAll.emplace_back(llmReq->getEncoderLen());
+                inputLengthsAll.emplace_back(size);
             }
             else
             {
                 auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
                 std::fill_n(std::back_inserter(inputLengthsAll), reqBeamWidth,
-                    llmReq->getEncoderLen()); // although encoder output is not needed, gen phase still needs the
-                                              // encoder length info for cross kv cache. Also tile by beam width
+                    llmReq->getEncoderOutputLen()); // although encoder output is not needed, gen phase still needs the
+                                                    // encoder length info for cross kv cache. Also tile by beam width
             }
         }
     }

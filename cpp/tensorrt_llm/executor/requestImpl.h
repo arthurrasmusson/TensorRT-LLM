@@ -35,7 +35,8 @@ public:
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
         std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
-        PriorityType priority, std::optional<ContextPhaseParams> contextPhaseParams)
+        PriorityType priority, std::optional<ContextPhaseParams> contextPhaseParams,
+        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -56,6 +57,8 @@ public:
         , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
         , mPriority(priority)
         , mContextPhaseParams(contextPhaseParams)
+        , mEncoderInputFeatures(encoderInputFeatures)
+        , mEncoderOutputLength(encoderOutputLength)
     {
         validate();
     }
@@ -174,6 +177,16 @@ public:
         return mContextPhaseParams;
     }
 
+    std::optional<Tensor> getEncoderInputFeatures() const
+    {
+        return mEncoderInputFeatures;
+    }
+
+    std::optional<SizeType32> getEncoderOutputLength() const
+    {
+        return mEncoderOutputLength;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -264,6 +277,16 @@ public:
         mContextPhaseParams = std::move(contextPhaseParams);
     }
 
+    void setEncoderInputFeatures(Tensor encoderInputFeatures)
+    {
+        mEncoderInputFeatures = encoderInputFeatures;
+    }
+
+    void setEncoderOutputLength(SizeType32 encoderOutputLength)
+    {
+        mEncoderOutputLength = encoderOutputLength;
+    }
+
 private:
     void validate()
     {
@@ -304,6 +327,8 @@ private:
         lambda(mReturnAllGeneratedTokens);
         lambda(mPriority);
         lambda(mContextPhaseParams);
+        lambda(mEncoderInputFeatures);
+        lambda(mEncoderOutputLength);
     }
 
     VecTokens mInputTokenIds;
@@ -326,6 +351,8 @@ private:
     bool mReturnAllGeneratedTokens;
     PriorityType mPriority;
     std::optional<ContextPhaseParams> mContextPhaseParams;
+    std::optional<Tensor> mEncoderInputFeatures;
+    std::optional<SizeType32> mEncoderOutputLength;
 };
 
 } // namespace tensorrt_llm::executor

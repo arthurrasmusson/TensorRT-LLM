@@ -230,7 +230,7 @@ ScheduledRequests MicroBatchScheduler::scheduleRequests(
         SizeType32 reqNumTokens = 0;
         if (llmReq->isEncoderInitState())
         {
-            reqNumTokens = llmReq->getEncoderLen();
+            reqNumTokens = llmReq->getEncoderOutputLen();
             TLLM_CHECK_WITH_INFO(!mMaxContextLength || reqNumTokens <= mMaxContextLength.value(),
                 "The number of encoder tokens (%d) exceeds the limit value (%d)", reqNumTokens,
                 mMaxContextLength.value());

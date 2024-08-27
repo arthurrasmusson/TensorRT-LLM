@@ -3829,8 +3829,8 @@ TEST_P(EncDecParamsTest, Forward)
     auto encoderOutputHost
         = tr::utils::loadNpy(manager, (ENC_DEC_DATA_BASE / "encoder_output.npy").string(), tr::MemoryType::kCPU);
     auto encoderOutputPtr = tr::bufferCast<half>(*encoderOutputHost);
-    auto decoderOutputHost
-        = tr::utils::loadNpy(manager, (ENC_DEC_DATA_BASE / "output_ids.npy").string(), tr::MemoryType::kCPU);
+    auto decoderOutputHost = tr::utils::loadNpy(manager,
+        (ENC_DEC_DATA_BASE / "output_ids_beam").string() + std::to_string(beamWidth) + ".npy", tr::MemoryType::kCPU);
     auto decoderOutputPtr = tr::bufferCast<TokenIdType>(*decoderOutputHost);
 
     // Rank and size info
@@ -4084,6 +4084,11 @@ INSTANTIATE_TEST_SUITE_P(T5BasicTest, EncDecParamsTest,
         testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
+INSTANTIATE_TEST_SUITE_P(T5Beam2Test, EncDecParamsTest,
+    testing::Combine(
+        testing::Values(T5_NAME), testing::Values(2), testing::Values(64), testing::Values(1), testing::Values(1)),
+    generateTestNameEncDec);
+
 INSTANTIATE_TEST_SUITE_P(T5MultiGPUTest, EncDecParamsTest,
     testing::Combine(
         testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(4), testing::Values(1)),
@@ -4092,6 +4097,11 @@ INSTANTIATE_TEST_SUITE_P(T5MultiGPUTest, EncDecParamsTest,
 INSTANTIATE_TEST_SUITE_P(BartBasicTest, EncDecParamsTest,
     testing::Combine(
         testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(1), testing::Values(1)),
+    generateTestNameEncDec);
+
+INSTANTIATE_TEST_SUITE_P(BartBeam2Test, EncDecParamsTest,
+    testing::Combine(
+        testing::Values(BART_NAME), testing::Values(2), testing::Values(64), testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(BartMultiGPUTest, EncDecParamsTest,

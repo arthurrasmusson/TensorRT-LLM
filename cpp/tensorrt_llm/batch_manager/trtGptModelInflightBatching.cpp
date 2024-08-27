@@ -190,7 +190,7 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
 
             if (crossKvCacheManagerPtr != nullptr)
             {
-                crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderLen(), reqBeamWidth, llmReq);
+                crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
             }
 
             auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
@@ -247,6 +247,56 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
 
 } // namespace
 
+bool TrtGptModelInflightBatching::optionalParamsAreValid(
+    ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
+{
+    // Make sure logic in this function matches fixOptionalParams
+    if (optionalParams.kvCacheConfig.enableBlockReuse)
+    {
+        if (!modelConfig.getPagedContextFMHA())
+        {
+            return false;
+        }
+        if (modelConfig.useLoraPlugin())
+        {
+            return false;
+        }
+        if (modelConfig.usePromptTuning())
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+TrtGptModelOptionalParams const TrtGptModelInflightBatching::fixOptionalParams(
+    ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
+{
+    // Make sure logic in this function matches optionalParamsAreValid
+    auto fixedOptionalParams = TrtGptModelOptionalParams(optionalParams);
+    if (fixedOptionalParams.kvCacheConfig.enableBlockReuse)
+    {
+        if (!modelConfig.getPagedContextFMHA())
+        {
+            TLLM_LOG_WARNING(
+                "Fix optionalParams : KV cache reuse disabled because model was not built with paged context FMHA "
+                "support");
+            fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
+        }
+        if (modelConfig.useLoraPlugin())
+        {
+            TLLM_LOG_WARNING("Fix optionalParams : KV cache reuse disabled because LORA is enabled");
+            fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
+        }
+        if (modelConfig.usePromptTuning())
+        {
+            TLLM_LOG_WARNING("Fix optionalParams : KV cache reuse disabled because prompt tuning is enabled");
+            fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
+        }
+    }
+    return fixedOptionalParams;
+}
+
 TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer1::ILogger> logger,
     ModelConfig const& modelConfig, WorldConfig const& worldConfig, RawEngine const& rawEngine, bool ctxGenFusion,
     TrtGptModelOptionalParams const& optionalParams)
@@ -282,13 +332,6 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     }
 
     mNumBuffers = (mCtxGenFusion ? 1 : 2) * mNumMicroBatches;
-
-    if (optionalParams.kvCacheConfig.enableBlockReuse)
-    {
-        TLLM_CHECK_WITH_INFO(mModelConfig.getPagedContextFMHA() && modelConfig.isPagedKVCache(),
-            "When KV cache block reuse is set, model has to be built with paged context FMHA and paged kv cache "
-            "support");
-    }
 
     if (!optionalParams.kvCacheConfig.onboardBlocks)
     {
@@ -1134,7 +1177,14 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
             = getDecodingMode(mModelConfig.getSpeculativeDecodingMode(), decodingModeOpt, mOperatingBeamWidth);
         if (decodingMode.isExplicitDraftTokens())
         {
+            // There are no logits in Explicit draft tokens model.
             decoderType = mModelConfig.getDataType();
+            // Decoder is not instantiated for bf16. We use half to get the same data size
+            // and explicitly pass dtype to redrafter that has bf16 kernels.
+            if (decoderType == nvinfer1::DataType::kBF16)
+            {
+                decoderType = nvinfer1::DataType::kHALF;
+            }
         }
         mDecoder = std::make_shared<runtime::GptDecoderBatched>(mModelConfig.getVocabSize(),
             mModelConfig.getVocabSizePadded(mWorldConfig.getSize()), mRuntime->getStreamPtr(),
@@ -1327,6 +1377,11 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
                 decoderRequest.lookaheadRuntimeConfig = llmReq->getLookaheadConfig()
                     ? llmReq->getLookaheadConfig()
                     : mDecodingConfig.getLookaheadDecodingConfig();
+            }
+            else if (mModelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
+            {
+                // Only Explicit draft tokens model needs dtype to WAR the lack of bf16 decoder.
+                decoderRequest.dtype = mModelConfig.getDataType();
             }
             if (llmReq->getEmbeddingBias().has_value())
             {
@@ -2058,7 +2113,7 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
                 // The content of newOutputTokens might not be accurate in the case where
                 // the sequence has finished early due to end token, so only add new tokens
                 // to llmReq if decoder seq length is greater than current number of tokens
-                numNewTokens[beam] = std::max(std::min(numGeneratedTokens, seqLen - llmReq->getNumTokens(beam)), 0);
+                numNewTokens[beam] = std::min(numGeneratedTokens, seqLen - llmReq->getNumTokens(beam));
                 numDroppedTokens[beam] = numGeneratedTokens - numNewTokens[beam];
                 for (SizeType32 step = 0; step < numNewTokens[beam]; ++step)
                 {
