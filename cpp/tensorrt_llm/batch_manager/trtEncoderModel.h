@@ -85,14 +85,18 @@ public:
         throw std::runtime_error("TrtEncoderModel does not have model type."); // FIXME:
     }
 
+    [[nodiscard]] executor::IterationType getIterCounter() const noexcept override
+    {
+        return mIterCounter;
+    }
+
     void updatePeftCache(std::shared_ptr<LlmRequest> const& /*llmRequest*/) override
     {
         throw std::runtime_error("TrtEncoderModel does not have Peft Cache.");
     }
 
-    void getCurrentIterationStats(executor::IterationStats& stats) const override {}
-
-    void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override {}
+    void getCurrentIterationStats(executor::IterationStats& stats) const override;
+    void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
 
     void setLayerProfiler() override;
     std::string getLayerProfileInfo() const override;
@@ -163,6 +167,9 @@ private:
     SizeType32 mMaxInputLen; // WAR for max_input_len == max_seq_len at all circumstances
 
     runtime::BufferManager mCopyBufferManager;
+
+    // Iteration counter used to distinguish debug output
+    executor::IterationType mIterCounter{0};
 };
 
 } // namespace tensorrt_llm::batch_manager

@@ -576,6 +576,8 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
             reqOffset += 1;
         }
     }
+
+    ++mIterCounter;
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -601,6 +603,7 @@ std::shared_ptr<kv_cache_manager::KVCacheManager const> TrtGptModelV1::getKVCach
 
 void TrtGptModelV1::getCurrentIterationStats(executor::IterationStats& stats) const
 {
+    stats.iter = mIterCounter;
     // KVCacheManager statistics
     auto const& kvCacheManager = getKVCacheManager();
     if (kvCacheManager)
@@ -627,6 +630,7 @@ void TrtGptModelV1::getCurrentIterationStats(executor::IterationStats& stats) co
 
 void TrtGptModelV1::getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const
 {
+    stats.iter = mIterCounter;
     for (auto& requestStat : stats.requestStats)
     {
         requestStat.scheduled

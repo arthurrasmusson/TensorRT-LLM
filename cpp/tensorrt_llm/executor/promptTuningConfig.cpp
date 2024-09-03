@@ -15,8 +15,9 @@
 
 namespace tensorrt_llm::executor
 {
-PromptTuningConfig::PromptTuningConfig(Tensor embeddingTable)
+PromptTuningConfig::PromptTuningConfig(Tensor embeddingTable, std::optional<VecTokenExtraIds> inputTokenExtraIds)
     : mEmbeddingTable(std::move(embeddingTable))
+    , mInputTokenExtraIds(std::move(inputTokenExtraIds))
 {
     TLLM_CHECK_WITH_INFO(mEmbeddingTable.getShape().size() == 2,
         "Expected prompt embedding table to have shape [vocabSize, hiddenSize]");
@@ -25,6 +26,11 @@ PromptTuningConfig::PromptTuningConfig(Tensor embeddingTable)
 Tensor PromptTuningConfig::getEmbeddingTable() const
 {
     return mEmbeddingTable;
+}
+
+std::optional<VecTokenExtraIds> PromptTuningConfig::getInputTokenExtraIds() const
+{
+    return mInputTokenExtraIds;
 }
 
 } // namespace tensorrt_llm::executor

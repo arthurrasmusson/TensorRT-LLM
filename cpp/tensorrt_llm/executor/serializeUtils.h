@@ -12,14 +12,14 @@
 
 #pragma once
 
+#include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/serialization.h"
+#include "tensorrt_llm/executor/types.h"
 #include <iostream>
 #include <istream>
 #include <list>
 #include <optional>
 #include <ostream>
-#include <tensorrt_llm/executor/executor.h>
-#include <tensorrt_llm/executor/serialization.h>
-#include <tensorrt_llm/executor/types.h>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -86,6 +86,7 @@ static_assert(hasSerializedSize<SamplingConfig>(size_t()));
 static_assert(hasSerializedSize<OutputConfig>(size_t()));
 static_assert(hasSerializedSize<PromptTuningConfig>(size_t()));
 static_assert(hasSerializedSize<LoraConfig>(size_t()));
+static_assert(hasSerializedSize<ContextPhaseState>(size_t()));
 static_assert(hasSerializedSize<ContextPhaseParams>(size_t()));
 static_assert(hasSerializedSize<ExternalDraftTokensConfig>(size_t()));
 static_assert(hasSerializedSize<Tensor>(size_t()));
@@ -180,6 +181,7 @@ static_assert(hasSerialize<PeftCacheConfig>(nullptr));
 static_assert(hasSerialize<DecodingMode>(nullptr));
 static_assert(hasSerialize<LookaheadDecodingConfig>(nullptr));
 static_assert(hasSerialize<DecodingConfig>(nullptr));
+static_assert(hasSerialize<ContextPhaseState>(nullptr));
 static_assert(hasSerialize<ContextPhaseParams>(nullptr));
 static_assert(!hasSerialize<std::string>(nullptr));
 static_assert(!hasSerialize<std::optional<float>>(nullptr));
@@ -295,6 +297,10 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializeLoraConfig(is);
     }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::ContextPhaseState>::value)
+    {
+        return Serialization::deserializeContextPhaseState(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::ContextPhaseParams>::value)
     {
         return Serialization::deserializeContextPhaseParams(is);
@@ -370,6 +376,10 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::IterationStats>::value)
     {
         return Serialization::deserializeIterationStats(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::ExecutorConfig>::value)
+    {
+        return Serialization::deserializeExecutorConfig(is);
     }
     // Optional
     else if constexpr (std::is_same_v<T, std::optional<typename ValueType<T>::type>>)

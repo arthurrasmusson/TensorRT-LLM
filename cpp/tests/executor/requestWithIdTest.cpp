@@ -37,10 +37,12 @@ TEST(RequestWithIdTest, serializeDeserialize)
     biasData[3] = 48.f;
 
     auto request1 = Request({1, 2, 3, 4}, 1000, true, SamplingConfig(1, 4, 0.77), OutputConfig(false, true), 177, 234,
-        badWords, stopWords, embeddingBias, ExternalDraftTokensConfig({11, 22}), std::nullopt, std::nullopt);
+        std::make_optional<std::vector<SizeType32>>({0, 1, 2, 3}), badWords, stopWords, embeddingBias,
+        ExternalDraftTokensConfig({11, 22}), std::nullopt, std::nullopt);
 
     auto request2 = Request({100, 200, 300, 400}, 77, false, SamplingConfig(1, 1, 0.33), OutputConfig(true, false), 66,
-        99, badWords2, stopWords2, embeddingBias, ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
+        99, std::make_optional<std::vector<SizeType32>>({0, 1, 1, 2}), badWords2, stopWords2, embeddingBias,
+        ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
     request2.setEncoderInputFeatures(encoderInputFeatures);
 
     std::vector<RequestWithId> reqWithIds;
@@ -58,7 +60,7 @@ TEST(RequestWithIdTest, serializeDeserialize)
         auto const& reqWithId = reqWithIds.at(i).req;
 
         EXPECT_EQ(reqWithIdOut.getInputTokenIds(), reqWithId.getInputTokenIds());
-        EXPECT_EQ(reqWithIdOut.getMaxNewTokens(), reqWithId.getMaxNewTokens());
+        EXPECT_EQ(reqWithIdOut.getMaxTokens(), reqWithId.getMaxTokens());
         EXPECT_EQ(reqWithIdOut.getSamplingConfig(), reqWithId.getSamplingConfig());
         EXPECT_EQ(reqWithIdOut.getStopWords(), reqWithId.getStopWords());
         EXPECT_EQ(reqWithIdOut.getExternalDraftTokensConfig().value().getTokens(),

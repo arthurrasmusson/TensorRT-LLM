@@ -461,8 +461,10 @@ TEST(SerializeUtilsTest, IterationStats)
     auto timestamp = std::string{"05:01:00"};
     auto iter = texec::IterationType{10};
     auto iterLatencyMS = double{100};
+    auto newActiveRequestsQueueLatencyMS = double{1000};
     auto numActiveRequests = texec::SizeType32{20};
     auto numQueuedRequests = texec::SizeType32{30};
+    auto numCompletedRequests = texec::SizeType32{10};
     auto maxNumActiveRequests = texec::SizeType32{30};
     auto gpuMemUsage = size_t{1024};
     auto cpuMemUsage = size_t{2048};
@@ -472,9 +474,9 @@ TEST(SerializeUtilsTest, IterationStats)
     auto ifbBatchingStats = texec::InflightBatchingStats{10, 20, 30, 40, 50, 60};
     {
         {
-            auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, numActiveRequests, numQueuedRequests,
-                maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats, kvCacheStats,
-                staticBatchingStats, ifbBatchingStats};
+            auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
+                numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage,
+                cpuMemUsage, pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats, ifbBatchingStats};
 
             // serialize and deserialize using std::vector<char>
             {
@@ -498,9 +500,9 @@ TEST(SerializeUtilsTest, IterationStats)
             for (auto ifbBatchStats :
                 std::vector<std::optional<texec::InflightBatchingStats>>{std::nullopt, ifbBatchingStats})
             {
-                auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, numActiveRequests, numQueuedRequests,
-                    maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats,
-                    ifbBatchStats};
+                auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
+                    numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage,
+                    cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats, ifbBatchStats};
                 {
                     auto buffer = texec::Serialization::serialize(stats);
                     auto stats2 = texec::Serialization::deserializeIterationStats(buffer);
@@ -529,4 +531,43 @@ TEST(SerializeUtilsTest, ContextPhaseParams)
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
+
+    {
+        auto state = std::make_unique<texec::ContextPhaseState>(1, 12, "127.0.0.1");
+        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
+        auto stats2 = serializeDeserialize(stats);
+        EXPECT_EQ(stats, stats2);
+    }
+}
+
+TEST(SerializeUtilsTest, ExecutorConfig)
+{
+    texec::ExecutorConfig executorConfig(2, texec::SchedulerConfig(texec::CapacitySchedulerPolicy::kMAX_UTILIZATION),
+        texec::KvCacheConfig(true), true, false, 500, 200, texec::BatchingType::kSTATIC, 128, 64,
+        texec::ParallelConfig(texec::CommunicationType::kMPI, texec::CommunicationMode::kORCHESTRATOR),
+        texec::PeftCacheConfig(10), std::nullopt,
+        texec::DecodingConfig(texec::DecodingMode::Lookahead(), texec::LookaheadDecodingConfig(3, 5, 7)), 0.5f, 8,
+        texec::ExtendedRuntimePerfKnobConfig(true), texec::DebugConfig(true), 60000000);
+    auto executorConfig2 = serializeDeserialize(executorConfig);
+
+    EXPECT_EQ(executorConfig.getMaxBeamWidth(), executorConfig2.getMaxBeamWidth());
+    EXPECT_EQ(executorConfig.getSchedulerConfig(), executorConfig2.getSchedulerConfig());
+    EXPECT_EQ(executorConfig.getKvCacheConfig().getEnableBlockReuse(),
+        executorConfig2.getKvCacheConfig().getEnableBlockReuse());
+    EXPECT_EQ(executorConfig.getEnableChunkedContext(), executorConfig2.getEnableChunkedContext());
+    EXPECT_EQ(executorConfig.getNormalizeLogProbs(), executorConfig2.getNormalizeLogProbs());
+    EXPECT_EQ(executorConfig.getIterStatsMaxIterations(), executorConfig2.getIterStatsMaxIterations());
+    EXPECT_EQ(executorConfig.getRequestStatsMaxIterations(), executorConfig2.getRequestStatsMaxIterations());
+    EXPECT_EQ(executorConfig.getBatchingType(), executorConfig2.getBatchingType());
+    EXPECT_EQ(executorConfig.getMaxBatchSize(), executorConfig2.getMaxBatchSize());
+    EXPECT_EQ(executorConfig.getMaxNumTokens(), executorConfig2.getMaxNumTokens());
+    EXPECT_EQ(executorConfig.getParallelConfig().value().getCommunicationMode(),
+        executorConfig2.getParallelConfig().value().getCommunicationMode());
+    EXPECT_EQ(executorConfig.getPeftCacheConfig(), executorConfig2.getPeftCacheConfig());
+    EXPECT_EQ(executorConfig.getDecodingConfig(), executorConfig2.getDecodingConfig());
+    EXPECT_EQ(executorConfig.getGpuWeightsPercent(), executorConfig2.getGpuWeightsPercent());
+    EXPECT_EQ(executorConfig.getMaxQueueSize(), executorConfig2.getMaxQueueSize());
+    EXPECT_EQ(executorConfig.getExtendedRuntimePerfKnobConfig(), executorConfig2.getExtendedRuntimePerfKnobConfig());
+    EXPECT_EQ(executorConfig.getDebugConfig(), executorConfig2.getDebugConfig());
+    EXPECT_EQ(executorConfig.getMaxSeqIdleMicroseconds(), executorConfig2.getMaxSeqIdleMicroseconds());
 }

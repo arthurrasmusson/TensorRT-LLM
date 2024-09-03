@@ -427,7 +427,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         SizeType32 batchIdx{0};
         for (auto const& llmReq : contextRequests)
         {
-            TLLM_CHECK_WITH_INFO(llmReq->isContextInitState(), "The request should be in context phase.");
+            TLLM_CHECK_WITH_INFO(llmReq->isContextInitState() || llmReq->isDisaggGenerationInitState(),
+                "The request should be in context phase or disaggregated generation init phase.");
             TLLM_CHECK_WITH_INFO(
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
 
@@ -438,6 +439,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             auto const& reqTokens = llmReq->getTokens(0);
             auto const& draftTokens = llmReq->getDraftTokens();
             auto const draftLength = llmReq->getNumDraftTokens();
+            auto const& positionIds = llmReq->getPositionIds();
 
             decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
             decoderInputLengthsHostPtr[batchIdx] = promptLen;
@@ -468,45 +470,54 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
             }
 
-            if (isChatGlm) // ChatGLM-6B
+            if (positionIds.has_value())
             {
-                // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
-                positionIdsHost.resize(totalInputSize + inputLength);
-                std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                positionIdsHost.back() = positionIdsHost.back() - 1;
-
-                positionIdsHostRow2.resize(totalInputSize + inputLength);
-                positionIdsHostRow2.back() = 1;
+                TLLM_CHECK_WITH_INFO(!(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                positionIdsHost.insert(positionIdsHost.end(), positionIds.value()->begin() + beginCompute,
+                    positionIds.value()->begin() + endCompute);
             }
-            else if (isGlm)
+            else
             {
-                // iterate over inputIds to find mask id position
-                auto start = inputHost.begin() + totalInputSize;
-                auto end = start + inputLength;
-                auto it
-                    = std::find_if(start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
-                if (it != end)
+                if (isChatGlm) // ChatGLM-6B
                 {
-                    llmReq->mMaskPosition = std::distance(start, it);
+                    // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
+                    positionIdsHost.resize(totalInputSize + inputLength);
+                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                    positionIdsHost.back() = positionIdsHost.back() - 1;
+
+                    positionIdsHostRow2.resize(totalInputSize + inputLength);
+                    positionIdsHostRow2.back() = 1;
                 }
-                else
+                else if (isGlm)
                 {
-                    llmReq->mMaskPosition = maxContextLength;
+                    // iterate over inputIds to find mask id position
+                    auto start = inputHost.begin() + totalInputSize;
+                    auto end = start + inputLength;
+                    auto it = std::find_if(
+                        start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
+                    if (it != end)
+                    {
+                        llmReq->mMaskPosition = std::distance(start, it);
+                    }
+                    else
+                    {
+                        llmReq->mMaskPosition = maxContextLength;
+                    }
+
+                    // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
+                    positionIdsHost.resize(totalInputSize + inputLength);
+                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                    positionIdsHost.back() = llmReq->mMaskPosition;
+
+                    positionIdsHostRow2.resize(totalInputSize + inputLength);
+                    positionIdsHostRow2.back() = 1;
                 }
-
-                // Using 2D Position Encoding, shape of positionIds is doubled than gpt.
-                positionIdsHost.resize(totalInputSize + inputLength);
-                std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                positionIdsHost.back() = llmReq->mMaskPosition;
-
-                positionIdsHostRow2.resize(totalInputSize + inputLength);
-                positionIdsHostRow2.back() = 1;
-            }
-            else // GPT / ChatGLM2-6B / ChatGLM3-6B
-            {
-                positionIdsHost.resize(totalInputSize + inputLength);
-                std::iota(std::begin(positionIdsHost) + totalInputSize,
-                    std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
+                else // GPT / ChatGLM2-6B / ChatGLM3-6B
+                {
+                    positionIdsHost.resize(totalInputSize + inputLength);
+                    std::iota(std::begin(positionIdsHost) + totalInputSize,
+                        std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
+                }
             }
             totalInputSize += inputLength;
             ++batchIdx;
@@ -548,6 +559,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
             auto const promptLen = llmReq->mPromptLen;
             auto const sequenceLen = promptLen + llmReq->getMaxNumGeneratedTokens();
+            auto const& positionIds = llmReq->getPositionIds();
 
             for (int beam = 0; beam < reqBeamWidth; ++beam)
             {
@@ -559,20 +571,31 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 // If model updates generation position ids do not append them here.
                 if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
                 {
-                    if (isChatGlm) // ChatGLM-6B
+                    if (positionIds.has_value())
                     {
-                        positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
-                        positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                        TLLM_CHECK_WITH_INFO(
+                            !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                        auto last_context_position_id = positionIds.value()->back();
+                        positionIdsHost.push_back(
+                            static_cast<SizeType32>(last_context_position_id + sequenceLen - promptLen));
                     }
-                    else if (isGlm)
+                    else
                     {
-                        positionIdsHost.push_back(llmReq->mMaskPosition);
-                        positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
-                    }
-                    else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
-                    {
-                        // positionIds is just the size of tokens -1
-                        positionIdsHost.push_back(numTokens - 1);
+                        if (isChatGlm) // ChatGLM-6B
+                        {
+                            positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
+                            positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                        }
+                        else if (isGlm)
+                        {
+                            positionIdsHost.push_back(llmReq->mMaskPosition);
+                            positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                        }
+                        else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
+                        {
+                            // positionIds is just the size of tokens -1
+                            positionIdsHost.push_back(numTokens - 1);
+                        }
                     }
                 }
 

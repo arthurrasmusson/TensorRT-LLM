@@ -15,12 +15,14 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # keep this list sorted alphabetically
 set(SRCS
-    cacheTransceiver.cpp
     capacityScheduler.cpp
+    dataTransceiver.cpp
     debugUtils.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp
     GptManager.cpp
+    kvCacheUtils.cpp
+    mpiDataTransceiver.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
     kvCacheUtils.cpp

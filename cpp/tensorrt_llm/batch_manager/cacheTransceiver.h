@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "dataTransceiver.h"
 #include "mpiDataTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
@@ -81,77 +82,74 @@ private:
     nvinfer1::DataType mDataType;
 };
 
-class CacheContext final : public DataContext
+// Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
+// parallel topology is completely identical, making it the preferred method.
+template <typename TComm>
+class CacheInputFormatter final : public IOFormatter<TComm, CacheConfig>
 {
 public:
-    CacheContext(CacheConfig config, std::vector<SizeType32> ranks, std::optional<SizeType32> selfIdx = std::nullopt)
-        : DataContext{std::move(ranks), std::move(selfIdx)}
-        , mConfig{std::move(config)}
+    CacheInputFormatter(KVCacheManager* cacheManager)
+        : mCacheManager{cacheManager}
     {
+        TLLM_CHECK(mCacheManager);
     }
 
-    [[nodiscard]] CacheConfig const& getConfig() const noexcept
+    void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& srcs) override
     {
-        return mConfig;
+        TLLM_CHECK(srcs.size() == 1);
+        auto const& src = srcs.front();
+        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
+        constexpr SizeType32 beam{0};
+        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
+        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
+        {
+            src->recvBuffer(*it);
+        }
     }
 
-    [[nodiscard]] std::unique_ptr<DataContext> clone() const override
+    [[nodiscard]] virtual bool inquireSupport(
+        CacheConfig const& selfconfig, CacheConfig const& dstConfig) const override
     {
-        return std::make_unique<CacheContext>(*this);
+        return selfconfig == dstConfig;
     }
 
 private:
-    bool isEqual(DataContext const& obj) const override
-    {
-        auto const& v = dynamic_cast<CacheContext const&>(obj);
-        return DataContext::isEqual(obj) && mConfig == v.mConfig;
-    }
-
-    CacheConfig mConfig;
+    KVCacheManager* mCacheManager{};
 };
 
 // Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
 // parallel topology is completely identical, making it the preferred method.
-class CacheBlockSender final : public DataSender
+template <typename TComm>
+class CacheOutputFormatter final : public IOFormatter<TComm, CacheConfig>
 {
 public:
-    CacheBlockSender(KVCacheManager* cacheManager, MpiComm const& comm, CacheContext selfContext)
-        : mComm{std::addressof(comm)}
-        , mCacheManager{cacheManager}
-        , mSelfContext{std::move(selfContext)}
+    CacheOutputFormatter(KVCacheManager* cacheManager)
+        : mCacheManager{cacheManager}
     {
-        TLLM_CHECK(cacheManager);
+        TLLM_CHECK(mCacheManager);
     }
 
-    [[nodiscard]] bool inquireSupport(DataContext const* receiverContext) override;
-    void send(LlmRequest const& request, DataContext const& destination) override;
-
-private:
-    MpiComm const* mComm{};
-    KVCacheManager* mCacheManager{};
-    CacheContext mSelfContext;
-};
-
-// Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
-// parallel topology is completely identical, making it the preferred method.
-class CacheBlockReceiver final : public DataReceiver
-{
-public:
-    CacheBlockReceiver(KVCacheManager* cacheManager, MpiComm const& comm, CacheContext selfContext)
-        : mComm{std::addressof(comm)}
-        , mCacheManager{cacheManager}
-        , mSelfContext{std::move(selfContext)}
+    void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& dsts) override
     {
-        TLLM_CHECK(cacheManager);
+        TLLM_CHECK(dsts.size() == 1);
+        auto const& dst = dsts.front();
+        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
+        constexpr SizeType32 beam{0};
+        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
+        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
+        {
+            dst->sendBuffer(*it);
+        }
     }
 
-    [[nodiscard]] bool inquireSupport(DataContext const* senderContext) override;
-    void receive(LlmRequest const& request, DataContext const& source) override;
+    [[nodiscard]] virtual bool inquireSupport(
+        CacheConfig const& selfconfig, CacheConfig const& dstConfig) const override
+    {
+        return selfconfig == dstConfig;
+    }
 
 private:
-    MpiComm const* mComm{};
     KVCacheManager* mCacheManager{};
-    CacheContext mSelfContext;
 };
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

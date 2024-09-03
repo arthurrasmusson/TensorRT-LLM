@@ -27,15 +27,15 @@ Executor::Executor(std::filesystem::path const& encoderModelPath, std::filesyste
 {
 }
 
-Executor::Executor(std::vector<uint8_t> const& engineBuffer, std::string const& jsonConfigStr, ModelType modelType,
+Executor::Executor(BufferView const& engineBuffer, std::string const& jsonConfigStr, ModelType modelType,
     ExecutorConfig const& executorConfig)
     : mImpl(std::make_unique<Executor::Impl>(
         engineBuffer, jsonConfigStr, std::nullopt, std::nullopt, modelType, executorConfig))
 {
 }
 
-Executor::Executor(std::vector<uint8_t> const& encoderEngineBuffer, std::string const& encoderJsonConfigStr,
-    std::vector<uint8_t> const& decoderEngineBuffer, std::string const& decoderJsonConfigStr, ModelType modelType,
+Executor::Executor(BufferView const& encoderEngineBuffer, std::string const& encoderJsonConfigStr,
+    BufferView const& decoderEngineBuffer, std::string const& decoderJsonConfigStr, ModelType modelType,
     ExecutorConfig const& executorConfig)
     : mImpl(std::make_unique<Executor::Impl>(decoderEngineBuffer, decoderJsonConfigStr, encoderEngineBuffer,
         encoderJsonConfigStr, modelType, executorConfig))

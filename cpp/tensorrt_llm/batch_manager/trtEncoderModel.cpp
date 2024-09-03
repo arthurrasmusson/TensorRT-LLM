@@ -96,6 +96,16 @@ BufferManager::CudaStreamPtr TrtEncoderModel::getRuntimeStreamPtr() const
     return mRuntime->getStreamPtr();
 }
 
+void TrtEncoderModel::getCurrentIterationStats(executor::IterationStats& stats) const
+{
+    stats.iter = mIterCounter;
+}
+
+void TrtEncoderModel::getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const
+{
+    stats.iter = mIterCounter;
+}
+
 void TrtEncoderModel::setLayerProfiler()
 {
     TLLM_CHECK(mRuntime);
@@ -330,6 +340,8 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
         }
         throw;
     }
+
+    ++mIterCounter;
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

@@ -29,13 +29,13 @@ public:
     // Constructor
     Impl(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streaming, SamplingConfig const& samplingConfig,
         OutputConfig const& outputConfig, std::optional<TokenIdType> const& endId,
-        std::optional<TokenIdType> const& padId, std::optional<std::list<VecTokens>> badWords,
-        std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
-        std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
+        std::optional<TokenIdType> const& padId, std::optional<std::vector<SizeType32>> positionIds,
+        std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
+        std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
         std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
-        PriorityType priority, std::optional<ContextPhaseParams> contextPhaseParams,
+        PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
         std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
@@ -44,6 +44,7 @@ public:
         , mOutputConfig(outputConfig)
         , mEndId(endId)
         , mPadId(padId)
+        , mPositionIds(std::move(positionIds))
         , mBadWords(std::move(badWords))
         , mStopWords(std::move(stopWords))
         , mEmbeddingBias(checkEmbeddingBias(std::move(embeddingBias)))
@@ -56,6 +57,7 @@ public:
         , mClientId(clientId)
         , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
         , mPriority(priority)
+        , mType(type)
         , mContextPhaseParams(contextPhaseParams)
         , mEncoderInputFeatures(encoderInputFeatures)
         , mEncoderOutputLength(encoderOutputLength)
@@ -110,6 +112,11 @@ public:
     std::optional<SizeType32> getPadId() const
     {
         return mPadId;
+    }
+
+    std::optional<std::vector<SizeType32>> getPositionIds() const
+    {
+        return mPositionIds;
     }
 
     std::optional<std::list<VecTokens>> getBadWords() const
@@ -172,6 +179,11 @@ public:
         return mReturnAllGeneratedTokens;
     }
 
+    RequestType getRequestType() const
+    {
+        return mType;
+    }
+
     std::optional<ContextPhaseParams> const& getContextPhaseParams() const
     {
         return mContextPhaseParams;
@@ -210,6 +222,11 @@ public:
     void setPadId(SizeType32 padId)
     {
         mPadId = padId;
+    }
+
+    void setPositionIds(std::vector<SizeType32> const& positionIds)
+    {
+        mPositionIds = positionIds;
     }
 
     void setBadWords(std::list<VecTokens> const& badWords)
@@ -272,6 +289,11 @@ public:
         mReturnAllGeneratedTokens = returnAllGeneratedTokens;
     }
 
+    void setRequestType(RequestType requestType)
+    {
+        mType = requestType;
+    }
+
     void setContextPhaseParams(ContextPhaseParams contextPhaseParams)
     {
         mContextPhaseParams = std::move(contextPhaseParams);
@@ -314,6 +336,7 @@ private:
         lambda(mOutputConfig);
         lambda(mEndId);
         lambda(mPadId);
+        lambda(mPositionIds);
         lambda(mBadWords);
         lambda(mStopWords);
         lambda(mEmbeddingBias);
@@ -326,6 +349,7 @@ private:
         lambda(mClientId);
         lambda(mReturnAllGeneratedTokens);
         lambda(mPriority);
+        lambda(mType);
         lambda(mContextPhaseParams);
         lambda(mEncoderInputFeatures);
         lambda(mEncoderOutputLength);
@@ -338,6 +362,7 @@ private:
     OutputConfig mOutputConfig;
     std::optional<SizeType32> mEndId;
     std::optional<SizeType32> mPadId;
+    std::optional<std::vector<SizeType32>> mPositionIds;
     std::optional<std::list<VecTokens>> mBadWords;
     std::optional<std::list<VecTokens>> mStopWords;
     std::optional<Tensor> mEmbeddingBias;
@@ -350,6 +375,7 @@ private:
     std::optional<IdType> mClientId;
     bool mReturnAllGeneratedTokens;
     PriorityType mPriority;
+    RequestType mType;
     std::optional<ContextPhaseParams> mContextPhaseParams;
     std::optional<Tensor> mEncoderInputFeatures;
     std::optional<SizeType32> mEncoderOutputLength;

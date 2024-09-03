@@ -330,6 +330,28 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
         draftLogits = getOptionalTensor(newReq->getDraftLogitsUnchecked());
     }
 
+    std::optional<std::shared_ptr<std::vector<SizeType32>>> positionIds;
+    {
+        auto optPositionIds = getOptionalTensor(newReq->getPositionIdsUnchecked());
+        if (optPositionIds)
+        {
+            auto t = optPositionIds.value();
+            if (t->getShape().nbDims == 2)
+            {
+                TLLM_CHECK_WITH_INFO(t->getShape().d[0] == 1,
+                    "Expected batch dimension to be 1 for each request for PositionIds tensor");
+            }
+            else
+            {
+                TLLM_CHECK_WITH_INFO(t->getShape().nbDims == 1, "Invalid shape for PositionIds tensor");
+            }
+            TLLM_CHECK_WITH_INFO(
+                t->getMemoryType() != MemoryType::kGPU, "Expected PositionIds tokens to be in CPU memory.");
+            auto tokenRange = BufferRange<SizeType32>(*t);
+            positionIds = std::make_shared<std::vector<SizeType32>>(tokenRange.begin(), tokenRange.end());
+        }
+    }
+
     std::optional<SizeType32> endId(std::nullopt);
     std::optional<SizeType32> padId(std::nullopt);
     std::optional<SizeType32> beamWidth(std::nullopt);
@@ -396,9 +418,9 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
         "Streaming mode is only supported with beam width of 1.");
 
     auto r = std::make_shared<LlmRequest>(newReq->getRequestId(), maxNewTokens, tokens, samplingConfig,
-        newReq->isStreaming(), endId, padId, embeddingBias, badWordsList, stopWordsList, promptEmbeddingTable,
-        promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig, returnLogProbs.value(),
-        returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
+        newReq->isStreaming(), endId, padId, embeddingBias, badWordsList, stopWordsList, positionIds,
+        promptEmbeddingTable, promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig,
+        returnLogProbs.value(), returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
         false /* FIXME: exclude input in output */, newReq->getLogitsPostProcessor());
 
     return r;
@@ -428,7 +450,9 @@ BatchManagerErrorCode_t GptManager::fetchNewRequests()
                 }
                 auto r = fillLlmRequest(newReq);
 
-                r->validate(getMaxInputLen(), getMaxSequenceLen(), getMaxDraftLen());
+                auto const& kvCacheManager = mTrtGptModel->getKVCacheManager();
+                bool enableKVCacheReuse = kvCacheManager ? kvCacheManager->isEnableBlockReuse() : false;
+                r->validate(getMaxInputLen(), getMaxSequenceLen(), getMaxDraftLen(), std::nullopt, enableKVCacheReuse);
 
                 auto const vocabSizePadded
                     = mTrtGptModel->getModelConfig().getVocabSizePadded(mTrtGptModel->getWorldConfig().getSize());
@@ -922,6 +946,7 @@ std::ostream& operator<<(std::ostream& os, TrtGptModelOptionalParams const& opti
     }
     os << "  normalizeLogProbs: " << options.normalizeLogProbs << "\n";
     os << "  enableChunkedContext: " << options.enableChunkedContext << "\n";
+    os << "  maxSeqIdleMicroseconds: " << options.maxSeqIdleMicroseconds << "\n";
 
     // NOTE: peftCacheManagerConfig and decodingConfig are ignored temporarily
     return os;

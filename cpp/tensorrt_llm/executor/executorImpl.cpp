@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/executor/executorImpl.h"
 
+#include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
 #include "tensorrt_llm/common/assert.h"
@@ -20,6 +21,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
@@ -159,7 +161,7 @@ std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::
 }
 
 void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& modelPathOpt,
-    std::optional<std::vector<uint8_t>> const& engineBufferOpt, runtime::GptJsonConfig const& jsonConfig,
+    std::optional<BufferView> const& engineBufferOpt, runtime::GptJsonConfig const& jsonConfig,
     ExecutorConfig const& executorConfig, bool isEncoder)
 {
     auto const gpusPerNode = jsonConfig.getGpusPerNode();
@@ -225,10 +227,9 @@ Executor::Impl::Impl(std::filesystem::path const& modelPath,
     initialize(executorConfig);
 }
 
-Executor::Impl::Impl(std::vector<uint8_t> const& engineBuffer, std::string const& jsonConfigStr,
-    std::optional<std::vector<uint8_t>> const& encoderEngineBuffer,
-    std::optional<std::string> const& encoderJsonConfigStr, ModelType const modelType,
-    ExecutorConfig const& executorConfig)
+Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& jsonConfigStr,
+    std::optional<BufferView> const& encoderEngineBufferView, std::optional<std::string> const& encoderJsonConfigStr,
+    ModelType const modelType, ExecutorConfig const& executorConfig)
 {
     auto decoderJsonConfig = runtime::GptJsonConfig::parse(jsonConfigStr);
 
@@ -241,7 +242,7 @@ Executor::Impl::Impl(std::vector<uint8_t> const& engineBuffer, std::string const
     {
         if (modelType == ModelType::kENCODER_DECODER)
         {
-            TLLM_CHECK(encoderEngineBuffer.has_value() && encoderJsonConfigStr.has_value());
+            TLLM_CHECK(encoderEngineBufferView.has_value() && encoderJsonConfigStr.has_value());
 
             auto const encoderJsonConfig = runtime::GptJsonConfig::parse(encoderJsonConfigStr.value());
 
@@ -253,9 +254,9 @@ Executor::Impl::Impl(std::vector<uint8_t> const& engineBuffer, std::string const
             decoderJsonConfig.getModelConfigMutable().setMaxEncoderLen(encoderMaxInputLen);
             decoderJsonConfig.getModelConfigMutable().setEncoderHiddenSize(encoderHiddenSize);
 
-            loadModel(std::nullopt, encoderEngineBuffer.value(), encoderJsonConfig, executorConfig, true);
+            loadModel(std::nullopt, encoderEngineBufferView.value(), encoderJsonConfig, executorConfig, true);
         }
-        loadModel(std::nullopt, engineBuffer, decoderJsonConfig, executorConfig, false);
+        loadModel(std::nullopt, engineBufferView, decoderJsonConfig, executorConfig, false);
     }
     initialize(executorConfig);
 }
@@ -319,6 +320,8 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
         mMaxNumActiveRequests = mModel->getMaxNumSequences();
         mExecutionThread = std::thread(&Impl::executionLoop, this);
     }
+
+    mEnableBlockReuse = executorConfig.getKvCacheConfig().getEnableBlockReuse();
 }
 
 std::shared_ptr<Model> Executor::Impl::createModel(runtime::RawEngine const& rawEngine,
@@ -425,6 +428,8 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
 
     mCommMode = parallelConfig.getCommunicationMode();
     auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
+
+    mRecvPollPeriodMs = executorConfig.getRecvPollPeriodMs();
 
     // Need to create communicator between orchestrator and leader if not spawning processes in orchestrator mode
     if (mCommMode == CommunicationMode::kORCHESTRATOR && !optOrchestratorConfig.value().getSpawnProcesses())
@@ -688,10 +693,11 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
 
     std::vector<IdType> ids;
     {
+        auto now = std::chrono::steady_clock::now();
         for (auto& req : requests)
         {
             ids.emplace_back(generateReqId());
-            requestWithIds.emplace_back(RequestWithId{req, ids.back()});
+            requestWithIds.emplace_back(RequestWithId{req, ids.back(), now});
         }
     }
 
@@ -1055,14 +1061,15 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     return reqWithIds;
 }
 
-Executor::Impl::RequestList Executor::Impl::fetchNewRequests(
-    SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
+Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiveRequests,
+    std::optional<PriorityType> lowestPriorityActive, double& newActiveRequestsQueueLatencyMS)
 {
     NVTX3_SCOPED_RANGE(fetchNewRequests);
     // If grab requests from queue, do exchange between ranks
     auto reqWithIds = getNewReqWithIds(numActiveRequests, lowestPriorityActive);
 
     RequestList newRequests;
+    newActiveRequestsQueueLatencyMS = 0;
     for (auto& reqWithId : reqWithIds)
     {
         if (reqWithId.id == mTerminateReqId)
@@ -1097,7 +1104,8 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(
 
             // Validate the request parameters
             newReq->validate(mModel->getMaxInputLen(), mModel->getMaxSequenceLen(), mModel->getMaxDraftLen(),
-                mEncoderModel ? std::optional<SizeType32>(mEncoderModel->getMaxInputLen()) : std::nullopt);
+                mEncoderModel ? std::optional<SizeType32>(mEncoderModel->getMaxInputLen()) : std::nullopt,
+                mEnableBlockReuse);
 
             // When streaming is enabled and scheduling policy permits evict/restart, need to guard against the case
             // where the sequence is truncated on eviction (to respect maxInputLen limits), resulting in loss of some
@@ -1159,6 +1167,10 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(
 
             mModel->updatePeftCache(newReq);
 
+            auto queuedEnd = std::chrono::steady_clock::now();
+            auto reqQueueLatencyMS
+                = std::chrono::duration<double, std::milli>(queuedEnd - reqWithId.queuedStart).count();
+            newActiveRequestsQueueLatencyMS += reqQueueLatencyMS;
             newRequests.emplace_back(std::move(newReq));
         }
         catch (runtime::LoraExpectedException const& e)
@@ -1239,16 +1251,15 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
     }
 }
 
-IterationStats Executor::Impl::getCurrentIterationStats(
-    RequestList const& activeRequests, IterationType iterCounter, double iterLatencyMS)
+IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activeRequests, double iterLatencyMS,
+    double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
 {
     IterationStats stats;
     // Timestamp
     stats.timestamp = tensorrt_llm::common::getCurrentTimestamp();
 
-    // Iteration counter
-    stats.iter = iterCounter;
     stats.iterLatencyMS = iterLatencyMS;
+    stats.newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatencyMS;
     // Active request count
     stats.numActiveRequests = static_cast<SizeType32>(activeRequests.size());
     // Queued request count
@@ -1256,6 +1267,7 @@ IterationStats Executor::Impl::getCurrentIterationStats(
         std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
         stats.numQueuedRequests = static_cast<SizeType32>(mQueuedRequests.size());
     }
+    stats.numCompletedRequests = numCompletedRequests;
     // Max number of requests
     stats.maxNumActiveRequests = mMaxNumActiveRequests;
     // Runtime memory allocation statistics
@@ -1270,7 +1282,7 @@ IterationStats Executor::Impl::getCurrentIterationStats(
 }
 
 RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
-    RequestList const& activeRequests, IterationType iterCounter, RequestList const& finishedRequests)
+    RequestList const& activeRequests, RequestList const& finishedRequests)
 {
     std::vector<RequestStats> requestStatsVec;
 
@@ -1325,7 +1337,7 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStatsVec.emplace_back(requestStats);
     }
 
-    RequestStatsPerIteration stats{iterCounter, std::move(requestStatsVec)};
+    RequestStatsPerIteration stats{0, std::move(requestStatsVec)};
 
     // Model specific stats
     mModel->getCurrentRequestStats(stats);
@@ -1342,12 +1354,13 @@ void Executor::Impl::appendCurrentIterStats(IterationStats&& currentIterStats)
     mIterationStats.emplace_back(std::move(currentIterStats));
 }
 
-void Executor::Impl::updateIterationStats(
-    RequestList const& activeRequests, IterationType iterCounter, double iterLatencyMS)
+void Executor::Impl::updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
+    double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
 {
     if (mIterStatsMaxIterations > 0)
     {
-        auto currentIterStats = getCurrentIterationStats(activeRequests, iterCounter, iterLatencyMS);
+        auto currentIterStats = getCurrentIterationStats(
+            activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS, numCompletedRequests);
 
         // Send the stats to the orchestrator
         if (mCommMode == CommunicationMode::kORCHESTRATOR && mIsLeader)
@@ -1364,8 +1377,7 @@ void Executor::Impl::updateIterationStats(
     }
 }
 
-void Executor::Impl::updateRequestStats(
-    RequestList const& activeRequests, IterationType iterCounter, RequestList const& finishedRequests)
+void Executor::Impl::updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests)
 {
     if (mRequestStatsMaxIterations > 0)
     {
@@ -1375,7 +1387,7 @@ void Executor::Impl::updateRequestStats(
         {
             mRequestStats.pop_front();
         }
-        mRequestStats.emplace_back(getCurrentRequestStats(activeRequests, iterCounter, finishedRequests));
+        mRequestStats.emplace_back(getCurrentRequestStats(activeRequests, finishedRequests));
     }
 }
 
@@ -1462,6 +1474,23 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
     }
 }
 
+void Executor::Impl::terminateContextFinishedRequests(RequestList& inTransmissionRequests)
+{
+    for (auto it = inTransmissionRequests.begin(); it != inTransmissionRequests.end();)
+    {
+        auto req = *it;
+        if (req->isDisaggContextCompleteState())
+        {
+            mModel->terminateRequest(req);
+            it = inTransmissionRequests.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 void Executor::Impl::appendNewResponses(std::vector<Response>&& newResponses)
 {
     {
@@ -1474,7 +1503,8 @@ void Executor::Impl::appendNewResponses(std::vector<Response>&& newResponses)
     mResponsesCv.notify_all();
 }
 
-Executor::Impl::RequestList Executor::Impl::populateNewResponses(RequestList& activeRequests)
+Executor::Impl::RequestList Executor::Impl::populateNewResponses(
+    RequestList& activeRequests, RequestList& inTransmissionRequests)
 {
     NVTX3_SCOPED_RANGE(populateNewResponses);
     std::vector<Response> newResponses;
@@ -1485,6 +1515,14 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(RequestList& ac
         auto llmReq = (*it);
         auto const& reqId = llmReq->mRequestId;
         bool requestDone = false;
+        if (llmReq->isContextOnlyRequest())
+        {
+            auto contextState = std::make_unique<executor::ContextPhaseState>(llmReq->mRequestId,
+                std::vector<SizeType32>{tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session())});
+            // Since `LlmRequest` is a template class, the context state needs to be prepared in the external
+            // implementation.
+            llmReq->setContextPhaseParams(executor::ContextPhaseParams{{}, contextState.release()});
+        }
         auto response = llmReq->createResponse();
         if (response)
         {
@@ -1495,6 +1533,11 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(RequestList& ac
         // Remove from active requests if last response has been generated
         if (requestDone)
         {
+            // move the in transmission requests to another tracker
+            if (llmReq->isDisaggContextTransmissionState())
+            {
+                inTransmissionRequests.push_back(*it);
+            }
             finishedRequests.push_back(*it);
             it = activeRequests.erase(it);
         }
@@ -1517,27 +1560,33 @@ void Executor::Impl::executionLoop()
     auto const [profileIterIdxs, stopIterIdxs] = tensorrt_llm::common::populateIterationIndexes(
         kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
 
-    IterationType iterCounter{0};
-    double iterLatencyMS{0};
+    double iterLatencyMS{0}, newActiveRequestsQueueLatencyMS{0};
     std::chrono::time_point<std::chrono::steady_clock> iterStart;
     std::chrono::time_point<std::chrono::steady_clock> iterEnd;
     RequestList activeRequests;
+    RequestList inTransmissionRequests;
     while (!mShutdown || !activeRequests.empty())
     {
+        auto const iterCounter = mModel->getIterCounter();
         auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
         auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
         RequestList finishedRequests;
-        if (!activeRequests.empty())
+        if (!activeRequests.empty() || !inTransmissionRequests.empty())
         {
             forwardSync(activeRequests);
             terminateCancelledRequests(activeRequests);
-            finishedRequests = populateNewResponses(activeRequests);
+            finishedRequests = populateNewResponses(activeRequests, inTransmissionRequests);
             iterEnd = std::chrono::steady_clock::now();
             if (stopIter)
             {
                 cudaProfilerStop();
             }
             iterLatencyMS = std::chrono::duration<double, std::milli>(iterEnd - iterStart).count();
+        }
+
+        if (!inTransmissionRequests.empty())
+        {
+            terminateContextFinishedRequests(inTransmissionRequests);
         }
 
         if (!mShutdown)
@@ -1553,7 +1602,9 @@ void Executor::Impl::executionLoop()
                 lowestPriority = activeRequests.back()->priority();
             }
 
-            auto newRequests = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()), lowestPriority);
+            auto newRequests
+                = fetchNewRequests(static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()),
+                    lowestPriority, newActiveRequestsQueueLatencyMS);
 
             for (auto const& newRequest : newRequests)
             {
@@ -1564,9 +1615,9 @@ void Executor::Impl::executionLoop()
         if (!activeRequests.empty())
         {
             forwardAsync(activeRequests);
-            updateIterationStats(activeRequests, iterCounter, iterLatencyMS);
-            updateRequestStats(activeRequests, iterCounter, finishedRequests);
-            iterCounter++;
+            updateIterationStats(activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS,
+                static_cast<SizeType32>(finishedRequests.size()));
+            updateRequestStats(activeRequests, finishedRequests);
         }
     }
 
@@ -1669,6 +1720,11 @@ void Executor::Impl::leaderRecvReqThread()
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
+        if (mRecvPollPeriodMs > 0)
+        {
+            mOrchLeaderComm->recvPoll(mOrchRank, kMPI_ID_TAG, mRecvPollPeriodMs);
+        }
+
         // Blocking is okay: terminate message is expected to arrive here
         MPI_Message msg;
         MPI_Status status;
@@ -1790,6 +1846,11 @@ void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
+        if (mRecvPollPeriodMs > 0)
+        {
+            mOrchLeaderComm->recvPoll(mOrchRank, kMPI_ID_TAG, mRecvPollPeriodMs);
+        }
+
         MPI_Message msg;
         MPI_Status status;
         mOrchLeaderComm->mprobe(mLeaderRank, idTag, &msg, &status);

@@ -16,7 +16,9 @@
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/debugUtils.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/batch_manager/mpiDataTransceiver.h"
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/requestScheduler.h"
 #include "tensorrt_llm/batch_manager/rnnStateManager.h"
@@ -62,6 +64,7 @@ namespace
 using TensorPtr = runtime::ITensor::SharedPtr;
 using TensorConstPtr = runtime::ITensor::SharedConstPtr;
 using KVCacheManager = kv_cache_manager::KVCacheManager;
+using LlmRequestPtr = std::shared_ptr<batch_manager::LlmRequest>;
 
 void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr& medusaLogitsDevice, SizeType32 medusaHeads,
     SizeType32 logitsIndex, SizeType32 numLogits)
@@ -257,14 +260,6 @@ bool TrtGptModelInflightBatching::optionalParamsAreValid(
         {
             return false;
         }
-        if (modelConfig.useLoraPlugin())
-        {
-            return false;
-        }
-        if (modelConfig.usePromptTuning())
-        {
-            return false;
-        }
     }
     return true;
 }
@@ -281,16 +276,6 @@ TrtGptModelOptionalParams const TrtGptModelInflightBatching::fixOptionalParams(
             TLLM_LOG_WARNING(
                 "Fix optionalParams : KV cache reuse disabled because model was not built with paged context FMHA "
                 "support");
-            fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
-        }
-        if (modelConfig.useLoraPlugin())
-        {
-            TLLM_LOG_WARNING("Fix optionalParams : KV cache reuse disabled because LORA is enabled");
-            fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
-        }
-        if (modelConfig.usePromptTuning())
-        {
-            TLLM_LOG_WARNING("Fix optionalParams : KV cache reuse disabled because prompt tuning is enabled");
             fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
         }
     }
@@ -399,6 +384,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
             // assume encoder and decoder configs are the same
             mCrossKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig, KvCacheType::kCROSS);
         }
+        initDataTransceiver(mKvCacheManager.get());
     }
 
     if (mWorldConfig.isPipelineParallel())
@@ -415,11 +401,8 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
             commSession.split(mWorldConfig.getPipelineParallelRank(), mWorldConfig.getTensorParallelRank()));
     }
 
-    // TODO: Get from backend
-    // Sequence is considered idle if not update for 180 seconds
-    uint64_t maxSeqIdleMicroseconds = 180 * 1000 * 1000;
-
-    mSeqSlotManager = std::make_shared<SequenceSlotManager>(getMaxNumSequences(), maxSeqIdleMicroseconds);
+    mSeqSlotManager
+        = std::make_shared<SequenceSlotManager>(getMaxNumSequences(), optionalParams.maxSeqIdleMicroseconds);
 
     if (mModelConfig.useLoraPlugin())
     {
@@ -475,6 +458,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
 TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
 {
+    checkCacheTranferStatus(true);
     if (mMpiWaitThread)
     {
         mMpiWaitThread->join();
@@ -587,10 +571,19 @@ std::shared_ptr<KVCacheManager> TrtGptModelInflightBatching::createKvCacheManage
 
     auto const maxKvCacheLength
         = kvCacheType == KvCacheType::kSELF ? getMaxAttentionWindow() : mModelConfig.getMaxEncoderLen();
-    auto kvCacheManager = std::make_shared<KVCacheManager>(localNbLayers, nbKvHeads, sizePerHead, tokensPerBlock,
-        blocksInPrimaryPool, blocksInSecondaryPool, getMaxNumSequences(), getMaxBeamWidth(), maxKvCacheLength,
-        getSinkTokenLen(), useOneMoreBlock, mRuntime->getStreamPtr(), kvCacheConfig.enableBlockReuse,
-        kvCacheConfig.onboardBlocks, kvCacheType);
+
+    if (kvCacheType == KvCacheType::kCROSS && kvCacheConfig.enableBlockReuse)
+    {
+        TLLM_LOG_INFO(
+            "Cross KV cache does not support reuse because cross attention depends on encoder and decoder input ids. "
+            "Thus, KV cache reuse is disabled for cross KV cache.");
+    }
+    auto const enableBlockReuse = kvCacheType == KvCacheType::kSELF ? kvCacheConfig.enableBlockReuse : false;
+
+    auto kvCacheManager
+        = std::make_shared<KVCacheManager>(localNbLayers, nbKvHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
+            blocksInSecondaryPool, getMaxNumSequences(), getMaxBeamWidth(), maxKvCacheLength, getSinkTokenLen(),
+            useOneMoreBlock, mRuntime->getStreamPtr(), enableBlockReuse, kvCacheConfig.onboardBlocks, kvCacheType);
 
     reshapeKvTensors(*kvCacheManager);
 
@@ -778,6 +771,17 @@ void TrtGptModelInflightBatching::forwardSync()
                     terminateRequest(llmReq, true);
                     mReqIdsToPause.erase(reqId);
                 }
+                // If a context-only request is finished, send its KV cache and mark it.
+                if (llmReq->isContextOnlyRequest() && llmReq->isGenerationInProgressState())
+                {
+                    if (mResponderFutures.find(llmReq.get()) != mResponderFutures.end())
+                    {
+                        continue;
+                    }
+                    llmReq->mState = REQUEST_STATE_DISAGG_CONTEXT_TRANS_IN_PROGRESS;
+                    auto future = mDataResponder->respondAndSendAsync(*llmReq);
+                    mResponderFutures.insert({llmReq.get(), std::move(future)});
+                }
             }
         }
     }
@@ -788,9 +792,9 @@ void TrtGptModelInflightBatching::forwardSync()
     {
         mRuntime->reportToProfiler(contextId);
     }
+    checkCacheTranferStatus();
 
     ++mIterCounter;
-
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -823,7 +827,10 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
     try
     {
         verifyRequests(activeRequests);
-
+        if (mModelConfig.isTransformerBased() && getKVCacheManager())
+        {
+            prepareDistGenInitRequests(activeRequests);
+        }
         auto& currRequests = mMicroBatchScheduledRequests.at(mMicroBatchId);
         auto& decoderWaitEvent = mDecoderWaitEvents.at(mMicroBatchId);
 
@@ -1233,6 +1240,107 @@ void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& 
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+RequestVector TrtGptModelInflightBatching::scheduleDistGenInitRequests(RequestList const& activeRequests)
+{
+    RequestVector scheduledRequests;
+
+    // Now check if we can add pending requests
+    auto const maxBlocks = mKvCacheManager->getMaxNumBlocks();
+    auto const maxPeftCachePages = mPeftCacheManager->getMaxDevicePages();
+
+    // If a request is already in progress, include it
+    // If it's been allocated, it had resource to run to completion
+    // Also keep track of blocks needed to drive all in-progress requests to completion
+    SizeType32 reservedBlocks{0};
+    SizeType32 claimedPeftPages{0};
+    std::unordered_set<uint64_t> uniqTaskIds{};
+    for (auto const& req : activeRequests)
+    {
+        if (req->isGenerationInProgressState())
+        {
+            reservedBlocks += mKvCacheManager->getNeededBlocksToCompletion(*req);
+
+            bool const reqHasLora = req->getLoraTaskId().has_value();
+            bool const isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
+            if (isNewTask)
+            {
+                claimedPeftPages += mPeftCacheManager->determineNumPages(req);
+                uniqTaskIds.insert(req->getLoraTaskId().value());
+            }
+        }
+    }
+
+    auto availableBlocks = maxBlocks - reservedBlocks;
+    auto availablePeftPages = maxPeftCachePages - claimedPeftPages;
+    for (auto const& req : activeRequests)
+    {
+        // if request cannot be scheduled yet or request should no longer be scheduled, skip
+
+        if (req->isDisaggGenerationInitState())
+        {
+            auto neededBlocks = mKvCacheManager->getNeededBlocksToCompletion(*req);
+            bool reqHasLora = req->getLoraTaskId().has_value();
+            bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
+            auto neededPeftPages = isNewTask ? mPeftCacheManager->determineNumPages(req) : 0;
+
+            if (neededBlocks <= availableBlocks && neededPeftPages <= availablePeftPages)
+            {
+                scheduledRequests.emplace_back(req);
+                availableBlocks -= neededBlocks;
+                availablePeftPages -= neededPeftPages;
+                if (isNewTask)
+                {
+                    uniqTaskIds.insert(req->getLoraTaskId().value());
+                }
+            }
+            else if (neededBlocks > availableBlocks)
+            {
+                // If one requests fails to be scheduled, break
+                break;
+            }
+        }
+    }
+    return scheduledRequests;
+}
+
+void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& activeRequests)
+{
+    auto newGenReqs = scheduleDistGenInitRequests(activeRequests);
+
+    for (auto& newGenReq : newGenReqs)
+    {
+        if (newGenReq->mState == REQUEST_STATE_DISAGG_GENERATION_INIT)
+        {
+            auto const reqSeqSlot = mSeqSlotManager->getSequenceSlot(true, newGenReq->mRequestId);
+            newGenReq->mSeqSlot = reqSeqSlot;
+            mKvCacheManager->addSequence(
+                newGenReq->mSeqSlot.value(), newGenReq->mPromptLen, newGenReq->mSamplingConfig.beamWidth, newGenReq);
+            RequestVector contextRequests;
+            RequestVector generationRequests;
+            contextRequests.push_back(newGenReq);
+            auto const bufferId = getFusedBufferId();
+            auto& runtimeBuffers = *mBuffers[bufferId];
+            runtimeBuffers.prepareStep(contextRequests, generationRequests, getMaxBeamWidth(), getMaxAttentionWindow(),
+                *mDecoderBuffers, mKvCacheManager.get(), mCrossKvCacheManager.get(), mRnnStateManager.get(),
+                mPeftTables[mMicroBatchId], *mRuntime, mModelConfig, mWorldConfig);
+            setupDecoderStep(contextRequests);
+            sync_check_cuda_error();
+            // TODO: need to modificate the hard coding.
+            newGenReq->setContextCurrentPosition(newGenReq->mPromptLen);
+            newGenReq->setDecodingIter(1);
+            auto const reqBeamWidth = newGenReq->mSamplingConfig.beamWidth;
+            auto firstGenTokens = newGenReq->getContextPhaseParams().value().getFirstGenTokens();
+            for (SizeType32 beam = 0; beam < reqBeamWidth; ++beam)
+            {
+                newGenReq->addNewToken(firstGenTokens.at(beam), beam);
+            }
+            auto future = mDataRequester->requestAndReceiveAsync(*newGenReq);
+            future.get();
+            newGenReq->mState = tensorrt_llm::batch_manager::REQUEST_STATE_GENERATION_IN_PROGRESS;
+        }
+    }
 }
 
 void TrtGptModelInflightBatching::assignReqSeqSlots(ScheduledRequests const& scheduledRequests)
@@ -2207,7 +2315,10 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
                 {
                     postProcessRequest(*llmReq, batchIdx, numDroppedTokens);
                 }
-                llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+                if (llmReq->isContextInitState())
+                {
+                    llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+                }
             }
             ++batchIdx;
             numSequences += reqBeamWidth;
@@ -2308,6 +2419,7 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
 
 void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationStats& stats) const
 {
+    stats.iter = mIterCounter;
     // KVCacheManager statistics
     auto const& kvCacheManager = getKVCacheManager();
     if (kvCacheManager)
@@ -2350,11 +2462,35 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
 
 void TrtGptModelInflightBatching::getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const
 {
+    stats.iter = mIterCounter;
     for (auto& requestStat : stats.requestStats)
     {
         requestStat.scheduled
             = mLastIterationStatsIFB.scheduledRequests.count(static_cast<RequestIdType>(requestStat.id));
         requestStat.paused = mLastIterationStatsIFB.pausedRequests.count(static_cast<RequestIdType>(requestStat.id));
+    }
+}
+
+void TrtGptModelInflightBatching::initDataTransceiver(KVCacheManager* cacheManager)
+{
+    mDataResponder = makeMpiCacheResponder(tensorrt_llm::mpi::MpiComm::world(), cacheManager);
+    mDataRequester = makeMpiCacheRequester(tensorrt_llm::mpi::MpiComm::world(), cacheManager);
+}
+
+void TrtGptModelInflightBatching::checkCacheTranferStatus(bool blocking)
+{
+    for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
+    {
+        if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
+        {
+            it->second.get();
+            it->first->mState = REQUEST_STATE_DISAGG_CONTEXT_COMPLETE;
+            it = mResponderFutures.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
     }
 }
 

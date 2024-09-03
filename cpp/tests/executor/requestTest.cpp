@@ -148,9 +148,18 @@ TEST(RequestTest, invalidInputs)
 
 TEST(RequestTest, serializeDeserialize)
 {
+    auto embeddingTable = Tensor::cpu(DataType::kFP32, {2, 2});
+    float* data = reinterpret_cast<float*>(embeddingTable.getData());
+    data[0] = 123;
+    data[1] = 456;
+    data[2] = 789;
+    data[3] = 10;
+
     auto request = Request({1, 2, 3, 4}, 11, true, SamplingConfig(), OutputConfig(), 112, 113,
-        std::list<VecTokens>{{1, 2, 3}, {2, 3, 4}}, std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
-        std::nullopt, std::nullopt, std::nullopt, "Processor", std::nullopt, 1234);
+        std::make_optional<std::vector<SizeType32>>({0, 1, 2, 3}), std::list<VecTokens>{{1, 2, 3}, {2, 3, 4}},
+        std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
+        PromptTuningConfig(embeddingTable, VecTokenExtraIds({1, 2, 3, 4})), std::nullopt, std::nullopt, "Processor",
+        std::nullopt, 1234, false, 0.5);
 
     auto serializedSize = Serialization::serializedSize(request);
     std::ostringstream os;
@@ -161,10 +170,11 @@ TEST(RequestTest, serializeDeserialize)
     auto newRequest = Serialization::deserializeRequest(is);
 
     EXPECT_EQ(newRequest.getInputTokenIds(), request.getInputTokenIds());
-    EXPECT_EQ(newRequest.getMaxNewTokens(), request.getMaxNewTokens());
+    EXPECT_EQ(newRequest.getMaxTokens(), request.getMaxTokens());
     EXPECT_EQ(newRequest.getStreaming(), request.getStreaming());
     EXPECT_EQ(newRequest.getEndId(), request.getEndId());
     EXPECT_EQ(newRequest.getPadId(), request.getPadId());
+    EXPECT_EQ(newRequest.getPositionIds(), request.getPositionIds());
     EXPECT_EQ(newRequest.getBadWords(), request.getBadWords());
     EXPECT_EQ(newRequest.getExternalDraftTokensConfig().value().getTokens(),
         request.getExternalDraftTokensConfig().value().getTokens());
@@ -172,4 +182,19 @@ TEST(RequestTest, serializeDeserialize)
     EXPECT_TRUE(newRequest.getLogitsPostProcessorName().has_value());
     EXPECT_EQ(newRequest.getLogitsPostProcessorName().value(), request.getLogitsPostProcessorName().value());
     EXPECT_EQ(newRequest.getClientId(), request.getClientId());
+    EXPECT_EQ(newRequest.getReturnAllGeneratedTokens(), request.getReturnAllGeneratedTokens());
+    EXPECT_EQ(newRequest.getPriority(), request.getPriority());
+    EXPECT_TRUE(request.getPromptTuningConfig().has_value());
+    EXPECT_TRUE(newRequest.getPromptTuningConfig().has_value());
+    EXPECT_EQ(newRequest.getPromptTuningConfig()->getInputTokenExtraIds(),
+        request.getPromptTuningConfig()->getInputTokenExtraIds());
+    auto newEmbeddingTable = newRequest.getPromptTuningConfig()->getEmbeddingTable();
+    EXPECT_EQ(newEmbeddingTable.getShape().size(), embeddingTable.getShape().size());
+    EXPECT_EQ(newEmbeddingTable.getDataType(), embeddingTable.getDataType());
+    EXPECT_EQ(newEmbeddingTable.getMemoryType(), embeddingTable.getMemoryType());
+    float* newData = reinterpret_cast<float*>(newEmbeddingTable.getData());
+    EXPECT_EQ(data[0], newData[0]);
+    EXPECT_EQ(data[1], newData[1]);
+    EXPECT_EQ(data[2], newData[2]);
+    EXPECT_EQ(data[3], newData[3]);
 }

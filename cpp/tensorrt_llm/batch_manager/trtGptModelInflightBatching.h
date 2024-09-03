@@ -15,7 +15,9 @@
 #include "requestScheduler.h"
 #include "sequenceSlotManager.h"
 #include "tensorrt_llm/batch_manager/BatchManager.h"
+#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
@@ -62,6 +64,7 @@ class TrtGptModelInflightBatching : public TrtGptModel
     using KvCacheType = kv_cache_manager::CacheType;
     using KvCacheConfig = kv_cache_manager::KvCacheConfig;
     using RnnStateManager = rnn_state_manager::RnnStateManager;
+    using LlmRequestPtr = std::shared_ptr<batch_manager::LlmRequest>;
 
 public:
     class IterationStatsIFB
@@ -129,10 +132,18 @@ public:
 
     void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
 
+    [[nodiscard]] executor::IterationType getIterCounter() const noexcept override
+    {
+        return mIterCounter;
+    }
+
     [[nodiscard]] static bool optionalParamsAreValid(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
     [[nodiscard]] static TrtGptModelOptionalParams const fixOptionalParams(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
+    void prepareDistGenInitRequests(RequestList const& activeRequests);
+
+    RequestVector scheduleDistGenInitRequests(RequestList const& activeRequests);
 
 private:
     [[nodiscard]] SizeType32 getContextBufferId() const
@@ -277,6 +288,10 @@ protected:
         mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
     }
 
+    void initDataTransceiver(KVCacheManager* cacheManager);
+
+    void checkCacheTranferStatus(bool blocking = false);
+
 private:
     /******************** Configs ********************/
     // Parameters of the model (TRT engine)
@@ -374,6 +389,11 @@ private:
     IterationStatsIFB mLastIterationStatsIFB{-1};
     // Iteration counter used to distinguish debug output
     executor::IterationType mIterCounter{0};
+
+    /******************** Cache transceiver ********************/
+    std::unique_ptr<DataResponder> mDataResponder;
+    std::unique_ptr<DataRequester> mDataRequester;
+    std::map<LlmRequest*, std::future<void>> mResponderFutures;
 };
 
 } // namespace tensorrt_llm::batch_manager

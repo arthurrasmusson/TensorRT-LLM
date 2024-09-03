@@ -11,6 +11,7 @@
  */
 
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 
@@ -20,8 +21,8 @@ namespace tensorrt_llm::executor
 SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> const& topK,
     std::optional<FloatType> const& topP, std::optional<FloatType> const& topPMin,
     std::optional<TokenIdType> const& topPResetIds, std::optional<FloatType> const& topPDecay,
-    std::optional<RandomSeedType> const& randomSeed, std::optional<FloatType> const& temperature,
-    std::optional<SizeType32> const& minLength, std::optional<FloatType> const& beamSearchDiversityRate,
+    std::optional<RandomSeedType> const& seed, std::optional<FloatType> const& temperature,
+    std::optional<SizeType32> const& minTokens, std::optional<FloatType> const& beamSearchDiversityRate,
     std::optional<FloatType> const& repetitionPenalty, std::optional<FloatType> const& presencePenalty,
     std::optional<FloatType> const& frequencyPenalty, std::optional<FloatType> const& lengthPenalty,
     std::optional<SizeType32> const& earlyStopping, std::optional<SizeType32> const& noRepeatNgramSize)
@@ -31,9 +32,9 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
     , mTopPMin(checkTopPMin(topPMin))
     , mTopPResetIds(checkTopPResetIds(topPResetIds))
     , mTopPDecay(checkTopPDecay(topPDecay))
-    , mRandomSeed(randomSeed)
+    , mSeed(seed)
     , mTemperature(checkTemperature(temperature))
-    , mMinLength(checkMinLength(minLength))
+    , mMinTokens(checkMinTokens(minTokens))
     , mBeamSearchDiversityRate(checkBeamSearchDiversityRate(beamSearchDiversityRate))
     , mRepetitionPenalty(checkRepetitionPenalty(repetitionPenalty))
     , mPresencePenalty(presencePenalty)
@@ -47,9 +48,9 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
 bool SamplingConfig::operator==(SamplingConfig const& other) const
 {
     return mBeamWidth == other.mBeamWidth && mTopK == other.mTopK && mTopP == other.mTopP && mTopPMin == other.mTopPMin
-               && mTopPResetIds == other.mTopPResetIds && mTopPDecay == other.mTopPDecay
-               && mRandomSeed == other.mRandomSeed && mTemperature == other.mTemperature
-               && mMinLength == other.mMinLength && mBeamSearchDiversityRate == other.mBeamSearchDiversityRate
+               && mTopPResetIds == other.mTopPResetIds && mTopPDecay == other.mTopPDecay && mSeed == other.mSeed
+               && mTemperature == other.mTemperature && mMinTokens == other.mMinTokens
+               && mBeamSearchDiversityRate == other.mBeamSearchDiversityRate
                && mRepetitionPenalty == other.mRepetitionPenalty && mPresencePenalty == other.mPresencePenalty
                && mFrequencyPenalty == other.mFrequencyPenalty && mLengthPenalty == other.mLengthPenalty
                && mEarlyStopping == other.mEarlyStopping,
@@ -86,9 +87,15 @@ std::optional<FloatType> SamplingConfig::getTopPDecay() const
     return mTopPDecay;
 }
 
+std::optional<RandomSeedType> SamplingConfig::getSeed() const
+{
+    return mSeed;
+}
+
 std::optional<RandomSeedType> SamplingConfig::getRandomSeed() const
 {
-    return mRandomSeed;
+    TLLM_LOG_WARNING("getRandomSeed is being deprecated; please use getSeed instead.");
+    return mSeed;
 }
 
 std::optional<FloatType> SamplingConfig::getTemperature() const
@@ -96,9 +103,15 @@ std::optional<FloatType> SamplingConfig::getTemperature() const
     return mTemperature;
 }
 
+std::optional<SizeType32> SamplingConfig::getMinTokens() const
+{
+    return mMinTokens;
+}
+
 std::optional<SizeType32> SamplingConfig::getMinLength() const
 {
-    return mMinLength;
+    TLLM_LOG_WARNING("getMinLength is being deprecated; please use getMinTokens instead.");
+    return mMinTokens;
 }
 
 std::optional<FloatType> SamplingConfig::getBeamSearchDiversityRate() const
@@ -168,9 +181,15 @@ void SamplingConfig::setTopPDecay(std::optional<FloatType> const& topPDecay)
     mTopPDecay = checkTopPDecay(topPDecay);
 }
 
+void SamplingConfig::setSeed(std::optional<RandomSeedType> const& seed)
+{
+    mSeed = seed;
+}
+
 void SamplingConfig::setRandomSeed(std::optional<RandomSeedType> const& randomSeed)
 {
-    mRandomSeed = randomSeed;
+    TLLM_LOG_WARNING("setRandomSeed is being deprecated; please use setSeed instead.");
+    mSeed = randomSeed;
 }
 
 void SamplingConfig::setTemperature(std::optional<FloatType> const& temperature)
@@ -178,9 +197,15 @@ void SamplingConfig::setTemperature(std::optional<FloatType> const& temperature)
     mTemperature = checkTemperature(temperature);
 }
 
+void SamplingConfig::setMinTokens(std::optional<SizeType32> const& minTokens)
+{
+    mMinTokens = checkMinTokens(minTokens);
+}
+
 void SamplingConfig::setMinLength(std::optional<SizeType32> const& minLength)
 {
-    mMinLength = checkMinLength(minLength);
+    TLLM_LOG_WARNING("setMinLength is being deprecated; please use setMinTokens instead.");
+    mMinTokens = checkMinTokens(minLength);
 }
 
 void SamplingConfig::setBeamSearchDiversityRate(std::optional<FloatType> const& beamSearchDiversityRate)
@@ -281,13 +306,13 @@ std::optional<FloatType> const& SamplingConfig::checkTemperature(std::optional<F
     return temperature;
 }
 
-std::optional<SizeType32> const& SamplingConfig::checkMinLength(std::optional<SizeType32> const& minLength)
+std::optional<SizeType32> const& SamplingConfig::checkMinTokens(std::optional<SizeType32> const& minTokens)
 {
-    if (minLength.has_value())
+    if (minTokens.has_value())
     {
-        TLLM_CHECK(minLength.value() >= 0);
+        TLLM_CHECK(minTokens.value() >= 0);
     }
-    return minLength;
+    return minTokens;
 }
 
 std::optional<FloatType> const& SamplingConfig::checkRepetitionPenalty(std::optional<FloatType> const& penalty)

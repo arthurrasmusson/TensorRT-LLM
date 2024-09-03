@@ -10,6 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestImpl.h"
 #include "tensorrt_llm/executor/tensor.h"
@@ -18,20 +19,21 @@
 namespace tensorrt_llm::executor
 {
 
-Request::Request(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streaming, SamplingConfig const& samplingConfig,
+Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, SamplingConfig const& samplingConfig,
     OutputConfig const& outputConfig, std::optional<SizeType32> const& endId, std::optional<SizeType32> const& padId,
-    std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
-    std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
-    std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-    std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
-    std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
-    float priority, std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
+    std::optional<std::vector<SizeType32>> positionIds, std::optional<std::list<VecTokens>> badWords,
+    std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
+    std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig, std::optional<PromptTuningConfig> pTuningConfig,
+    std::optional<LoraConfig> loraConfig, std::optional<LookaheadDecodingConfig> lookaheadConfig,
+    std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
+    std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
+    std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
     std::optional<SizeType32> encoderOutputLength)
-    : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig,
-        endId, padId, std::move(badWords), std::move(stopWords), std::move(embeddingBias),
+    : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
+        padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
-        returnAllGeneratedTokens, priority, std::move(contextPhaseParams), std::move(encoderInputFeatures),
+        returnAllGeneratedTokens, priority, type, std::move(contextPhaseParams), std::move(encoderInputFeatures),
         encoderOutputLength))
 {
 }
@@ -61,8 +63,14 @@ VecTokens Request::getInputTokenIds() const
     return mImpl->getInputTokenIds();
 }
 
+SizeType32 Request::getMaxTokens() const
+{
+    return mImpl->getMaxNewTokens();
+}
+
 SizeType32 Request::getMaxNewTokens() const
 {
+    TLLM_LOG_WARNING("getMaxNewTokens is being deprecated; please use getMaxTokens instead.");
     return mImpl->getMaxNewTokens();
 }
 
@@ -89,6 +97,11 @@ std::optional<SizeType32> Request::getEndId() const
 std::optional<SizeType32> Request::getPadId() const
 {
     return mImpl->getPadId();
+}
+
+std::optional<std::vector<SizeType32>> Request::getPositionIds() const
+{
+    return mImpl->getPositionIds();
 }
 
 std::optional<std::list<VecTokens>> Request::getBadWords() const
@@ -151,6 +164,11 @@ bool Request::getReturnAllGeneratedTokens() const
     return mImpl->getReturnAllGeneratedTokens();
 }
 
+RequestType Request::getRequestType() const
+{
+    return mImpl->getRequestType();
+}
+
 std::optional<ContextPhaseParams> const& Request::getContextPhaseParams() const
 {
     return mImpl->getContextPhaseParams();
@@ -189,6 +207,11 @@ void Request::setEndId(SizeType32 endId)
 void Request::setPadId(SizeType32 padId)
 {
     return mImpl->setPadId(padId);
+}
+
+void Request::setPositionIds(std::vector<SizeType32> const& positionIds)
+{
+    return mImpl->setPositionIds(positionIds);
 }
 
 void Request::setBadWords(std::list<VecTokens> const& badWords)
@@ -249,6 +272,11 @@ void Request::setPriority(PriorityType priority)
 void Request::setReturnAllGeneratedTokens(bool returnAllGeneratedTokens)
 {
     return mImpl->setReturnAllGeneratedTokens(returnAllGeneratedTokens);
+}
+
+void Request::setRequestType(RequestType const& requestType)
+{
+    mImpl->setRequestType(requestType);
 }
 
 void Request::setContextPhaseParams(ContextPhaseParams contextPhaseParams)

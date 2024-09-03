@@ -45,7 +45,7 @@ ContextPhaseParams::ContextPhaseParams(ContextPhaseParams&&) = default;
 
 ContextPhaseParams& ContextPhaseParams::operator=(ContextPhaseParams const& other)
 {
-    *this = other;
+    *this = ContextPhaseParams{other};
     return *this;
 }
 
@@ -71,19 +71,26 @@ void* ContextPhaseParams::getState() noexcept
     return mState.get();
 }
 
+void* ContextPhaseParams::releaseState() noexcept
+{
+    return mState.release();
+}
+
 void ContextPhaseParams::deleter(void const* data)
 {
-    if (data)
-    {
-        delete static_cast<ContextPhaseState const*>(data);
-    }
+    using StateT = ContextPhaseState const;
+    std::default_delete<StateT>()(static_cast<StateT*>(data));
 }
 
 bool ContextPhaseParams::operator==(ContextPhaseParams const& other) const noexcept
 {
-    return mFirstGenTokens == other.mFirstGenTokens
-        && *(static_cast<ContextPhaseState const*>(mState.get()))
-        == *(static_cast<ContextPhaseState const*>(mState.get()));
+    if (mFirstGenTokens != other.mFirstGenTokens || static_cast<bool>(mState) != static_cast<bool>(other.mState))
+    {
+        return false;
+    }
+    return !mState
+        || *static_cast<ContextPhaseState const*>(mState.get())
+        == *static_cast<ContextPhaseState const*>(other.mState.get());
 }
 
 } // namespace tensorrt_llm::executor

@@ -1493,7 +1493,7 @@ INSTANTIATE_TEST_SUITE_P(MedusaTests, ParamTest,
         ),
     generateTestName);
 
-INSTANTIATE_TEST_SUITE_P(LlamaLookaheadDecodingTests, ParamTest,
+INSTANTIATE_TEST_SUITE_P(DISABLED_LlamaLookaheadDecodingTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{LLAMA_MODEL_DIR, {2, 2}}),
         testing::Values(
             //

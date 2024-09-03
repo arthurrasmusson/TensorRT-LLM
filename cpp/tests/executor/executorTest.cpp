@@ -21,6 +21,8 @@
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/requestWithId.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
 #include "tensorrt_llm/plugins/api/tllmPlugin.h"
@@ -29,9 +31,10 @@
 #include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tests/utils/common.h"
-
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -762,6 +765,10 @@ class AllParamsTest : public GptExecutorTest, public ::testing::WithParamInterfa
 {
 };
 
+class DistExecutorTest : public GptExecutorTest, public ::testing::WithParamInterface<AllParamsType>
+{
+};
+
 class ParamCancelReqTest : public GptExecutorTest, public ::testing::WithParamInterface<ParamCancelReqType>
 {
 };
@@ -858,6 +865,102 @@ TEST_F(GptExecutorTest, GetLatestStats)
         EXPECT_THAT(jsonStr, testing::HasSubstr("\"numGenRequests\":" + std::to_string(modelStats.numGenRequests)));
 
         ++currentIter;
+    }
+}
+
+TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
+{
+    bool streaming = false;
+    bool excludeInputFromOutput = false;
+    OutputConfig outConfig;
+    outConfig.excludeInputFromOutput = excludeInputFromOutput;
+
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    // Create the requests
+    SizeType32 const numRequests = 2;
+    std::vector<SizeType32> maxNewTokens{3, 5};
+    std::vector<VecTokens> inputTokens{{1, 2, 3, 4}, {5, 6, 7}};
+    std::vector<IdType> reqIds;
+    for (SizeType32 ireq = 0; ireq < numRequests; ++ireq)
+    {
+        auto request = Request(inputTokens[ireq], maxNewTokens[ireq], streaming,
+            tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
+        auto requestId = executor.enqueueRequest(std::move(request));
+        reqIds.emplace_back(requestId);
+        // sleep for 10 ms before sending the next request
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    for (SizeType32 ireq = 0; ireq < numRequests; ++ireq)
+    {
+        auto requestId = reqIds[ireq];
+        bool done = false;
+        int iter = 0;
+        while (!done && iter < mMaxWaitMs)
+        {
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(requestId, waitTime);
+            for (auto& response : responses)
+            {
+                if (response.hasError())
+                {
+                    FAIL();
+                }
+                else
+                {
+                    done = response.getResult().isFinal;
+                }
+            }
+            ++iter;
+        }
+        EXPECT_LT(iter, mMaxWaitMs);
+    }
+
+    // NOTES:
+    // Expect at least max(maxNewTokens) i.e. 5 non-empty iterations
+    // 4th iteration should have numCompletedRequests to be 1.
+    // Depending on the timing, first iteration will either have:
+    //      2 active requests
+    //      or
+    //      1 active requests and 1 queued requests
+    auto stats = executor.getLatestIterationStats();
+    EXPECT_GT(stats.size(), 0); // make sure we have at least 1 stat before the accessing 0-th element
+    if (stats[0].numActiveRequests == 2)
+    {
+        // we cannot reliably check queue latency since both started in the same iteration
+        // there should be exactly 5 non-empty iterations
+        EXPECT_EQ(stats.size(), 5);
+        // only check numCompletedRequests in 4th iteration
+        EXPECT_EQ(stats[3].numCompletedRequests, 1);
+    }
+    else
+    {
+        // there should be more than 5 non-empty iterations since 2nd request started after 1st iteration
+        EXPECT_GT(stats.size(), 5);
+        // 1st request's completion is at 4th iteration
+        EXPECT_EQ(stats[3].numCompletedRequests, 1);
+        // the iteration where 2nd request became active, queue latency must be > 0
+        uint64_t currentIter = 0;
+        for (auto const& stat : stats)
+        {
+            // To check when 2nd request becomes active, we need to think about 2 cases:
+            //  - it overlaps with first request
+            //      => only check queue time in this case
+            //  - it doesn't overlap with the first request (e.g. 1st request ended too fast)
+            //      => little to no queue time, cannot check reliably
+            //  so we only check for queue time when numActiveRequests > 1 i.e. overlap happened after first iteration
+            if (stat.numActiveRequests > 1)
+            {
+                EXPECT_GT(currentIter, 0); // it must be after 1st iteration
+                EXPECT_GT(stat.newActiveRequestsQueueLatencyMS, 0);
+                break;
+            }
+            ++currentIter;
+        }
     }
 }
 
@@ -1558,6 +1661,204 @@ TEST_P(ParamTest, GetNumResponsesReadyTest)
     EXPECT_EQ(numResponsesReady, numExpectedResponses);
 }
 
+class DistExecutor
+{
+public:
+    DistExecutor(std::filesystem::path const& modelPath, ModelType modelType, ExecutorConfig const& executorConfig,
+        bool isContext, int numRequests, int deviceId)
+        : mIsContext(isContext)
+        , mNumRequests(numRequests)
+        , mDeviceId(deviceId)
+        , mComm(tensorrt_llm::mpi::MpiComm::world().split(0, 1011))
+    {
+        ExecutorConfig executorConfigC = executorConfig;
+
+        auto parallelConfig = executorConfigC.getParallelConfig().value_or(ParallelConfig{});
+        std::vector<int> participantIds;
+        if (isContext)
+        {
+            participantIds = {contextRank};
+        }
+        else
+        {
+            participantIds = {generationRank};
+        }
+
+        parallelConfig.setParticipantIds(participantIds);
+        TLLM_CHECK(parallelConfig.getCommunicationMode() == tensorrt_llm::executor::CommunicationMode::kLEADER);
+        parallelConfig.setCommunicationType(tensorrt_llm::executor::CommunicationType::kMPI);
+        parallelConfig.setDeviceIds(std::vector<SizeType32>{deviceId});
+        executorConfigC.setParallelConfig(parallelConfig);
+        mExecutor = std::make_unique<Executor>(modelPath, modelType, executorConfigC);
+
+        if (isContext)
+        {
+            mTranspondThread = std::thread(&DistExecutor::transpondContext, this);
+        }
+        else
+        {
+            mTranspondThread = std::thread(&DistExecutor::transpondGeneration, this);
+        }
+    }
+
+    std::vector<IdType> enqueueRequests(std::vector<Request> const& llmRequests)
+    {
+        if (!mIsContext)
+        {
+            TLLM_CHECK_WITH_INFO(false, "GenerationExecutor shouldn't call awaitResponse\n");
+
+            return {};
+        }
+
+        TLLM_CHECK(llmRequests.size() == mNumRequests);
+
+        auto reqIds = mExecutor->enqueueRequests(llmRequests);
+        for (int i = 0; i < reqIds.size(); i++)
+        {
+            mRequestMap.insert(std::make_pair(reqIds.at(i), llmRequests.at(i)));
+        }
+
+        for (int req = 0; req < reqIds.size(); ++req)
+        {
+            mActiveCount++;
+        }
+
+        return reqIds;
+    }
+
+    std::vector<Response> awaitResponses(std::optional<std::chrono::milliseconds> const& timeout)
+
+    {
+        if (mIsContext)
+        {
+            TLLM_CHECK_WITH_INFO(false, "contextExecutor shouldn't call awaitResponse\n");
+            return {};
+        }
+
+        return mExecutor->awaitResponses(timeout);
+    }
+
+    std::vector<Response> awaitResponses()
+    {
+
+        return mExecutor->awaitResponses();
+    }
+
+    void sendRequest(Request const& request)
+    {
+        constexpr int tag{20};
+        constexpr int destination{generationRank};
+        std::stringstream ss;
+        su::serialize(request, ss);
+        std::string str = ss.str();
+        auto mpiRequest = mComm.sendAsync(str.c_str(), str.size(), tensorrt_llm::mpi::MpiType::kCHAR, destination, tag);
+        mpiRequest->wait();
+    }
+
+    Request recvRequest()
+    {
+#if ENABLE_MULTI_DEVICE
+
+        constexpr int tag{20};
+        constexpr int source{contextRank};
+        MPI_Status status;
+        MPICHECK(MPI_Probe(source, tag, mComm, &status));
+        int count{-1};
+        MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
+        std::string str;
+        str.resize(count);
+        MPI_Request mpiRequest;
+        MPICHECK(MPI_Irecv(str.data(), str.size(), MPI_CHAR, source, tag, mComm, &mpiRequest));
+        MPICHECK(MPI_Wait(&mpiRequest, &status));
+        std::istringstream is(std::move(str));
+#else
+        TLLM_THROW("Multi device support is disabled.");
+        std::istringstream is;
+#endif
+        return su::deserialize<Request>(is);
+    }
+
+    void transpondContext()
+    {
+
+        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
+        TLLM_CHECK(mIsContext);
+        int cnt{0};
+        while (cnt < mNumRequests)
+
+        {
+
+            auto responses = mExecutor->awaitResponses();
+
+            for (auto const& response : responses)
+            {
+
+                auto const reqId = response.getRequestId();
+                TLLM_CHECK(response.getResult().isFinal);
+
+                auto& request = mRequestMap.at(reqId);
+                request.setRequestType(RequestType::REQUEST_TYPE_GENERATION_ONLY);
+                request.setContextPhaseParams(response.getResult().contextPhaseParams.value());
+
+                sendRequest(request);
+                ++cnt;
+            }
+        }
+    }
+
+    void transpondGeneration()
+    {
+        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
+        TLLM_CHECK(!mIsContext);
+        while (mActiveCount < mNumRequests)
+        {
+
+            Request request = recvRequest();
+            ContextPhaseState contextPhaseState
+                = *static_cast<ContextPhaseState const*>(request.getContextPhaseParams()->getState());
+
+            auto genId = mExecutor->enqueueRequest(std::move(request));
+            {
+                std::unique_lock lock(mGenIdToContextMutex);
+                mGenIdToContextPhase[genId] = contextPhaseState;
+            }
+
+            mActiveCount++;
+        }
+    }
+
+    IdType genReqIdToContextId(IdType id)
+    {
+        std::unique_lock lock(mGenIdToContextMutex);
+        return mGenIdToContextPhase[id].getReqId();
+    }
+
+    ~DistExecutor()
+    {
+        if (mTranspondThread.joinable())
+        {
+
+            mTranspondThread.join();
+        }
+        mExecutor->shutdown();
+    }
+
+    static constexpr int contextRank{0}, generationRank{1};
+
+private:
+    bool mIsContext;
+    tensorrt_llm::mpi::MpiComm mComm;
+    std::unique_ptr<Executor> mExecutor;
+    std::thread mTranspondThread;
+    int mActiveCount = 0;
+    int mNumRequests;
+    int mDeviceId;
+    std::map<std::uint64_t, Request> mRequestMap;
+    std::map<IdType, ContextPhaseState> mGenIdToContextPhase;
+
+    std::mutex mGenIdToContextMutex;
+};
+
 namespace
 {
 
@@ -1801,6 +2102,177 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
     else
     {
         EXPECT_FALSE(genLogits.has_value()) << "bid: " << batchId;
+    }
+}
+
+void runDistTest(DistExecutor& executor, tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput,
+    ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded,
+    BeamResult const& beamResult, OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs,
+    BatchingType batchingType, bool returnAllGeneratedTokens, bool isDistExecutor = false, bool isContext = true)
+{
+
+    auto const beamWidth = beamResult.beamWidth;
+
+    std::unordered_map<IdType, SizeType32> reqIdToBatchId;
+    std::unordered_map<SizeType32, BeamTokens> tokens;
+    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, modelIds.padId);
+    auto const* const givenInputData = tr::bufferCast<TokenIdType const>(givenInput);
+
+    auto const& inputShape = givenInput.getShape();
+    ASSERT_EQ(inputShape.nbDims, 2);
+    ASSERT_GT(inputShape.d[0], 0);
+
+    // Load expected outputs for each beam width value
+    auto testData = loadTestData(beamResult, givenInput, beamWidth, manager, outConfig, modelIds);
+    auto const maxSeqLen = testData.maxSeqLen;
+
+    // Load expected outputs and inputs
+    SizeType32 numRequests = static_cast<SizeType32>(givenInputLengths.size());
+    SizeType32 maxRequests = numRequests;
+    std::vector<Request> requests;
+    std::vector<SizeType32> reqMaxNewTokens;
+
+    for (SizeType32 req = 0; req < maxRequests; ++req)
+    {
+        SizeType32 inputLen = givenInputLengths.at(req);
+        auto maxNewTokens = maxSeqLen - maxInputLength;
+        reqMaxNewTokens.push_back(maxNewTokens);
+        SizeType32 endId = -1;
+        auto const* const seqBegin = givenInputData + req * maxInputLength;
+        VecTokens tokens(seqBegin, seqBegin + inputLen);
+        requests.emplace_back(VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming,
+            tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig, endId);
+        requests.back().setReturnAllGeneratedTokens(returnAllGeneratedTokens);
+        if (isDistExecutor)
+            requests.back().setRequestType(RequestType::REQUEST_TYPE_CONTEXT_ONLY);
+    }
+
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
+
+    std::vector<IdType> reqIds;
+    bool isEnqueRank = (worldRank == 0);
+    if (isDistExecutor)
+    {
+        isEnqueRank = isContext;
+    }
+    bool isResponeRank = (worldRank == 0);
+    if (isDistExecutor)
+    {
+        isResponeRank = !isContext;
+    }
+
+    if (isEnqueRank)
+    {
+        reqIds = executor.enqueueRequests(std::move(requests));
+        //  mpisend ReqId
+        if (isDistExecutor)
+        {
+            if (!reqIds.empty())
+            {
+                comm.send(reqIds.data(), reqIds.size(), tensorrt_llm::mpi::MpiType::kUINT64,
+                    DistExecutor::generationRank, 0x11);
+            }
+        }
+    }
+
+    if (isResponeRank)
+    {
+
+        // mpi getreqIds reqIds
+        if (isDistExecutor)
+        {
+            if (numRequests > 0)
+            {
+                for (int i = 0; i < numRequests; i++)
+                {
+                    reqIds.emplace_back(0);
+                }
+                comm.recv(
+                    reqIds.data(), reqIds.size(), tensorrt_llm::mpi::MpiType::kUINT64, DistExecutor::contextRank, 0x11);
+            }
+        }
+
+        for (int i = 0; i < reqIds.size(); i++)
+        {
+        }
+
+        for (SizeType32 req = 0; req < reqIds.size(); ++req)
+        {
+            tokens[req] = BeamTokens(beamWidth);
+            reqIdToBatchId[reqIds.at(req)] = req;
+        }
+
+        // Get the new tokens for each requests
+        int32_t numFinished = 0;
+        int iter = 0;
+        SizeType32 numResponses = 0;
+        while (numFinished < maxRequests && iter < maxWaitMs)
+        {
+
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(waitTime);
+            for (auto& response : responses)
+            {
+                numResponses++;
+                if (!response.hasError())
+                {
+                    auto result = response.getResult();
+                    numFinished += result.isFinal;
+                    auto original_id = response.getRequestId();
+                    if (isDistExecutor)
+                    {
+
+                        original_id = executor.genReqIdToContextId(response.getRequestId());
+                    }
+                    auto batchId = reqIdToBatchId.at(original_id);
+
+                    auto& contextLogits = result.contextLogits;
+                    auto& genLogits = result.generationLogits;
+                    auto& outputTokenIds = result.outputTokenIds;
+
+                    EXPECT_EQ(result.finishReasons.size(), beamWidth);
+                    for (SizeType32 beam = 0; beam < beamWidth; ++beam)
+                    {
+                        auto& newTokens = outputTokenIds.at(beam);
+                        auto& reqTokens = tokens.at(batchId).at(beam);
+
+                        reqTokens.insert(reqTokens.end(), newTokens.begin(), newTokens.end());
+                        // FinishReason is only supported for bw=1 and inflight batching.
+                        if (beamWidth == 1 && batchingType == BatchingType::kINFLIGHT)
+                        {
+                            EXPECT_EQ(result.finishReasons.at(beam),
+                                result.isFinal ? FinishReason::kLENGTH : FinishReason::kNOT_FINISHED);
+                        }
+                    }
+
+                    auto& cumLogProbs = result.cumLogProbs;
+                    auto& logProbs = result.logProbs;
+                    verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
+                        givenInputLengths.at(batchId), beamWidth, tokens.at(batchId), cumLogProbs, logProbs, batchId,
+                        flakyTestInfo);
+
+                    validateContextLogits(outConfig.returnContextLogits, testData, givenInputLengths.at(batchId),
+                        beamWidth, contextLogits, vocabSizePadded, batchId, batchingType);
+                    validateGenerationLogits(outConfig.returnGenerationLogits, testData, result.isFinal, streaming,
+                        outConfig.excludeInputFromOutput, givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId),
+                        beamWidth, tokens.at(batchId), genLogits, vocabSizePadded, batchId, batchingType,
+                        returnAllGeneratedTokens);
+                }
+                else
+                {
+                    // Allow response with error only if awaitResponse processed a terminated request id
+                    std::string err = "ReqId " + std::to_string(response.getRequestId())
+                        + " has already been processed and was terminated.";
+                    EXPECT_EQ(response.getErrorMsg(), err);
+                }
+            }
+            ++iter;
+        }
+        EXPECT_LT(iter, maxWaitMs);
+        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
+            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens);
     }
 }
 
@@ -2286,6 +2758,125 @@ TEST_F(GptExecutorTest, TokenComparisonChangeBw)
     }
 }
 
+TEST_F(DistExecutorTest, GPTTokenComparison)
+{
+#if ENABLE_MULTI_DEVICE
+
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
+    if (comm.getSize() != 2)
+    {
+        GTEST_SKIP() << "Skipping DistExecutor Test";
+    }
+    SizeType32 constexpr maxBeamWidth{1};
+    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+    auto constexpr streaming = false;
+
+    // Create executor config
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
+
+    // Create executor
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+
+    auto const inputPath = DATA_PATH / "input_tokens.npy";
+    ModelIds modelIds{50256, 50256};
+
+    auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
+    auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
+    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
+
+    OutputConfig outConfig;
+    FlakyTestInfo flakyTestInfo;
+    bool constexpr isSpeculativeDecoding{false};
+
+    bool isContext = worldRank == DistExecutor::contextRank;
+
+    for (SizeType32 beamWidth : {1})
+    {
+        BeamResult beamResult{beamWidth};
+        auto const resultsPath
+            = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
+        beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
+        beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
+        beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+
+        auto distExecutor = DistExecutor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig, isContext,
+            givenInputLengths.size(), COMM_SESSION.getRank());
+
+        runDistTest(distExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
+            outConfig, isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false, true, isContext);
+    }
+
+#else
+    GTEST_SKIP() << "Skipping DistExecutor Test";
+#endif
+}
+
+TEST_F(DistExecutorTest, ChatGLMTokenComparison)
+{
+
+#if ENABLE_MULTI_DEVICE
+
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
+
+    if (comm.getSize() != 2)
+    {
+        GTEST_SKIP() << "Skipping DistExecutor Test";
+    }
+    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
+    bool const streaming = false;
+    auto modelPath = CHATGLM2_MODEL_PATH;
+
+    modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+
+    char versionChatglm{0};
+    size_t index = modelPath.string().find("chatglm");
+    versionChatglm = modelPath.string()[index + 7];
+    std::string const vChatglmString = (versionChatglm == '-') ? std::string("") : std::string(1, versionChatglm);
+    auto inputPath = DATA_PATH / ("input_tokens_chatglm" + vChatglmString + "-6b.npy");
+
+    ModelIds modelIds;
+    modelIds.padId = (versionChatglm == '-') ? 3 : 0;
+    modelIds.endId = (versionChatglm == '-') ? 130005 : 2;
+
+    auto resultsPath = CHATGLM2_DATA_PATH;
+    SizeType32 constexpr maxBeamWidth{1};
+
+    auto executorConfig = ExecutorConfig(maxBeamWidth);
+
+    auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
+    auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
+    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
+
+    OutputConfig outConfig;
+    FlakyTestInfo flakyTestInfo;
+    bool constexpr isSpeculativeDecoding{false};
+
+    bool isContext = worldRank == DistExecutor::contextRank;
+
+    for (SizeType32 beamWidth : {1})
+    {
+        BeamResult beamResult{beamWidth};
+        auto const resultsPath
+            = CHATGLM2_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
+        beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
+        beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
+        beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+
+        auto distExecutor = DistExecutor(modelPath, ModelType::kDECODER_ONLY, executorConfig, isContext,
+            givenInputLengths.size(), COMM_SESSION.getRank());
+
+        runDistTest(distExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
+            outConfig, isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false, true, isContext);
+    }
+#else
+    GTEST_SKIP() << "Skipping DistExecutor Test";
+#endif
+}
+
 TEST_F(GptExecutorTest, TimedOut)
 {
     SizeType32 beamWidth = 1;
@@ -2300,6 +2891,47 @@ TEST_F(GptExecutorTest, TimedOut)
     std::chrono::milliseconds waitTime(10);
     auto responses = executor.awaitResponses(waitTime);
     EXPECT_EQ(responses.size(), 0);
+}
+
+TEST_F(GptExecutorTest, MaxSeqIdleMicrosecondsError)
+{
+    auto executorConfig = ExecutorConfig(1);
+    // Request will time out
+    executorConfig.setMaxSeqIdleMicroseconds(1);
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    SizeType32 constexpr maxNewTokens{5};
+    VecTokens inputTokens{1, 2, 3, 4};
+
+    std::vector<Request> requests;
+    requests.emplace_back(inputTokens, maxNewTokens, false);
+
+    auto requestIds = executor.enqueueRequests(requests);
+
+    bool done = false;
+    int iter = 0;
+    while (!done && iter < mMaxWaitMs)
+    {
+        std::chrono::milliseconds waitTime(1);
+        auto responses = executor.awaitResponses(waitTime);
+        for (auto& response : responses)
+        {
+            if (response.hasError())
+            {
+                auto err = response.getErrorMsg();
+                std::cout << "err:" << err << std::endl;
+                EXPECT_THAT(err, testing::HasSubstr("Unable to get batch slot for reqId"));
+                done = true;
+            }
+            else
+            {
+                FAIL() << "Should get a response with error";
+            }
+        }
+        ++iter;
+    }
+    EXPECT_LT(iter, mMaxWaitMs);
 }
 
 TEST_P(LogitsProcParamsTest, All)
@@ -2611,6 +3243,7 @@ public:
     MOCK_METHOD(tr::ModelConfig const&, getModelConfig, (), (const));
     MOCK_METHOD(tr::BufferManager const&, getBufferManager, (), (const));
     MOCK_METHOD(tr::BufferManager::CudaStreamPtr, getRuntimeStreamPtr, (), (const));
+    MOCK_METHOD(IterationType, getIterCounter, (), (const, noexcept));
     MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
     MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
     MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
@@ -3072,7 +3705,7 @@ TEST_P(ParamTest, MockedModelMultiGpu)
                         }
                     }
                     EXPECT_EQ(llmReq->isStreaming(), request.getStreaming());
-                    EXPECT_EQ(llmReq->mMaxNewTokens, request.getMaxNewTokens());
+                    EXPECT_EQ(llmReq->mMaxNewTokens, request.getMaxTokens());
                     EXPECT_EQ(
                         llmReq->getTokens(beamWidth - 1).size(), request.getInputTokenIds().size() + reqCallCount);
 

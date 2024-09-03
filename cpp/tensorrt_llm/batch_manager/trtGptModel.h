@@ -186,7 +186,7 @@ public:
         return mMaxInputLen;
     }
 
-    [[nodiscard]] virtual SizeType32 getHiddenSize() const override
+    [[nodiscard]] SizeType32 getHiddenSize() const override
     {
         return getModelConfig().getHiddenSize();
     };

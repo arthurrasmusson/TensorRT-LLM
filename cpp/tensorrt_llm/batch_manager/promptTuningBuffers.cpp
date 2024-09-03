@@ -99,7 +99,12 @@ void PromptTuningBuffers::fill(RequestVector const& contextRequests, RequestVect
             reqBeamWidths.push_back(llmReq->mSamplingConfig.beamWidth);
             if (batchIdx < numContextRequests)
             {
-                reqPromptLengths.push_back(llmReq->mPromptLen);
+                SizeType32 numContextTokens = 0;
+                auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
+                auto const contextChunkSize
+                    = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+                numContextTokens += contextChunkSize + draftLength;
+                reqPromptLengths.push_back(numContextTokens);
             }
             auto optReqPromptEmbeddingTable = llmReq->getPromptEmbeddingTable();
             auto const optReqPromptVocabSize = llmReq->getPromptVocabSize();

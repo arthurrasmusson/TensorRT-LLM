@@ -62,6 +62,18 @@ std::list<std::vector<T>> chopVectorIntoBlocks(
     return blockedVectors;
 }
 
+std::list<BlockKey> buildBlockKeys(std::list<VecUniqueTokens>& blockedUniqueTokens,
+    std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> const& llmRequest)
+{
+    std::list<BlockKey> blockKeys;
+    LoraTaskIdType loraTaskId = llmRequest->getLoraTaskId().has_value() ? llmRequest->getLoraTaskId().value() : 0;
+    for (auto& uniqueTokens : blockedUniqueTokens)
+    {
+        blockKeys.push_back({loraTaskId, std::move(uniqueTokens)});
+    }
+    return blockKeys;
+}
+
 } // namespace
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager
@@ -135,15 +147,15 @@ bool KVCacheBlock::hasSchedulingRefs() const
     return mSchedulingRefCount > 0;
 }
 
-void KVCacheBlock::setTokens(VecTokens& tokens, bool isFull)
+void KVCacheBlock::setBlockKey(BlockKey& blockKey, bool isFull)
 {
-    mTokens = tokens;
+    mBlockKey = blockKey;
     mIsFull = isFull;
 }
 
-VecTokens const& KVCacheBlock::getTokens() const
+VecUniqueTokens const& KVCacheBlock::getUniqueTokens() const
 {
-    return mTokens;
+    return mBlockKey.uniqueTokens;
 }
 
 void KVCacheBlock::setFreeBlockIterator(FreeBlocksQueue::iterator freeBlockIterator)
@@ -166,17 +178,17 @@ void KVCacheBlock::setPrevBlock(BlockPtr prevBlock)
     mPrevBlock = std::move(prevBlock);
 }
 
-void KVCacheBlock::addNextBlock(VecTokens const& tokens, BlockPtr block)
+void KVCacheBlock::addNextBlock(BlockKey const& blockKey, BlockPtr block)
 {
-    if (mNextBlocks.find(tokens) == mNextBlocks.end())
+    if (mNextBlocks.find(blockKey) == mNextBlocks.end())
     {
-        mNextBlocks[tokens] = std::move(block);
+        mNextBlocks[blockKey] = std::move(block);
     }
 }
 
-BlockPtr KVCacheBlock::findMatchingBlock(VecTokens const& tokens) const
+BlockPtr KVCacheBlock::findMatchingBlock(BlockKey const& blockKey) const
 {
-    auto itr = mNextBlocks.find(tokens);
+    auto itr = mNextBlocks.find(blockKey);
     if (itr == mNextBlocks.end())
     {
         return nullptr;
@@ -226,14 +238,14 @@ void KVCacheBlock::freeLeafBlock()
     // free from previous block
     if (mPrevBlock != nullptr)
     {
-        mPrevBlock->removeNextBlock(mTokens);
+        mPrevBlock->removeNextBlock(mBlockKey);
         mPrevBlock = nullptr;
     }
 }
 
-void KVCacheBlock::removeNextBlock(VecTokens const& tokens)
+void KVCacheBlock::removeNextBlock(BlockKey const& blockKey)
 {
-    mNextBlocks.erase(tokens);
+    mNextBlocks.erase(blockKey);
 }
 
 bool KVCacheBlock::isFull() const
@@ -349,12 +361,12 @@ std::shared_ptr<KVCacheBlock> BlockManager::findBestGPUBlockToFree()
 BlockPtr BlockManager::getFreeBlock()
 {
     auto block = BlockManager::findBestGPUBlockToFree();
-    if (block->getTokens().empty())
+    if (block->getUniqueTokens().empty())
     {
         ++mAllocNewBlocks;
     }
     ++mAllocTotalBlocks;
-    if (!block->getTokens().empty() && mFreeSecondaryBlocks.size() > 0)
+    if (!block->getUniqueTokens().empty() && mFreeSecondaryBlocks.size() > 0)
     {
         claimBlock(*block);
         // Offload block in primary memory before repurposing
@@ -424,42 +436,44 @@ void BlockManager::onboardBlock(BlockPtr offloadBlock)
     }
 }
 
-VecTokens BlockManager::findNewContextBlock(VecTokens const& inputTokens) const
+BlockKey BlockManager::findNewContextBlock(
+    VecUniqueTokens const& uniqueTokens, std::shared_ptr<LlmRequest> const& llmRequest) const
 {
-    auto const blockedTokens
-        = chopVectorIntoBlocks<TokenIdType>(inputTokens, inputTokens.size(), mTokensPerBlock, false);
-    VecTokens concatTokens;
+    auto blockedUniqueTokens
+        = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size(), mTokensPerBlock, false);
+    auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+    BlockKey ret;
+    ret.loraTaskId = llmRequest->getLoraTaskId() ? llmRequest->getLoraTaskId().value() : 0;
     auto searchRoot = mCachedBlocksRoot;
-    for (auto const& blockTokens : blockedTokens)
+    for (auto const& blockKey : blockKeys)
     {
-        concatTokens.insert(concatTokens.end(), blockTokens.begin(), blockTokens.end());
-        auto matchingBlock = searchRoot != nullptr ? searchRoot->findMatchingBlock(blockTokens) : nullptr;
+        ret.uniqueTokens.insert(ret.uniqueTokens.end(), blockKey.uniqueTokens.begin(), blockKey.uniqueTokens.end());
+        auto matchingBlock = searchRoot != nullptr ? searchRoot->findMatchingBlock(blockKey) : nullptr;
         if (matchingBlock == nullptr)
         {
-            return concatTokens;
+            return ret;
         }
     }
-    return {};
+    return BlockKey{0, {}};
 }
 
 SizeType32 BlockManager::loadOrAllocateBlocks(
-    std::list<VecTokens> const& blockedTokens, SizeType32 numContextBlocks, GenerationRequest& sequence)
+    std::list<BlockKey> const& blockKeys, SizeType32 numContextBlocks, GenerationRequest& sequence)
 {
     SizeType32 numMatchedTokens{0};
     auto searchRoot = mCachedBlocksRoot;
 
-    auto blockItr = blockedTokens.begin();
+    auto blockItr = blockKeys.begin();
     for (int block = 0; block < numContextBlocks; ++block)
     {
-        auto matchingBlock = searchRoot != nullptr && blockItr != blockedTokens.end()
-            ? searchRoot->findMatchingBlock(*blockItr)
-            : nullptr;
+        auto matchingBlock
+            = searchRoot != nullptr && blockItr != blockKeys.end() ? searchRoot->findMatchingBlock(*blockItr) : nullptr;
         if (matchingBlock != nullptr)
         {
             TLLM_CHECK_WITH_INFO(matchingBlock->isFull() || !matchingBlock->hasRefs(),
                 "Found matching partially filled block, but somebody else is using it. This should not happen.");
 
-            numMatchedTokens += blockItr->size();
+            numMatchedTokens += blockItr->uniqueTokens.size();
             if (!matchingBlock->isFull())
             {
                 // Make block private and reuse
@@ -505,18 +519,20 @@ void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLeng
     }
 
     auto constexpr beamIdx = 0;
-    auto const& tokens
-        = mCacheType == CacheType::kSELF ? llmRequest->getTokens(beamIdx) : *(llmRequest->getEncoderTokens().value());
+    auto const& uniqueTokens = mCacheType == CacheType::kSELF ? llmRequest->getUniqueTokens(beamIdx)
+                                                              : *(llmRequest->getEncoderUniqueTokens().value());
 
     // Ignore last token because it can't be recovered
-    auto blockedTokens = chopVectorIntoBlocks<TokenIdType>(tokens, inputLength - 1, mTokensPerBlock, true);
+    auto blockedUniqueTokens = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, inputLength - 1, mTokensPerBlock, true);
     // Add empty block if last token is separated
     if (inputLength % mTokensPerBlock == 1)
     {
-        blockedTokens.emplace_back();
+        blockedUniqueTokens.emplace_back();
     }
 
-    auto const prepopulatedPromptLen = loadOrAllocateBlocks(blockedTokens, numContextBlocks, sequence);
+    auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+
+    auto const prepopulatedPromptLen = loadOrAllocateBlocks(blockKeys, numContextBlocks, sequence);
     llmRequest->setPrepopulatedPromptLen(prepopulatedPromptLen);
     TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest->mRequestId,
         inputLength, prepopulatedPromptLen);
@@ -609,24 +625,24 @@ void BlockManager::allocateBlock(GenerationRequest& sequence, bool shareAmongBea
     }
 }
 
-void BlockManager::storeBlocks(std::list<VecTokens> blockedTokens, std::vector<KVCacheBlock::IdType> const& blockIds)
+void BlockManager::storeBlocks(std::list<BlockKey> blockKeys, std::vector<KVCacheBlock::IdType> const& blockIds)
 {
-    TLLM_CHECK_WITH_INFO(blockedTokens.size() <= blockIds.size(), "%lu blockedTokens, %lu blockIds",
-        blockedTokens.size(), blockIds.size());
+    TLLM_CHECK_WITH_INFO(
+        blockKeys.size() <= blockIds.size(), "%lu blockKeys, %lu blockIds", blockKeys.size(), blockIds.size());
 
     auto searchRoot = mCachedBlocksRoot;
     bool needMatch = true;
 
-    auto numBlocks = blockedTokens.size();
+    auto numBlocks = blockKeys.size();
     for (std::size_t ii = 0; ii < numBlocks; ++ii)
     {
         auto const bid = blockIds[ii];
         TLLM_LOG_DEBUG("BlockManager::storeBlocks - Searching match for block %d", bid);
         auto& block = mAllBlocksById[bid];
-        TLLM_CHECK(blockedTokens.size() > 0);
-        auto blockTokens = blockedTokens.front();
-        blockedTokens.pop_front();
-        auto matchedBlock = needMatch ? searchRoot->findMatchingBlock(blockTokens) : nullptr;
+        TLLM_CHECK(blockKeys.size() > 0);
+        auto blockKey = blockKeys.front();
+        blockKeys.pop_front();
+        auto matchedBlock = needMatch ? searchRoot->findMatchingBlock(blockKey) : nullptr;
         if (matchedBlock != nullptr)
         {
             // Found match
@@ -641,9 +657,9 @@ void BlockManager::storeBlocks(std::list<VecTokens> blockedTokens, std::vector<K
             TLLM_LOG_DEBUG(
                 "BlockManager::storeBlocks - No match, inserting block %d into search structure", block->getBlockId());
             needMatch = false; // no matching needed for following blocks
-            block->setTokens(blockTokens, static_cast<SizeType32>(blockTokens.size()) == mTokensPerBlock);
+            block->setBlockKey(blockKey, static_cast<SizeType32>(blockKey.uniqueTokens.size()) == mTokensPerBlock);
             block->setPrevBlock(searchRoot);
-            searchRoot->addNextBlock(blockTokens, block);
+            searchRoot->addNextBlock(blockKey, block);
             searchRoot = block;
         }
     }
@@ -710,9 +726,11 @@ void BlockManager::releaseBlocks(GenerationRequest& sequence, std::shared_ptr<Ll
         // TODO only store blocks for context in case of beamWidth > 1
         auto cacheBlockIds = sequence.getCacheBlockIds();
         auto constexpr beamIdx = 0;
-        auto const& tokens = llmRequest->getTokens(beamIdx);
-        auto blockedTokens = chopVectorIntoBlocks<TokenIdType>(tokens, tokens.size() - 1, mTokensPerBlock, true);
-        storeBlocks(std::move(blockedTokens), cacheBlockIds[beamIdx]);
+        auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
+        auto blockedUniqueTokens
+            = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, mTokensPerBlock, true);
+        auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+        storeBlocks(std::move(blockKeys), cacheBlockIds[beamIdx]);
     }
 
     auto& allocatedBlocks = mAllocatedBlocksPerSeq.at(seqSlotIdx);
@@ -1020,9 +1038,10 @@ void KVCacheManager::addToken(SizeType32 seqSlotIdx)
     updateToken(seqSlotIdx, true);
 }
 
-VecTokens KVCacheManager::findNewContextBlock(VecTokens const& inputTokens) const
+BlockKey KVCacheManager::findNewContextBlock(
+    VecUniqueTokens const& uniqueTokens, std::shared_ptr<LlmRequest> const& llmRequest) const
 {
-    auto newContextBlocks = mBlockManager.findNewContextBlock(inputTokens);
+    auto newContextBlocks = mBlockManager.findNewContextBlock(uniqueTokens, llmRequest);
     return newContextBlocks;
 }
 
@@ -1078,10 +1097,12 @@ void KVCacheManager::storeContextBlocks(SizeType32 seqSlotIdx, std::shared_ptr<L
         {
             constexpr int beamIdx = 0; // no need to consider more than one beam for input tokens
             auto cacheBlockIds = sequence->getCacheBlockIds();
-            auto const& tokens = llmRequest->getTokens(beamIdx);
-            auto blockedTokens
-                = chopVectorIntoBlocks<TokenIdType>(tokens, tokens.size() - 1, getTokensPerBlock(), false);
-            mBlockManager.storeBlocks(std::move(blockedTokens), cacheBlockIds[beamIdx]);
+            auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
+
+            auto blockedUniqueTokens
+                = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, getTokensPerBlock(), false);
+            auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+            mBlockManager.storeBlocks(std::move(blockKeys), cacheBlockIds[beamIdx]);
         }
     }
 }

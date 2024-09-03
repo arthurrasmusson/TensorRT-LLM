@@ -14,8 +14,11 @@
 
 #include <map>
 
+#include "cacheTransceiver.h"
 #include "dataTransceiver.h"
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -23,235 +26,118 @@ namespace tensorrt_llm::batch_manager
 class MpiComm
 {
 public:
-    using SizeType32 = tensorrt_llm::runtime::SizeType32;
-
-    explicit MpiComm(mpi::MpiComm const& comm)
-        : mComm{std::addressof(comm)}
-    {
-        TLLM_CUDA_CHECK(cudaGetDevice(&mDeviceId));
-    }
-
-    virtual ~MpiComm() = default;
-
-    virtual void sendRequestId(const LlmRequest::RequestIdType requestId, const SizeType32 responderRank) const;
-
-    [[nodiscard]] virtual std::pair<int, LlmRequest::RequestIdType> recvRequestId() const;
-
-    [[nodiscard]] virtual LlmRequest::RequestIdType recvRequestId(const SizeType32 requesterRank) const;
-
-    virtual void sendBuffer(runtime::IBuffer const& buf, int dest) const
-    {
-        mComm->send(buf, dest, kMPI_DATA_TAG);
-    }
-
-    virtual void recvBuffer(runtime::IBuffer& buf, int dest) const
-    {
-        mComm->recv(buf, dest, kMPI_DATA_TAG);
-    }
-
-    virtual void setCudaDevice() const
-    {
-        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
-    }
-
-    [[nodiscard]] virtual int getRank() const
-    {
-        return mComm->getRank();
-    }
-
-    [[nodiscard]] virtual int getSize() const
-    {
-        return mComm->getSize();
-    }
-
-private:
-    enum class MpiId : uint64_t
+    enum class Id : uint64_t
     {
         REQUEST_SEND = 1,
         TERMINATION = 2
     };
 
-    static constexpr int32_t kMPI_ID_TAG{127};
-    static constexpr int32_t kMPI_DATA_TAG{1023};
+    static constexpr int32_t kID_TAG{127};
+    static constexpr int32_t kDATA_TAG{1023};
 
+    MpiComm(mpi::MpiComm const& comm, int rank)
+        : mComm{std::addressof(comm)}
+        , mRank{rank}
+    {
+        TLLM_CHECK(mComm);
+    }
+
+    void recvBuffer(runtime::IBuffer& buf) const
+    {
+        mComm->recv(buf, mRank, kDATA_TAG);
+    }
+
+    void sendBuffer(runtime::IBuffer const& buf) const
+    {
+        mComm->send(buf, mRank, kDATA_TAG);
+    }
+
+private:
     mpi::MpiComm const* mComm{};
-    int mDeviceId{-1};
+    int mRank;
 };
 
-// Use MPI to transfer KV cache between processes. Its design is based on a few assumptions:
-// 1. MPI is thread-safe, but by default, it only supports sequential transmission.
-// 2. The efficiency of MPI transmission is not strongly correlated with the size of the data
-//    being transmitted.
-class MpiResponder final : public DataResponder
+template <typename TDataConfig>
+class MpiDataSender : public DataSender
 {
 public:
-    using RankIdType = int;
-    using RequestIdType = LlmRequest::RequestIdType;
+    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataConfig>>;
 
-    MpiResponder(std::vector<std::unique_ptr<DataSender>> senders, MpiComm const& comm,
-        std::unique_ptr<DataContext> selfContext);
-
-    [[nodiscard]] std::future<void> respondAndSendAsync(LlmRequest const& llmRequest) override;
-
-    ~MpiResponder()
+    MpiDataSender(mpi::MpiComm const& comm, TFormatter formatter)
+        : mComm{std::addressof(comm)}
     {
-        terminate();
+        mFormatter = std::move(formatter);
+    }
+
+    [[nodiscard]] LlmRequest::RequestIdType recvRequestId() override
+    {
+#if ENABLE_MULTI_DEVICE
+        MpiComm::Id id;
+        MPI_Status status;
+        MPI_Recv(std::addressof(id), 1, MPI_INT64_T, MPI_ANY_SOURCE, MpiComm::kID_TAG, static_cast<MPI_Comm>(*mComm),
+            std::addressof(status));
+        TLLM_CHECK(id == MpiComm::Id::REQUEST_SEND);
+        auto requesterRank{status.MPI_SOURCE};
+        LlmRequest::RequestIdType requestId;
+        mComm->recv(std::addressof(requestId), 1, mpi::MpiType::kUINT64, requesterRank, MpiComm::kID_TAG);
+        mRequestToRank[requestId] = status.MPI_SOURCE;
+        return requestId;
+#else
+        TLLM_THROW("Multi device support is disabled.");
+#endif
+    }
+
+    void sendSync(LlmRequest const& llmRequest) override
+    {
+        auto rank = mRequestToRank[llmRequest.mRequestId];
+        MpiComm comm{*mComm, rank};
+        (*mFormatter)(llmRequest, {std::addressof(comm)});
     }
 
 private:
-    struct Response
-    {
-        LlmRequest const* mRequest;
-        std::promise<void> mPromise;
-    };
-
-    class RequestHandler
-    {
-    public:
-        RequestHandler(
-            std::unique_ptr<DataContext> responseContext, std::vector<std::unique_ptr<DataSender>> const& senders)
-            : mContext{std::move(responseContext)}
-        {
-            TLLM_CHECK(mContext);
-            for (auto const& sender : senders)
-            {
-                TLLM_CHECK(sender);
-                if (sender->inquireSupport(mContext.get()))
-                {
-                    mSender = sender.get();
-                    break;
-                }
-            }
-            TLLM_CHECK_WITH_INFO(mSender, "There is no suitable sender available for selection.");
-        }
-
-        void operator()(LlmRequest const& request) const
-        {
-            return mSender->send(request, *mContext);
-        }
-
-        [[nodiscard]] DataContext const& getContext() const
-        {
-            return *mContext;
-        }
-
-    private:
-        std::unique_ptr<DataContext> mContext;
-        DataSender* mSender{};
-    };
-
-    void addRequesterContext(std::unique_ptr<DataContext> context);
-
-    void response();
-
-    void terminate();
-
-    [[nodiscard]] std::pair<RequestIdType, RequestHandler const*> recvRequestId();
-
-    void send(std::map<RequestIdType, Response>::iterator it);
-
-    void removeResponse(std::map<RequestIdType, Response>::iterator it);
-
-    [[nodiscard]] bool isSending() const
-    {
-        return mCurrentRequest.has_value();
-    }
-
-    [[nodiscard]] RequestIdType getCurrentRequestId() const
-    {
-        return mCurrentRequest.value().first;
-    }
-
-    [[nodiscard]] RequestHandler const* getCurrentHandler() const
-    {
-        return mCurrentRequest.value().second;
-    }
-
-    [[nodiscard]] std::map<RequestIdType, Response>::iterator getCurrentResponse();
-
-    MpiComm const* mComm{};
-    std::vector<std::unique_ptr<DataSender>> mSenders;
-    std::vector<std::unique_ptr<RequestHandler>> mRequestHandlers;
-    std::map<int, RequestHandler const*> mRankToHandler;
-    std::optional<std::pair<RequestIdType, RequestHandler const*>> mCurrentRequest;
-    std::map<RequestIdType, Response> mReadyResponses;
-    std::unique_ptr<DataContext> mSelfContext;
-
-    std::mutex mResponderMutex, mCondMutex;
-    std::atomic<bool> mAnyReady{false}, mTerminate{false};
-    std::condition_variable mResponderCv;
-    std::future<void> mResponseFuture;
+    mpi::MpiComm const* mComm{};
+    std::map<LlmRequest::RequestIdType, int> mRequestToRank;
+    TFormatter mFormatter;
 };
 
-class MpiRequester final : public DataRequester
+template <typename TDataConfig>
+class MpiDataReceiver : public DataReceiver
 {
 public:
-    using RankIdType = int;
+    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataConfig>>;
 
-    MpiRequester(std::vector<std::unique_ptr<DataReceiver>> receivers, MpiComm const& comm,
-        std::unique_ptr<DataContext> selfContext);
-
-    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest, DataContext context) override
+    MpiDataReceiver(mpi::MpiComm const& comm, TFormatter formatter)
+        : mComm{std::addressof(comm)}
     {
-        // TODO: Add support for multi-node, multi-executor, and data context serialization.
-        auto responderRank = context.getSelfRank();
-        if (mRankToHandler.find(responderRank) == mRankToHandler.end())
-        {
-            auto context = mSelfContext->clone();
-            context->reset({responderRank}, {0});
-            addResponderContext(std::move(context));
-        }
-        // TODO: Modify the implementation here to avoid frequent thread creation.
-        return std::async(
-            std::launch::async, &MpiRequester::requestSync, this, std::cref(llmRequest), std::move(context));
+        mFormatter = std::move(formatter);
+    }
+
+    void sendRequestId(LlmRequest const& llmRequest) override
+    {
+        uint64_t requestId = llmRequest.getContextPhaseState().getReqId();
+        tensorrt_llm::executor::SizeType32 responderRank
+            = llmRequest.getContextPhaseState().getMpiComm().mRanks.front();
+        MpiComm::Id id{MpiComm::Id::REQUEST_SEND};
+        mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
+        mComm->send(std::addressof(requestId), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
+    }
+
+    void receiveSync(LlmRequest const& llmRequest) override
+    {
+        auto rank = llmRequest.getContextPhaseState().getMpiComm().mRanks.front();
+        MpiComm comm{*mComm, rank};
+        (*mFormatter)(llmRequest, {std::addressof(comm)});
     }
 
 private:
-    class ResponseHandler
-    {
-    public:
-        ResponseHandler(
-            std::unique_ptr<DataContext> requestContext, std::vector<std::unique_ptr<DataReceiver>> const& receivers)
-            : mContext{std::move(requestContext)}
-        {
-            TLLM_CHECK(mContext);
-            for (auto const& receiver : receivers)
-            {
-                TLLM_CHECK(receiver);
-                if (receiver->inquireSupport(mContext.get()))
-                {
-                    mReceiver = receiver.get();
-                    break;
-                }
-            }
-            TLLM_CHECK_WITH_INFO(mReceiver, "There is no suitable receiver available for selection.");
-        }
-
-        void operator()(LlmRequest const& request) const
-        {
-            return mReceiver->receive(request, *mContext);
-        }
-
-        [[nodiscard]] DataContext const& getContext() const
-        {
-            return *mContext;
-        }
-
-    private:
-        std::unique_ptr<DataContext> mContext;
-        DataReceiver* mReceiver{};
-    };
-
-    void addResponderContext(std::unique_ptr<DataContext> context);
-
-    void requestSync(LlmRequest const& llmRequest, DataContext context);
-
-    MpiComm const* mComm{};
-    std::vector<std::unique_ptr<DataReceiver>> mReceivers;
-    std::unique_ptr<DataContext> mSelfContext;
-    std::map<int, ResponseHandler const*> mRankToHandler;
-    std::vector<std::unique_ptr<ResponseHandler>> mResponseHandlers;
-    std::mutex mRequesterMutex;
+    mpi::MpiComm const* mComm{};
+    TFormatter mFormatter;
 };
+
+std::unique_ptr<DataResponder> makeMpiCacheResponder(
+    mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager);
+
+std::unique_ptr<DataRequester> makeMpiCacheRequester(
+    mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager);
 
 } // namespace tensorrt_llm::batch_manager

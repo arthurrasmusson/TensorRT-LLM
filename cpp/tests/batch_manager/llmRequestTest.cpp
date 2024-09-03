@@ -27,6 +27,8 @@ namespace tb = tensorrt_llm::batch_manager;
 
 using VecTokens = tb::LlmRequest::VecTokens;
 using SizeType32 = tb::LlmRequest::SizeType32;
+using VecTokenExtraIds = tb::LlmRequest::VecTokenExtraIds;
+using VecUniqueTokens = tb::LlmRequest::VecUniqueTokens;
 
 class LlmRequestTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
 {
@@ -131,7 +133,8 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         SizeType32 vocabSize = 100;
         SizeType32 hiddenSize = 64;
         auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {vocabSize, hiddenSize});
-        texec::PromptTuningConfig config(embeddingTable);
+        VecTokenExtraIds extraIds{1, 1, 1, 0, 0};
+        texec::PromptTuningConfig config(embeddingTable, extraIds);
         execReq.setPromptTuningConfig(config);
         tb::LlmRequest llmReq(requestId, execReq);
 
@@ -143,6 +146,12 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getShape().d[2], hiddenSize);
         EXPECT_EQ(llmReq.getPromptEmbeddingTable().value()->getDataType(), nvinfer1::DataType::kFLOAT);
         EXPECT_EQ(llmReq.getPromptVocabSize().value(), vocabSize);
+        VecUniqueTokens uniqueTokens;
+        for (size_t i = 0; i < inputTokens.size(); ++i)
+        {
+            uniqueTokens.push_back({inputTokens[i], extraIds[i]});
+        }
+        EXPECT_EQ(llmReq.getUniqueTokens(0), uniqueTokens);
     }
 }
 
@@ -202,6 +211,35 @@ TEST_F(LlmRequestTest, invalidExecRequest)
         lambdaErrMsgs.emplace_back(lambda, "Expected prompt embedding table to have shape");
     }
 
+    // Invalid extra id vector's size
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {4, 8});
+            VecTokenExtraIds extraIds(inputTokens.size() - 1, 0);
+            texec::PromptTuningConfig config(embeddingTable, extraIds);
+            execReq.setPromptTuningConfig(config);
+            tb::LlmRequest llmReq(requestId, execReq);
+        };
+        lambdaErrMsgs.emplace_back(lambda, "inputTokenExtraIds vector size must be the same");
+    }
+
+    // Extra ids not provided when enabling kv cache reuse with prompt table
+    {
+        auto lambda = [&inputTokens, maxNewTokens, requestId]()
+        {
+            texec::Request execReq(inputTokens, maxNewTokens);
+            auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {4, 8});
+            texec::PromptTuningConfig config(embeddingTable);
+            execReq.setPromptTuningConfig(config);
+            tb::LlmRequest llmReq(requestId, execReq);
+
+            llmReq.validate(500, 1000, 1, std::nullopt, true);
+        };
+        lambdaErrMsgs.emplace_back(lambda, "Input token extra ids must be provided");
+    }
+
     for (auto& lambdaErrMsg : lambdaErrMsgs)
     {
         auto& lambda = lambdaErrMsg.first;
@@ -234,6 +272,18 @@ TEST_F(LlmRequestTest, invalidExecRequest)
         tb::LlmRequest llmReq(requestId, execReq);
         llmReq.validate(10, 60, 2);
         EXPECT_EQ(llmReq.mMaxNewTokens, 60 - inputTokens.size() - 2);
+    }
+    {
+        // Validate extra ids when enabling kv cache reuse with prompt table
+        texec::Request execReq(inputTokens, maxNewTokens);
+        auto embeddingTable = texec::Tensor::cpu(texec::DataType::kFP32, {6, 42});
+        VecTokenExtraIds extraIds(inputTokens.size(), 1);
+        texec::PromptTuningConfig config(embeddingTable, extraIds);
+        execReq.setPromptTuningConfig(config);
+        tb::LlmRequest llmReq(requestId, execReq);
+
+        EXPECT_EQ(static_cast<size_t>(llmReq.getOrigPromptLen()), inputTokens.size());
+        llmReq.validate(500, 1000, 1, std::nullopt, true);
     }
 }
 

@@ -24,7 +24,8 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
     std::optional<LogitsPostProcessorConfig> logitsPostProcessorConfig, std::optional<DecodingConfig> decodingConfig,
     float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
-    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig)
+    ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig,
+    SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -43,10 +44,13 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mMaxQueueSize(maxQueueSize)
     , mExtendedRuntimePerfKnobConfig(extendedRuntimePerfKnobConfig)
     , mDebugConfig(std::move(debugConfig))
+    , mRecvPollPeriodMs(recvPollPeriodMs)
+    , mMaxSeqIdleMicroseconds(maxSeqIdleMicroseconds)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
     TLLM_CHECK(mMaxBeamWidth > 0);
+    TLLM_CHECK(maxSeqIdleMicroseconds > 0);
 }
 
 SizeType32 ExecutorConfig::getMaxBeamWidth() const
@@ -137,6 +141,16 @@ ExtendedRuntimePerfKnobConfig ExecutorConfig::getExtendedRuntimePerfKnobConfig()
 std::optional<DebugConfig> ExecutorConfig::getDebugConfig() const
 {
     return mDebugConfig;
+}
+
+SizeType32 ExecutorConfig::getRecvPollPeriodMs() const
+{
+    return mRecvPollPeriodMs;
+}
+
+uint64_t ExecutorConfig::getMaxSeqIdleMicroseconds() const
+{
+    return mMaxSeqIdleMicroseconds;
 }
 
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
@@ -233,6 +247,17 @@ void ExecutorConfig::setExtendedRuntimePerfKnobConfig(
 void ExecutorConfig::setDebugConfig(DebugConfig const& debugConfig)
 {
     mDebugConfig = debugConfig;
+}
+
+void ExecutorConfig::setRecvPollPeriodMs(SizeType32 const& recvPollPeriodMs)
+{
+    mRecvPollPeriodMs = recvPollPeriodMs;
+}
+
+void ExecutorConfig::setMaxSeqIdleMicroseconds(uint64_t maxSeqIdleMicroseconds)
+{
+    mMaxSeqIdleMicroseconds = maxSeqIdleMicroseconds;
+    TLLM_CHECK(mMaxSeqIdleMicroseconds > 0);
 }
 
 } // namespace tensorrt_llm::executor

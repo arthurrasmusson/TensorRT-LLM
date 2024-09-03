@@ -78,8 +78,8 @@ public:
     Impl(std::filesystem::path const& modelPath, std::optional<std::filesystem::path> const& encoderModelPath,
         [[maybe_unused]] ModelType modelType, ExecutorConfig const& executorConfig);
 
-    Impl(std::vector<uint8_t> const& engineBuffer, std::string const& jsonConfigStr,
-        std::optional<std::vector<uint8_t>> const& encoderEngineBuffer,
+    Impl(BufferView const& engineBufferView, std::string const& jsonConfigStr,
+        std::optional<BufferView> const& encoderEngineBufferView,
         std::optional<std::string> const& encoderJsonConfigStr, [[maybe_unused]] ModelType modelType,
         ExecutorConfig const& executorConfig);
 
@@ -125,9 +125,8 @@ private:
 
     void initialize(ExecutorConfig const& executorConfig);
 
-    void loadModel(std::optional<std::filesystem::path> const& modelPath,
-        std::optional<std::vector<uint8_t>> const& engineBuffer, runtime::GptJsonConfig const& jsonConfig,
-        ExecutorConfig const& executorConfig, bool isEncoder);
+    void loadModel(std::optional<std::filesystem::path> const& modelPath, std::optional<BufferView> const& engineBuffer,
+        runtime::GptJsonConfig const& jsonConfig, ExecutorConfig const& executorConfig, bool isEncoder);
 
     static std::shared_ptr<Model> createModel(runtime::RawEngine const& rawEngine,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
@@ -161,7 +160,8 @@ private:
     std::vector<RequestWithId> getNewReqWithIds(
         SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
-    RequestList fetchNewRequests(SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
+    RequestList fetchNewRequests(SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive,
+        double& newActiveRequestsQueueLatencyMS);
 
     void forwardSync(RequestList& activeRequests);
 
@@ -169,20 +169,20 @@ private:
 
     void terminateActiveRequests(RequestList& activeRequests, std::string const& err);
 
-    IterationStats getCurrentIterationStats(
-        RequestList const& activeRequests, IterationType iterCounter, double iterLatencyMS);
+    IterationStats getCurrentIterationStats(RequestList const& activeRequests, double iterLatencyMS,
+        double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
 
     void appendCurrentIterStats(IterationStats&& currentIterStats);
-
-    void updateIterationStats(RequestList const& activeRequests, IterationType iterCounter, double iterLatencyMS);
+    void updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
+        double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
 
     RequestStatsPerIteration getCurrentRequestStats(
-        RequestList const& activeRequests, IterationType iterCounter, RequestList const& finishedRequests);
-
-    void updateRequestStats(
-        RequestList const& activeRequests, IterationType iterCounter, RequestList const& finishedRequests);
+        RequestList const& activeRequests, RequestList const& finishedRequests);
+    void updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests);
 
     void terminateCancelledRequests(RequestList& activeRequests);
+
+    void terminateContextFinishedRequests(RequestList& inTransmissionRequests);
 
     void appendNewResponses(std::vector<Response>&& newResponses);
 
@@ -190,7 +190,7 @@ private:
     ///        Active requests that have completed are erased from activeRequests
     ///        and returned for bookkeeping.
     /// @return A list of requests that have completed.
-    RequestList populateNewResponses(RequestList& activeRequests);
+    RequestList populateNewResponses(RequestList& activeRequests, RequestList& inTransmissionRequests);
 
     void executionLoop();
 
@@ -275,6 +275,8 @@ private:
     std::thread mLeaderRecvReqThread;
     std::thread mLeaderSendThread;
 
+    int32_t mRecvPollPeriodMs = 0;
+
     int32_t mLeaderRank = -1;
     int32_t mOrchRank = 0;
 
@@ -284,6 +286,9 @@ private:
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommPipelineParallel;
     std::unique_ptr<std::thread> mRequestWithIdWaitThread;
     std::unique_ptr<std::thread> mCancelledRequestsWaitThread;
+
+    // for validating requests
+    bool mEnableBlockReuse;
 
     inline static std::string const kPROFILE_START_STOP_ENV_VAR_NAME = "TLLM_PROFILE_START_STOP";
     inline static std::string const kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME = "TLLM_GPTM_PROFILE_START_STOP";

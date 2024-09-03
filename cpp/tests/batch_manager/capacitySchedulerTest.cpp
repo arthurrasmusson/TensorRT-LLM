@@ -1452,7 +1452,7 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
             auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
             std::iota(inputTokens->begin(), inputTokens->end(), 0);
             activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 0, 1234));
-            activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 1, 6789));
+            activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 1, 1234));
 
             std::vector<ExpectedState> expectedStates;
             expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 80, promptLen, 0}}});
@@ -1503,7 +1503,7 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequestChunked)
         auto request0 = createRequest(inputTokens0, maxNewTokens, 0, 1234);
         auto inputTokens1 = std::make_shared<std::vector<int32_t>>(promptLen, 1);
         std::iota(inputTokens1->begin(), inputTokens1->end(), 0);
-        auto request1 = createRequest(inputTokens1, maxNewTokens, 1, 6789);
+        auto request1 = createRequest(inputTokens1, maxNewTokens, 1, 1234);
         request0->setContextChunkSize(20);
         request1->setContextChunkSize(20);
         activeRequests.push_back(std::move(request0));

@@ -30,6 +30,7 @@ class RequestWithId
 public:
     Request req;
     IdType id;
+    std::chrono::steady_clock::time_point queuedStart;
 
     static std::vector<char> serializeReqWithIds(std::vector<RequestWithId> const& reqWithIds);
     static std::vector<RequestWithId> deserializeReqWithIds(std::vector<char>& buffer);

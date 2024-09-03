@@ -18,94 +18,49 @@
 namespace tensorrt_llm::batch_manager
 {
 
-class DataContext
+// Used to support the data transmission with different layouts and different protocols.
+template <typename TComm, typename TConfig>
+class IOFormatter
 {
 public:
-    using SizeType32 = tensorrt_llm::runtime::SizeType32;
+    /// @brief Perform data transmission with formatting actions.
+    /// @param llmRequest The request associated with this data transmission.
+    /// @param comm The communicator associated with this data transmission.
+    virtual void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& comm) = 0;
 
-    DataContext(std::vector<SizeType32> ranks, std::optional<SizeType32> selfIdx = std::nullopt)
-        : mRanks{std::move(ranks)}
-        , mSelfIdx{std::move(selfIdx)}
-    {
-    }
-
-    [[nodiscard]] std::vector<SizeType32> const& getRanks() const noexcept
-    {
-        return mRanks;
-    }
-
-    [[nodiscard]] SizeType32 getSelfIdx() const
-    {
-        TLLM_CHECK_WITH_INFO(mSelfIdx, "The object is not used as self context.");
-        return mSelfIdx.value();
-    }
-
-    [[nodiscard]] SizeType32 getSelfRank() const
-    {
-        return getRanks().at(getSelfIdx());
-    }
-
-    void reset(std::vector<SizeType32> ranks, std::optional<SizeType32> selfIdx)
-    {
-        mRanks = std::move(ranks);
-        mSelfIdx = std::move(selfIdx);
-    }
-
-    [[nodiscard]] virtual std::unique_ptr<DataContext> clone() const
-    {
-        return std::make_unique<DataContext>(*this);
-    }
-
-    virtual ~DataContext() = default;
-
-protected:
-    virtual bool isEqual(DataContext const& obj) const
-    {
-        return mRanks == obj.mRanks && mSelfIdx == obj.mSelfIdx;
-    }
-
-private:
-    friend bool operator==(DataContext const&, DataContext const&);
-
-    std::vector<SizeType32> mRanks;
-    std::optional<SizeType32> mSelfIdx;
+    /// @brief Determine whether the sender is applicable to the source and target.
+    /// @param selfconfig Source data arrangement.
+    /// @param dstConfig Target data arrangement.
+    /// @return Whether the sender is applicable to the source and target.
+    [[nodiscard]] virtual bool inquireSupport(TConfig const& selfconfig, TConfig const& dstConfig) const = 0;
 };
 
-inline bool operator==(DataContext const& lhs, DataContext const& rhs)
-{
-    return typeid(lhs) == typeid(rhs) && lhs.isEqual(rhs);
-}
-
-// Used to support the data transmission with different layouts and different protocols.
+// Operators required for data transmission in specific communication protocols.
 class DataSender
 {
 public:
-    /// @brief Synchronously send data.
-    /// @param request The request object to which the data belongs.
-    /// @param destination The destination for sending the data.
-    virtual void send(LlmRequest const& request, DataContext const& destination) = 0;
+    /// @brief Receive the request id.
+    /// @return The request id.
+    [[nodiscard]] virtual LlmRequest::RequestIdType recvRequestId() = 0;
 
-    /// @brief Determine whether the sender is applicable to the source and target.
-    /// @param receiverDataContext Receiver's data arrangement.
-    /// @return Whether the sender is applicable to the source and target.
-    [[nodiscard]] virtual bool inquireSupport(DataContext const* receiverContext) = 0;
+    /// @brief Synchronously send data.
+    /// @param llmRequest The request object to which the data belongs.
+    virtual void sendSync(LlmRequest const& llmRequest) = 0;
 
     virtual ~DataSender() = default;
 };
 
-// Used to support the actual reception of data with different layouts and different protocols.
+// Operators required for data transmission in specific communication protocols.
 class DataReceiver
 {
 public:
-    /// @brief Synchronously receive data.
-    /// @param request The request object to which the data belongs.
-    /// @param source The source for receiving the data.
-    virtual void receive(LlmRequest const& request, DataContext const& source) = 0;
+    /// @brief Send the request id.
+    /// @param llmRequest The request object to which the id belongs.
+    virtual void sendRequestId(LlmRequest const& llmRequest) = 0;
 
-    /// @brief Determine whether the receiver is applicable to the source and target.
-    /// @param senderDataContext Sender's data arrangement.
-    /// @return Whether the receiver is applicable to the source and target.
-    [[nodiscard]] virtual bool inquireSupport(DataContext const* senderContext) = 0;
+    /// @brief Synchronously receive data.
+    /// @param llmRequest The request object to which the data belongs.
+    virtual void receiveSync(LlmRequest const& llmRequest) = 0;
 
     virtual ~DataReceiver() = default;
 };
@@ -113,27 +68,43 @@ public:
 class DataResponder
 {
 public:
+    /// @brief Constructor.
+    /// @param sender The sender used at the underlying level.
+    explicit DataResponder(std::unique_ptr<DataSender> sender);
+
     /// @brief Asynchronously respond to the request and send data.
     /// @param llmRequest Request object. Its data should be ready when called, and the data for this request
     /// should remain valid until future synchronization.
     /// @return Once the data is fully sent, the future object will become valid.
-    [[nodiscard]] virtual std::future<void> respondAndSendAsync(LlmRequest const& llmRequest) = 0;
+    [[nodiscard]] std::future<void> respondAndSendAsync(LlmRequest const& llmRequest) const;
 
-    virtual ~DataResponder() = default;
+    /// @brief Destructor.
+    ~DataResponder();
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> mImpl;
 };
 
 class DataRequester
 {
 public:
+    /// @brief Constructor.
+    /// @param receiver The receiver used at the underlying level.
+    explicit DataRequester(std::unique_ptr<DataReceiver> receiver);
+
     /// @brief Asynchronously send a request to receive data.
     /// @param llmRequest Request object. Its data should be in an allocated but unwritten state when called, and the
     /// data for this request should remain intact only after future synchronization.
-    /// @param context The context which retains information about the resopnder, such as the ranks value.
     /// @return Once the data is fully received, the future object will become valid.
-    [[nodiscard]] virtual std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest, DataContext context)
-        = 0;
+    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest) const;
 
-    virtual ~DataRequester() = default;
+    /// @brief Destructor.
+    ~DataRequester();
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> mImpl;
 };
 
 } // namespace tensorrt_llm::batch_manager

@@ -60,9 +60,9 @@ void Serialization::serialize(SamplingConfig const& config, std::ostream& os)
     su::serialize(config.mTopPMin, os);
     su::serialize(config.mTopPResetIds, os);
     su::serialize(config.mTopPDecay, os);
-    su::serialize(config.mRandomSeed, os);
+    su::serialize(config.mSeed, os);
     su::serialize(config.mTemperature, os);
-    su::serialize(config.mMinLength, os);
+    su::serialize(config.mMinTokens, os);
     su::serialize(config.mBeamSearchDiversityRate, os);
     su::serialize(config.mRepetitionPenalty, os);
     su::serialize(config.mPresencePenalty, os);
@@ -81,9 +81,9 @@ size_t Serialization::serializedSize(SamplingConfig const& config)
     totalSize += su::serializedSize(config.mTopPMin);
     totalSize += su::serializedSize(config.mTopPResetIds);
     totalSize += su::serializedSize(config.mTopPDecay);
-    totalSize += su::serializedSize(config.mRandomSeed);
+    totalSize += su::serializedSize(config.mSeed);
     totalSize += su::serializedSize(config.mTemperature);
-    totalSize += su::serializedSize(config.mMinLength);
+    totalSize += su::serializedSize(config.mMinTokens);
     totalSize += su::serializedSize(config.mBeamSearchDiversityRate);
     totalSize += su::serializedSize(config.mRepetitionPenalty);
     totalSize += su::serializedSize(config.mPresencePenalty);
@@ -156,18 +156,21 @@ size_t Serialization::serializedSize(ExternalDraftTokensConfig const& config)
 PromptTuningConfig Serialization::deserializePromptTuningConfig(std::istream& is)
 {
     auto tensor = su::deserialize<Tensor>(is);
-    return PromptTuningConfig{std::move(tensor)};
+    auto inputTokenExtraIds = su::deserialize<std::optional<VecTokenExtraIds>>(is);
+    return PromptTuningConfig{std::move(tensor), std::move(inputTokenExtraIds)};
 }
 
 void Serialization::serialize(PromptTuningConfig const& config, std::ostream& os)
 {
     su::serialize(config.mEmbeddingTable, os);
+    su::serialize(config.mInputTokenExtraIds, os);
 }
 
 size_t Serialization::serializedSize(PromptTuningConfig const& config)
 {
     size_t totalSize = 0;
     totalSize += su::serializedSize(config.mEmbeddingTable);
+    totalSize += su::serializedSize(config.mInputTokenExtraIds);
     return totalSize;
 }
 
@@ -196,6 +199,66 @@ size_t Serialization::serializedSize(LoraConfig const& config)
     return totalSize;
 }
 
+// ContextPhaseState
+ContextPhaseState Serialization::deserializeContextPhaseState(std::istream& is)
+{
+    auto reqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
+    auto commType = su::deserialize<ContextPhaseState::CommType>(is);
+    if (commType == ContextPhaseState::CommType::MPI)
+    {
+        auto ranks = su::deserialize<decltype(ContextPhaseState::MpiComm::mRanks)>(is);
+        return ContextPhaseState{std::move(reqId), std::move(ranks)};
+    }
+    else if (commType == ContextPhaseState::CommType::SOCKET)
+    {
+        auto port = su::deserialize<decltype(ContextPhaseState::SocketComm::mPort)>(is);
+        auto ip = su::deserialize<decltype(ContextPhaseState::SocketComm::mIp)>(is);
+        return ContextPhaseState{std::move(reqId), port, std::move(ip)};
+    }
+    TLLM_THROW("Unknown context phase state communication type.");
+    return {};
+}
+
+void Serialization::serialize(ContextPhaseState const& state, std::ostream& os)
+{
+    su::serialize(state.mReqId, os);
+    su::serialize(state.mCommType, os);
+    if (state.mCommType == ContextPhaseState::CommType::MPI)
+    {
+        su::serialize(state.getMpiComm().mRanks, os);
+    }
+    else if (state.mCommType == ContextPhaseState::CommType::SOCKET)
+    {
+        su::serialize(state.getSocketComm().mPort, os);
+        su::serialize(state.getSocketComm().mIp, os);
+    }
+    else
+    {
+        TLLM_THROW("Unknown context phase state communication type.");
+    }
+}
+
+size_t Serialization::serializedSize(ContextPhaseState const& state)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.mReqId);
+    totalSize += su::serializedSize(state.mCommType);
+    if (state.mCommType == ContextPhaseState::CommType::MPI)
+    {
+        totalSize += su::serializedSize(state.getMpiComm().mRanks);
+    }
+    else if (state.mCommType == ContextPhaseState::CommType::SOCKET)
+    {
+        totalSize += su::serializedSize(state.getSocketComm().mPort);
+        totalSize += su::serializedSize(state.getSocketComm().mIp);
+    }
+    else
+    {
+        TLLM_THROW("Unknown context phase state communication type.");
+    }
+    return totalSize;
+}
+
 // ContextPhaseParams
 ContextPhaseParams Serialization::deserializeContextPhaseParams(std::istream& is)
 {
@@ -204,8 +267,7 @@ ContextPhaseParams Serialization::deserializeContextPhaseParams(std::istream& is
     if (hasState)
     {
         auto state = std::make_unique<ContextPhaseState>();
-        state->mReqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
-        state->mRanks = su::deserialize<decltype(ContextPhaseState::mRanks)>(is);
+        *state = deserializeContextPhaseState(is);
         return ContextPhaseParams{std::move(firstGenTokens), state.release()};
     }
     return ContextPhaseParams{std::move(firstGenTokens)};
@@ -217,9 +279,7 @@ void Serialization::serialize(ContextPhaseParams const& contextPhaseParams, std:
     su::serialize(static_cast<bool>(contextPhaseParams.mState), os);
     if (contextPhaseParams.mState)
     {
-        auto* state = static_cast<ContextPhaseState*>(contextPhaseParams.mState.get());
-        su::serialize(state->mReqId, os);
-        su::serialize(state->mRanks, os);
+        serialize(*static_cast<ContextPhaseState*>(contextPhaseParams.mState.get()), os);
     }
 }
 
@@ -230,9 +290,7 @@ size_t Serialization::serializedSize(ContextPhaseParams const& contextPhaseParam
     totalSize += su::serializedSize(bool{});
     if (contextPhaseParams.mState)
     {
-        auto* state = static_cast<ContextPhaseState*>(contextPhaseParams.mState.get());
-        totalSize += su::serializedSize(state->mReqId);
-        totalSize += su::serializedSize(state->mRanks);
+        totalSize += serializedSize(*static_cast<ContextPhaseState*>(contextPhaseParams.mState.get()));
     }
     return totalSize;
 }
@@ -247,6 +305,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto outputConfig = su::deserialize<OutputConfig>(is);
     auto endId = su::deserialize<std::optional<SizeType32>>(is);
     auto padId = su::deserialize<std::optional<SizeType32>>(is);
+    auto positionIds = su::deserialize<std::optional<std::vector<SizeType32>>>(is);
     auto badWords = su::deserialize<std::optional<std::list<VecTokens>>>(is);
     auto stopWords = su::deserialize<std::optional<std::list<VecTokens>>>(is);
     auto embeddingBias = su::deserialize<std::optional<Tensor>>(is);
@@ -259,15 +318,17 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto clientId = su::deserialize<std::optional<IdType>>(is);
     auto returnAllGeneratedTokens = su::deserialize<bool>(is);
     auto priority = su::deserialize<executor::PriorityType>(is);
+    auto requestType = su::deserialize<executor::RequestType>(is);
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
     auto encoderInputFeatures = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
-        std::move(badWords), std::move(stopWords), std::move(embeddingBias), std::move(externalDraftTokensConfig),
-        std::move(pTuningConfig), std::move(loraConfig), std::move(lookaheadConfig), std::move(logitsPostProcessorName),
-        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, std::move(contextPhaseParams),
-        std::move(encoderInputFeatures), encoderOutputLength);
+        std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
+        std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
+        std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
+        returnAllGeneratedTokens, priority, requestType, std::move(contextPhaseParams), std::move(encoderInputFeatures),
+        encoderOutputLength);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -418,9 +479,11 @@ Result Serialization::deserializeResult(std::istream& is)
     auto generationLogits = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutput = su::deserialize<std::optional<Tensor>>(is);
     auto finishReasons = su::deserialize<std::vector<FinishReason>>(is);
+    auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
 
-    return Result{
-        isFinal, outputTokenIds, cumLogProbs, logProbs, contextLogits, generationLogits, encoderOutput, finishReasons};
+    return Result{isFinal, std::move(outputTokenIds), std::move(cumLogProbs), std::move(logProbs),
+        std::move(contextLogits), std::move(generationLogits), std::move(encoderOutput), std::move(finishReasons),
+        std::move(contextPhaseParams)};
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -433,6 +496,7 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.generationLogits, os);
     su::serialize(result.encoderOutput, os);
     su::serialize(result.finishReasons, os);
+    su::serialize(result.contextPhaseParams, os);
 }
 
 size_t Serialization::serializedSize(Result const& result)
@@ -446,6 +510,7 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.generationLogits);
     totalSize += su::serializedSize(result.encoderOutput);
     totalSize += su::serializedSize(result.finishReasons);
+    totalSize += su::serializedSize(result.contextPhaseParams);
     return totalSize;
 }
 
@@ -546,10 +611,18 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxQueueSize), ExecutorConfig>>(is);
     auto extendedRuntimePerfKnobConfig = su::deserialize<
         std::invoke_result_t<decltype(&ExecutorConfig::getExtendedRuntimePerfKnobConfig), ExecutorConfig>>(is);
+    auto debugConfig
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDebugConfig), ExecutorConfig>>(is);
+    auto recvPollPeriodMs
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getRecvPollPeriodMs), ExecutorConfig>>(is);
+    auto maxSeqIdleMicroseconds
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxSeqIdleMicroseconds), ExecutorConfig>>(
+            is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
-        peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig};
+        peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig,
+        debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -575,6 +648,9 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getGpuWeightsPercent());
     totalSize += su::serializedSize(executorConfig.getMaxQueueSize());
     totalSize += su::serializedSize(executorConfig.getExtendedRuntimePerfKnobConfig());
+    totalSize += su::serializedSize(executorConfig.getDebugConfig());
+    totalSize += su::serializedSize(executorConfig.getRecvPollPeriodMs());
+    totalSize += su::serializedSize(executorConfig.getMaxSeqIdleMicroseconds());
 
     return totalSize;
 }
@@ -600,6 +676,9 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getGpuWeightsPercent(), os);
     su::serialize(executorConfig.getMaxQueueSize(), os);
     su::serialize(executorConfig.getExtendedRuntimePerfKnobConfig(), os);
+    su::serialize(executorConfig.getDebugConfig(), os);
+    su::serialize(executorConfig.getRecvPollPeriodMs(), os);
+    su::serialize(executorConfig.getMaxSeqIdleMicroseconds(), os);
 }
 
 // KvCacheConfig
@@ -1007,8 +1086,10 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto timestamp = su::deserialize<std::string>(is);
     auto iter = su::deserialize<IterationType>(is);
     auto iterLatencyMS = su::deserialize<double>(is);
+    auto newActiveRequestsQueueLatencyMS = su::deserialize<double>(is);
     auto numActiveRequests = su::deserialize<SizeType32>(is);
     auto numQueuedRequests = su::deserialize<SizeType32>(is);
+    auto numCompletedRequests = su::deserialize<SizeType32>(is);
     auto maxNumActiveRequests = su::deserialize<SizeType32>(is);
     auto gpuMemUsage = su::deserialize<size_t>(is);
     auto cpuMemUsage = su::deserialize<size_t>(is);
@@ -1018,9 +1099,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto staticBatchingStats = su::deserialize<std::optional<StaticBatchingStats>>(is);
     auto inflightBatchingStats = su::deserialize<std::optional<InflightBatchingStats>>(is);
 
-    return IterationStats{timestamp, iter, iterLatencyMS, numActiveRequests, numQueuedRequests, maxNumActiveRequests,
-        gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats, crossKvCacheStats, staticBatchingStats,
-        inflightBatchingStats};
+    return IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS, numActiveRequests,
+        numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage,
+        kvCacheStats, crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
 }
 
 IterationStats Serialization::deserializeIterationStats(std::vector<char>& buffer)
@@ -1039,8 +1120,10 @@ size_t Serialization::serializedSize(IterationStats const& iterStats)
     totalSize += su::serializedSize(iterStats.timestamp);
     totalSize += su::serializedSize(iterStats.iter);
     totalSize += su::serializedSize(iterStats.iterLatencyMS);
+    totalSize += su::serializedSize(iterStats.newActiveRequestsQueueLatencyMS);
     totalSize += su::serializedSize(iterStats.numActiveRequests);
     totalSize += su::serializedSize(iterStats.numQueuedRequests);
+    totalSize += su::serializedSize(iterStats.numCompletedRequests);
     totalSize += su::serializedSize(iterStats.maxNumActiveRequests);
     totalSize += su::serializedSize(iterStats.gpuMemUsage);
     totalSize += su::serializedSize(iterStats.cpuMemUsage);
@@ -1058,8 +1141,10 @@ void Serialization::serialize(IterationStats const& iterStats, std::ostream& os)
     su::serialize(iterStats.timestamp, os);
     su::serialize(iterStats.iter, os);
     su::serialize(iterStats.iterLatencyMS, os);
+    su::serialize(iterStats.newActiveRequestsQueueLatencyMS, os);
     su::serialize(iterStats.numActiveRequests, os);
     su::serialize(iterStats.numQueuedRequests, os);
+    su::serialize(iterStats.numCompletedRequests, os);
     su::serialize(iterStats.maxNumActiveRequests, os);
     su::serialize(iterStats.gpuMemUsage, os);
     su::serialize(iterStats.cpuMemUsage, os);

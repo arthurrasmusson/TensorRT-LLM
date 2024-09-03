@@ -26,15 +26,17 @@
 
 namespace tensorrt_llm::batch_manager::batch_scheduler
 {
-using kv_cache_manager::VecTokens;
+using kv_cache_manager::VecUniqueTokens;
+using kv_cache_manager::BlockKey;
+using kv_cache_manager::BlockKeyHasher;
 
 namespace
 {
 void prefillWithChunkedContextsAlreadyExecuting(tensorrt_llm::batch_manager::RequestList const& activeRequests,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mKvCacheManager,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mCrossKvCacheManager,
-    std::unordered_set<VecTokens>& newlyContributedContextBlocks,
-    std::unordered_set<VecTokens>& newlyContributedCrossContextBlocks)
+    std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedContextBlocks,
+    std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedCrossContextBlocks)
 {
     for (auto const& req : activeRequests)
     {
@@ -44,14 +46,14 @@ void prefillWithChunkedContextsAlreadyExecuting(tensorrt_llm::batch_manager::Req
             // Skipping is not an option, register it's contributed blocks
             if (mKvCacheManager && mKvCacheManager->isEnableBlockReuse())
             {
-                auto inputTokens = req->getTokens(0);
-                auto newContextBlock = mKvCacheManager->findNewContextBlock(inputTokens);
+                auto uniqueTokens = req->getUniqueTokens(0);
+                auto newContextBlock = mKvCacheManager->findNewContextBlock(uniqueTokens, req);
                 newlyContributedContextBlocks.insert(newContextBlock);
             }
             if (mCrossKvCacheManager && mCrossKvCacheManager->isEnableBlockReuse())
             {
-                auto inputTokens = *(req->getEncoderTokens().value());
-                auto newContextBlock = mCrossKvCacheManager->findNewContextBlock(inputTokens);
+                auto uniqueTokens = *(req->getEncoderUniqueTokens().value());
+                auto newContextBlock = mCrossKvCacheManager->findNewContextBlock(uniqueTokens, req);
                 newlyContributedCrossContextBlocks.insert(newContextBlock);
             }
         }
@@ -60,10 +62,11 @@ void prefillWithChunkedContextsAlreadyExecuting(tensorrt_llm::batch_manager::Req
 
 bool oneManagerBeneficialToSkip(
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> kvCacheManager,
-    VecTokens const& inputTokens, std::unordered_set<VecTokens>& newlyContributedContextBlocks)
+    VecUniqueTokens const& uniqueTokens, std::shared_ptr<LlmRequest> const& llmRequest,
+    std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedContextBlocks)
 {
     // check with kvCacheManager
-    auto newContextBlock = kvCacheManager->findNewContextBlock(inputTokens);
+    auto newContextBlock = kvCacheManager->findNewContextBlock(uniqueTokens, llmRequest);
     bool shouldSkip = false;
     if (newlyContributedContextBlocks.count(newContextBlock) > 0)
     {
@@ -86,23 +89,23 @@ bool oneManagerBeneficialToSkip(
 bool beneficialToSkip(std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> const& req,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mKvCacheManager,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mCrossKvCacheManager,
-    std::unordered_set<VecTokens>& newlyContributedContextBlocks,
-    std::unordered_set<VecTokens>& newlyContributedCrossContextBlocks)
+    std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedContextBlocks,
+    std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedCrossContextBlocks)
 {
     if (req->isContextInitState() && req->isFirstContextChunk())
     {
         if (mKvCacheManager && mKvCacheManager->isEnableBlockReuse())
         {
-            auto inputTokens = req->getTokens(0);
-            if (oneManagerBeneficialToSkip(mKvCacheManager, inputTokens, newlyContributedContextBlocks))
+            auto uniqueTokens = req->getUniqueTokens(0);
+            if (oneManagerBeneficialToSkip(mKvCacheManager, uniqueTokens, req, newlyContributedContextBlocks))
             {
                 return true;
             }
         }
         if (mCrossKvCacheManager && mCrossKvCacheManager->isEnableBlockReuse())
         {
-            auto inputTokens = *(req->getEncoderTokens().value());
-            if (oneManagerBeneficialToSkip(mCrossKvCacheManager, inputTokens, newlyContributedCrossContextBlocks))
+            auto uniqueTokens = *(req->getEncoderUniqueTokens().value());
+            if (oneManagerBeneficialToSkip(mCrossKvCacheManager, uniqueTokens, req, newlyContributedCrossContextBlocks))
             {
                 return true;
             }
@@ -183,8 +186,8 @@ std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::scheduleRequests(
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
 
     // Keep track of blocks contributed by requests in context phase
-    std::unordered_set<VecTokens> newlyContributedContextBlocks;
-    std::unordered_set<VecTokens> newlyContributedCrossContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedCrossContextBlocks;
     prefillWithChunkedContextsAlreadyExecuting(activeRequests, mKvCacheManager, mCrossKvCacheManager,
         newlyContributedContextBlocks, newlyContributedCrossContextBlocks);
 
@@ -228,8 +231,8 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
     auto const maxPeftCachePages = mPeftCacheManager->getMaxDevicePages();
 
     // Keep track of blocks contributed by requests in context phase
-    std::unordered_set<VecTokens> newlyContributedContextBlocks;
-    std::unordered_set<VecTokens> newlyContributedCrossContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedCrossContextBlocks;
     prefillWithChunkedContextsAlreadyExecuting(activeRequests, mKvCacheManager, mCrossKvCacheManager,
         newlyContributedContextBlocks, newlyContributedCrossContextBlocks);
 
@@ -327,8 +330,8 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::scheduleReques
     std::unordered_set<uint64_t> seenTaskIds;
 
     // Keep track of blocks contributed by requests in context phase
-    std::unordered_set<VecTokens> newlyContributedContextBlocks;
-    std::unordered_set<VecTokens> newlyContributedCrossContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedContextBlocks;
+    std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedCrossContextBlocks;
     prefillWithChunkedContextsAlreadyExecuting(activeRequests, mKvCacheManager, mCrossKvCacheManager,
         newlyContributedContextBlocks, newlyContributedCrossContextBlocks);
 

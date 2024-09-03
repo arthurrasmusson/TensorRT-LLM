@@ -61,6 +61,7 @@ public:
     [[nodiscard]] virtual runtime::ModelConfig const& getModelConfig() const = 0;
     [[nodiscard]] virtual runtime::BufferManager const& getBufferManager() const = 0;
     [[nodiscard]] virtual runtime::BufferManager::CudaStreamPtr getRuntimeStreamPtr() const = 0;
+    [[nodiscard]] virtual IterationType getIterCounter() const noexcept = 0;
 
     /// @brief Function that provides per iteration stats specific to a certain model
     /// @param stats The json object to write stats to

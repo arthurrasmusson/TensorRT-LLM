@@ -39,7 +39,9 @@ set(SRCS
     schedulerConfig.cpp
     serialization.cpp
     tensor.cpp
-    types.cpp)
+    types.cpp
+    requestUtils.cpp
+    contextPhaseParams.cpp)
 
 if(NOT WIN32)
   # additional warnings
