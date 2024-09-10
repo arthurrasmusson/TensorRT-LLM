@@ -17,7 +17,6 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(SRCS
     capacityScheduler.cpp
     dataTransceiver.cpp
-    debugUtils.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp
     GptManager.cpp
@@ -40,7 +39,13 @@ set(SRCS
     transformerBuffers.cpp
     trtEncoderModel.cpp
     trtGptModelInflightBatching.cpp
-    trtGptModelV1.cpp)
+    trtGptModelV1.cpp
+    debugUtils.cpp
+    inflightBatchingUtils.cpp)
+
+if(ENABLE_UCX)
+  set(SRCS ${SRCS} ucxDataTransceiver.cpp)
+endif()
 
 if(NOT WIN32)
   # additional warnings

@@ -139,7 +139,8 @@ bool KVCacheBlock::hasRefs() const
 
 bool KVCacheBlock::isShared() const
 {
-    return mRefCount > 1;
+    // block is considered shared if ready for reuse
+    return mRefCount > 1 || mPrevBlock != nullptr;
 }
 
 bool KVCacheBlock::hasSchedulingRefs() const
@@ -627,8 +628,12 @@ void BlockManager::allocateBlock(GenerationRequest& sequence, bool shareAmongBea
 
 void BlockManager::storeBlocks(std::list<BlockKey> blockKeys, std::vector<KVCacheBlock::IdType> const& blockIds)
 {
-    TLLM_CHECK_WITH_INFO(
-        blockKeys.size() <= blockIds.size(), "%lu blockKeys, %lu blockIds", blockKeys.size(), blockIds.size());
+    TLLM_LOG_DEBUG("BlockManager::storeBlocks - %zu blockKeys, %zu blockIds", blockKeys.size(), blockIds.size());
+    if (blockKeys.size() > blockIds.size())
+    {
+        // cyclic kv cache enabled, don't store
+        return;
+    }
 
     auto searchRoot = mCachedBlocksRoot;
     bool needMatch = true;
@@ -724,7 +729,7 @@ void BlockManager::releaseBlocks(GenerationRequest& sequence, std::shared_ptr<Ll
     if (llmRequest)
     {
         // TODO only store blocks for context in case of beamWidth > 1
-        auto cacheBlockIds = sequence.getCacheBlockIds();
+        auto const& cacheBlockIds = sequence.getCacheBlockIds();
         auto constexpr beamIdx = 0;
         auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
         auto blockedUniqueTokens
@@ -1021,7 +1026,7 @@ void KVCacheManager::updateToken(SizeType32 seqSlotIdx, bool addToken)
                 mBlockManager.releaseLastBlock(seq);
             }
         }
-        else if (seq.getBeamWidth() > 1)
+        else if (seq.getBeamWidth() > 1 || mEnableBlockReuse)
         {
             TLLM_CHECK_WITH_INFO(addToken, "Remove token is not supported with beam search");
             // Get next block index

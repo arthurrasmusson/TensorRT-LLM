@@ -17,6 +17,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,7 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getTokens().size(), 1);
         EXPECT_EQ(llmReq.getTokens().at(0), inputTokens);
         EXPECT_EQ(llmReq.mMaxNewTokens, maxNewTokens);
+        EXPECT_EQ(llmReq.getNumReturnSequences(), execReq.getNumReturnSequences());
         EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
         EXPECT_EQ(llmReq.getMaxSentTokenLen(), inputTokens.size());
         EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
@@ -419,7 +421,57 @@ TEST_F(LlmRequestTest, testLastTokensSetIndependence)
     EXPECT_THAT(llmReq.getLastTokens(), testing::ElementsAreArray({20, 21, 22}));
 }
 
-using ParamType = std::tuple<bool, bool, bool, SizeType32, SizeType32>;
+TEST_F(LlmRequestTest, testCreateRequests)
+{
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
+    SizeType32 maxNewTokens{60};
+    tb::LlmRequest::RequestIdType requestId{77};
+    SizeType32 vocabSize{32};
+    nvinfer1::DataType dtype{nvinfer1::DataType::kHALF};
+
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
+    llmReq.mSamplingConfig.randomSeed = std::vector<texec::RandomSeedType>{7};
+
+    try
+    {
+        auto childReq = llmReq.createChildRequest(1837);
+        FAIL() << "Expected an exception.";
+    }
+    catch (tc::TllmException const& e)
+    {
+        EXPECT_THAT(e.what(), testing::HasSubstr("Cannot create child requests more than"));
+    }
+
+    llmReq.setNumReturnSequences(3);
+
+    auto childReq1 = llmReq.createChildRequest(78);
+
+    {
+        EXPECT_EQ(llmReq.getChildRequests().size(), 1);
+        EXPECT_EQ(childReq1->mRequestId, 78);
+        EXPECT_EQ(childReq1->getTokens().at(0), *inputTokens);
+        EXPECT_EQ(childReq1->getNumTokens(0), llmReq.getNumTokens(0));
+        EXPECT_EQ(childReq1->getOrigPromptLen(), llmReq.getOrigPromptLen());
+        EXPECT_EQ(childReq1->mMaxNewTokens, llmReq.mMaxNewTokens);
+        EXPECT_EQ(childReq1->mState, llmReq.mState);
+        EXPECT_EQ(childReq1->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{8});
+        EXPECT_EQ(llmReq.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
+        EXPECT_FALSE(childReq1->mSeqSlot);
+    }
+
+    {
+        auto childReq2 = llmReq.createChildRequest(79);
+        auto childRequests = llmReq.getChildRequests();
+        EXPECT_EQ(childRequests.size(), 2);
+        EXPECT_EQ(childRequests.at(0), childReq1);
+        EXPECT_EQ(childRequests.at(1), childReq2);
+        EXPECT_EQ(childReq2->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{9});
+        EXPECT_EQ(childReq1->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{8});
+        EXPECT_EQ(llmReq.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
+    }
+}
+
+using ParamType = std::tuple<bool, bool, bool, SizeType32, SizeType32, SizeType32>;
 
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
 {
@@ -428,6 +480,7 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     auto const returnAllGeneratedTokens = std::get<2>(info.param);
     auto const beamWdith = std::get<3>(info.param);
     auto const tokensPerIteration = std::get<4>(info.param);
+    auto const numReturnSequences = std::get<5>(info.param);
     std::string name = "llmRequestTest";
     if (streaming)
     {
@@ -443,6 +496,7 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     }
     name += "Bw" + std::to_string(beamWdith);
     name += "TokensPerIt" + std::to_string(tokensPerIteration);
+    name += "N" + std::to_string(numReturnSequences);
     return name;
 }
 
@@ -457,51 +511,160 @@ TEST_P(ParamTest, createResponse)
     bool const returnAllGeneratedTokens{std::get<2>(GetParam())};
     SizeType32 const beamWidth{std::get<3>(GetParam())};
     SizeType32 const tokensPerIteration{std::get<4>(GetParam())};
+    SizeType32 const numReturnSequences{std::get<5>(GetParam())};
 
     auto inputTokens = std::make_shared<VecTokens>(VecTokens{1, 2, 3, 4, 5});
     SizeType32 maxNewTokens(66);
     tb::LlmRequest::RequestIdType requestId{77};
 
-    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(beamWidth), streaming);
-    llmReq.setExcludeInputFromOutput(excludeInputFromOutput);
-    if (streaming && beamWidth > 1 && !returnAllGeneratedTokens)
-    {
-        EXPECT_THROW(llmReq.setReturnAllGeneratedTokens(returnAllGeneratedTokens), tensorrt_llm::common::TllmException);
-        return;
-    }
-    llmReq.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
+    std::vector<std::shared_ptr<tb::LlmRequest>> llmRequests;
+    llmRequests.emplace_back(std::make_shared<tb::LlmRequest>(
+        requestId, maxNewTokens, inputTokens, tr::SamplingConfig(beamWidth), streaming));
 
     {
-        auto response = llmReq.createResponse();
+        auto llmReq = llmRequests.at(0);
+        llmReq->setExcludeInputFromOutput(excludeInputFromOutput);
+        if (streaming && beamWidth > 1 && !returnAllGeneratedTokens)
+        {
+            EXPECT_THROW(
+                llmReq->setReturnAllGeneratedTokens(returnAllGeneratedTokens), tensorrt_llm::common::TllmException);
+            return;
+        }
+        llmReq->setReturnAllGeneratedTokens(returnAllGeneratedTokens);
+        llmReq->setNumReturnSequences(numReturnSequences);
+    }
+
+    {
+        auto llmReq = llmRequests.at(0);
+        for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
+        {
+            tb::LlmRequest::RequestIdType childReqId{77 + static_cast<tb::LlmRequest::RequestIdType>(seqIdx)};
+            auto childReq = llmReq->createChildRequest(childReqId);
+            EXPECT_EQ(childReq->getReturnAllGeneratedTokens(), llmReq->getReturnAllGeneratedTokens());
+            EXPECT_TRUE(childReq->isChild());
+            llmRequests.emplace_back(std::move(childReq));
+        }
+    }
+
+    for (auto& llmReq : llmRequests)
+    {
+        auto response = llmReq->createResponse();
         EXPECT_FALSE(response);
     }
 
     SizeType32 constexpr numIterations{5};
-    texec::TokenIdType constexpr newToken{1};
+    std::vector<texec::TokenIdType> newTokens(numReturnSequences);
+    std::iota(newTokens.begin(), newTokens.end(), 1);
 
-    for (int i = 0; i < numIterations - 1; ++i)
+    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
+    {
+        auto llmReq = llmRequests.at(seqIdx);
+        for (int i = 0; i < numIterations - 1; ++i)
+        {
+            for (int j = 0; j < tokensPerIteration; ++j)
+            {
+                llmReq->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
+            }
+
+            llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+            auto response = llmReq->createResponse();
+            EXPECT_TRUE(streaming == response.has_value());
+
+            for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+            {
+                if (streaming)
+                {
+                    EXPECT_EQ(response.value().getRequestId(), requestId);
+                    auto result = response.value().getResult();
+                    EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
+                    auto const& beamTokens = result.outputTokenIds.at(beamIdx);
+                    if (returnAllGeneratedTokens)
+                    {
+                        auto const expectedSize = (i + 1) * tokensPerIteration;
+                        EXPECT_EQ(beamTokens.size(), expectedSize);
+                        VecTokens expectedTokens(expectedSize, newTokens.at(seqIdx));
+                        EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                    }
+                    else
+                    {
+                        auto const expectedSize = tokensPerIteration;
+                        EXPECT_EQ(beamTokens.size(), expectedSize);
+                        VecTokens expectedTokens(expectedSize, newTokens.at(seqIdx));
+                        EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                    }
+                }
+            }
+
+            response = llmReq->createResponse();
+            EXPECT_FALSE(response);
+        }
+    }
+
+    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
     {
         for (int j = 0; j < tokensPerIteration; ++j)
         {
-            llmReq.addNewTokens(VecTokens(beamWidth, newToken));
+            llmRequests.at(seqIdx)->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
         }
-        llmReq.mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
-        auto response = llmReq.createResponse();
-        EXPECT_TRUE(streaming == response.has_value());
+    }
+
+    llmRequests.at(0)->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+
+    auto const numNewTokens = numIterations * tokensPerIteration;
+
+    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
+    {
+        auto llmReq = llmRequests.at(seqIdx);
+        auto response = llmReq->createResponse();
+
+        if (!streaming && llmRequests.at(seqIdx)->mState != tb::REQUEST_STATE_GENERATION_COMPLETE)
+        {
+            EXPECT_FALSE(response);
+            continue;
+        }
+
+        EXPECT_TRUE(response) << "seqIdx " << seqIdx;
+        EXPECT_FALSE(response.value().hasError()) << "seqIdx " << seqIdx;
+
+        // All response should have the same request id of the original request.
+        EXPECT_EQ(response.value().getRequestId(), requestId);
+
+        auto result = response.value().getResult();
+        EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
+
+        // Only the first sequence has finished.
+        EXPECT_EQ(result.isSequenceFinal, seqIdx == 0) << "seqIdx " << seqIdx;
+        EXPECT_EQ(result.isFinal, numReturnSequences == 1) << "seqIdx " << seqIdx;
+
+        auto newToken = newTokens.at(seqIdx);
 
         for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
         {
-            if (streaming)
+            auto const& beamTokens = result.outputTokenIds.at(beamIdx);
+
+            if (!streaming)
             {
-                EXPECT_EQ(response.value().getRequestId(), requestId);
-                auto result = response.value().getResult();
-                EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
-                auto const& beamTokens = result.outputTokenIds.at(beamIdx);
+                if (excludeInputFromOutput)
+                {
+                    EXPECT_EQ(beamTokens.size(), numNewTokens);
+                    VecTokens expectedTokens(numNewTokens, newToken);
+                    EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                }
+                else
+                {
+                    auto const expectedSize = inputTokens->size() + numNewTokens;
+                    EXPECT_EQ(beamTokens.size(), expectedSize);
+                    VecTokens expectedTokens(*inputTokens);
+                    expectedTokens.resize(expectedSize, newToken);
+                    EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                }
+            }
+            else
+            {
                 if (returnAllGeneratedTokens)
                 {
-                    auto const expectedSize = (i + 1) * tokensPerIteration;
-                    EXPECT_EQ(beamTokens.size(), expectedSize);
-                    VecTokens expectedTokens(expectedSize, newToken);
+                    EXPECT_EQ(beamTokens.size(), numNewTokens);
+                    VecTokens expectedTokens(numNewTokens, newToken);
                     EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
                 }
                 else
@@ -513,66 +676,46 @@ TEST_P(ParamTest, createResponse)
                 }
             }
         }
-
-        response = llmReq.createResponse();
-        EXPECT_FALSE(response);
     }
 
-    for (int j = 0; j < tokensPerIteration; ++j)
+    if (numReturnSequences > 1)
     {
-        llmReq.addNewTokens(VecTokens(beamWidth, newToken));
-    }
-    llmReq.mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
-
-    auto response = llmReq.createResponse();
-    EXPECT_TRUE(response);
-    EXPECT_FALSE(response.value().hasError());
-    EXPECT_EQ(response.value().getRequestId(), requestId);
-    auto result = response.value().getResult();
-    EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
-
-    auto const numNewTokens = numIterations * tokensPerIteration;
-    for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
-    {
-        auto const& beamTokens = result.outputTokenIds.at(beamIdx);
-
-        if (!streaming)
+        for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
         {
-            if (excludeInputFromOutput)
+            auto llmReq = llmRequests.at(seqIdx);
+            for (int j = 0; j < tokensPerIteration; ++j)
             {
-                EXPECT_EQ(beamTokens.size(), numNewTokens);
-                VecTokens expectedTokens(numNewTokens, newToken);
-                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
+                llmReq->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
             }
-            else
-            {
-                auto const expectedSize = inputTokens->size() + numNewTokens;
-                EXPECT_EQ(beamTokens.size(), expectedSize);
-                VecTokens expectedTokens(*inputTokens);
-                expectedTokens.resize(expectedSize, newToken);
-                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
-            }
+            llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
         }
-        else
+
+        for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
         {
-            if (returnAllGeneratedTokens)
-            {
-                EXPECT_EQ(beamTokens.size(), numNewTokens);
-                VecTokens expectedTokens(numNewTokens, newToken);
-                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
-            }
-            else
-            {
-                auto const expectedSize = tokensPerIteration;
-                EXPECT_EQ(beamTokens.size(), expectedSize);
-                VecTokens expectedTokens(expectedSize, newToken);
-                EXPECT_THAT(beamTokens, testing::ElementsAreArray(expectedTokens));
-            }
+            auto response = llmRequests.at(seqIdx)->createResponse();
+            EXPECT_TRUE(response) << "seqIdx " << seqIdx;
+            EXPECT_FALSE(response.value().hasError()) << "seqIdx " << seqIdx;
+
+            auto result = response.value().getResult();
+            // All sequences have finished.
+            EXPECT_TRUE(result.isSequenceFinal) << "seqIdx " << seqIdx;
+            EXPECT_TRUE(result.isFinal) << "seqIdx " << seqIdx;
         }
     }
 }
 
 INSTANTIATE_TEST_SUITE_P(LlmRequestTest, ParamTest,
-    testing::Combine(testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
-        testing::Values(1, 2), testing::Values(1, 3)),
+    testing::Combine(
+        // streaming
+        testing::Values(false, true),
+        // excludeInputFromOutput
+        testing::Values(false, true),
+        // returnAllGeneratedTokens
+        testing::Values(false, true),
+        // beamWdith
+        testing::Values(1, 2),
+        // tokensPerIteration
+        testing::Values(1, 3),
+        // numReturnSequences
+        testing::Values(1, 2)),
     generateTestName);

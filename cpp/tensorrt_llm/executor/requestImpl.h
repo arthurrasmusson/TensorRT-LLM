@@ -36,7 +36,8 @@ public:
         std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
         PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
-        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength)
+        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
+        SizeType32 numReturnSequences)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -61,6 +62,7 @@ public:
         , mContextPhaseParams(contextPhaseParams)
         , mEncoderInputFeatures(encoderInputFeatures)
         , mEncoderOutputLength(encoderOutputLength)
+        , mNumReturnSequences(numReturnSequences)
     {
         validate();
     }
@@ -199,6 +201,11 @@ public:
         return mEncoderOutputLength;
     }
 
+    SizeType32 getNumReturnSequences() const
+    {
+        return mNumReturnSequences;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -309,11 +316,17 @@ public:
         mEncoderOutputLength = encoderOutputLength;
     }
 
+    void setNumReturnSequences(SizeType32 numReturnSequences)
+    {
+        mNumReturnSequences = numReturnSequences;
+    }
+
 private:
     void validate()
     {
         TLLM_CHECK(!mInputTokenIds.empty());
         TLLM_CHECK(mMaxNewTokens > 0);
+        TLLM_CHECK(mNumReturnSequences > 0);
     }
 
     static std::optional<Tensor> checkEmbeddingBias(std::optional<Tensor> bias)
@@ -353,6 +366,7 @@ private:
         lambda(mContextPhaseParams);
         lambda(mEncoderInputFeatures);
         lambda(mEncoderOutputLength);
+        lambda(mNumReturnSequences);
     }
 
     VecTokens mInputTokenIds;
@@ -379,6 +393,7 @@ private:
     std::optional<ContextPhaseParams> mContextPhaseParams;
     std::optional<Tensor> mEncoderInputFeatures;
     std::optional<SizeType32> mEncoderOutputLength;
+    SizeType32 mNumReturnSequences;
 };
 
 } // namespace tensorrt_llm::executor

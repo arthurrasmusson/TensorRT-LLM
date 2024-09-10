@@ -15,6 +15,7 @@
 #include "runtimeBuffers.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/debugUtils.h"
+#include "tensorrt_llm/batch_manager/inflightBatchingUtils.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
@@ -46,9 +47,9 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace tensorrt_llm::runtime;
@@ -59,196 +60,6 @@ namespace texe = tensorrt_llm::executor;
 
 namespace tensorrt_llm::batch_manager
 {
-namespace
-{
-using TensorPtr = runtime::ITensor::SharedPtr;
-using TensorConstPtr = runtime::ITensor::SharedConstPtr;
-using KVCacheManager = kv_cache_manager::KVCacheManager;
-using LlmRequestPtr = std::shared_ptr<batch_manager::LlmRequest>;
-
-void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr& medusaLogitsDevice, SizeType32 medusaHeads,
-    SizeType32 logitsIndex, SizeType32 numLogits)
-{
-    for (SizeType32 hi = 0; hi < medusaHeads; ++hi)
-    {
-        TensorPtr logitsHead = ITensor::slice(medusaLogitsDevice, hi, 1);
-        logitsHead->squeeze(0);
-        medusaLogitsHeads[hi] = ITensor::slice(logitsHead, logitsIndex, numLogits);
-    }
-}
-
-//! @brief Copy logits from context phase to beginning of generation logits.
-//! @details Usually, this concerns logits of 1 token. In speculative decoding this concerns draftLen + 1 tokens.
-void copyLastContextLogits(TensorPtr const& contextLogits, LlmRequest& llmReq, BufferManager const& bufferManager)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    auto const numLogits = contextLogits->getShape().d[0];
-    for (int beam = 0; beam < llmReq.mSamplingConfig.beamWidth; beam++)
-    {
-        // [beamWidth, mMaxNewTokens, vocabSizePadded] -> [numLogits, vocabSizePadded]
-        auto beamHostTensorPtr = ITensor::slice(llmReq.getGenerationLogitsHost(), {beam, 0}, numLogits);
-        bufferManager.copy(*contextLogits, *beamHostTensorPtr);
-    }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
-//! @param beforeDecoder    Whether the function is called before the decoder. If it is true, correct the output offset.
-//! @param numDroppedTokens The number of dropped tokens for each beam (e.g. when the requests finished early).
-//!                         Generation logits for dropped tokens are ignored.
-void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, BufferManager const& bufferManager,
-    LlmRequest& llmReq, std::size_t batchIdx, bool beforeDecoder, std::vector<SizeType32> const& numDroppedTokens = {})
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-
-    TLLM_CHECK_WITH_INFO(
-        !beforeDecoder || numDroppedTokens.empty(), "numDroppedTokens are only possible after decoder.");
-
-    auto const reqBeamWidth = llmReq.mSamplingConfig.beamWidth;
-    TLLM_CHECK_WITH_INFO(numDroppedTokens.empty() || numDroppedTokens.size() == static_cast<size_t>(reqBeamWidth),
-        "Dropped tokens have to be defined for all beams.");
-
-    auto const fragmentSize = llmReq.getGenerationLogitsFragmentsSize();
-
-    // Merge logits fragments on device
-    TensorPtr transposeBufferPtr = ITensor::slice(genRuntimeBuffers.cacheTransposedGenerationLogits, batchIdx, 1);
-    transposeBufferPtr->squeeze(0); // [beamWidth, GENERATION_LOGITS_BUFFER_LENGTH, vocabSize]
-    auto cachePointerDevice = ITensor::slice(genRuntimeBuffers.cacheGenerationFragmentPointerDevice, batchIdx, 1);
-    auto cachePointerHost = ITensor::slice(genRuntimeBuffers.cacheGenerationFragmentPointerHost, batchIdx, 1);
-    tensorrt_llm::runtime::kernels::mergeLogitsFragments(bufferManager, *transposeBufferPtr,
-        llmReq.getGenerationLogitsFragments(), *cachePointerDevice, *cachePointerHost, 0, 1, reqBeamWidth,
-        bufferManager.getStream(), 0);
-    llmReq.clearGenerationLogitsFragments();
-
-    // Copy logits to host
-    for (SizeType32 beam = 0; beam < reqBeamWidth; beam++)
-    {
-        auto const droppedSize = !numDroppedTokens.empty() ? numDroppedTokens.at(beam) : 0;
-        // Ignore logits of dropped tokens
-        auto const beamFragmentSize = fragmentSize - droppedSize;
-        // If this function is called before the decoder, the request does not contain the generated token of the
-        // current iteration, so we add 1 to the number of tokens.
-        auto const numGenerationToken
-            = static_cast<SizeType32>(beforeDecoder) + llmReq.getNumTokens(beam) - llmReq.mPromptLen;
-        auto const hostOffset = numGenerationToken - beamFragmentSize;
-
-        // [beamWidth, GENERATION_LOGITS_BUFFER_LENGTH, vocabSizePadded] -> [beamFragmentSize, vocabSizePadded]
-        auto beamDeviceTensorPtr = ITensor::slice(transposeBufferPtr, {beam, 0}, beamFragmentSize);
-        // [beamWidth, mMaxNewTokens, vocabSizePadded] -> [beamFragmentSize, vocabSizePadded]
-        auto beamHostTensorPtr = ITensor::slice(llmReq.getGenerationLogitsHost(), {beam, hostOffset}, beamFragmentSize);
-        bufferManager.copy(*beamDeviceTensorPtr, *beamHostTensorPtr);
-    }
-
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
-//! @brief Copy logits from generation phase under streaming mode.
-void copyStreamingGenerationLogits(BufferManager const& bufferManager, LlmRequest& llmReq)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    // If llmRequest is streaming, directly copy to host.
-    // Only one token's logits needs to be copied each time.
-    TLLM_CHECK(llmReq.getGenerationLogitsFragmentsSize() == 1);
-
-    SizeType32 numGenerationToken = llmReq.getMaxBeamNumTokens() - llmReq.mPromptLen;
-    TensorPtr const& generationLogitsHost
-        = llmReq.getGenerationLogitsHost(); // [mMaxNewTokens (or 1), beamWidth, vocabSizePadded]
-
-    TensorPtr hostTensorPtr
-        = ITensor::slice(generationLogitsHost, numGenerationToken, 1); // [1, beamWidth, vocabSizePadded]
-    TensorPtr deviceTensorPtr = *(llmReq.getGenerationLogitsFragments().begin());
-
-    bufferManager.copy(*deviceTensorPtr, *hostTensorPtr);
-    llmReq.clearGenerationLogitsFragments();
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
-void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
-    kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    TLLM_CHECK(kvCacheManagerPtr);
-    auto& kvCacheManager = *kvCacheManagerPtr;
-
-    for (auto const& llmReq : scheduledRequests.contextRequests)
-    {
-        if (llmReq->isFirstContextChunk())
-        {
-            // Get slot of the current sequence in the KV cache
-            auto const seqSlot = llmReq->mSeqSlot.value();
-            auto const promptLen = llmReq->mPromptLen;
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-            auto const draftLength = llmReq->getNumDraftTokens();
-
-            // Allocate/Reuse KV cache
-            kvCacheManager.addSequence(seqSlot, promptLen, reqBeamWidth, llmReq);
-
-            // Allocate more KV cache for speculative decoding
-            if (draftLength > 0)
-            {
-                for (SizeType32 di = 0; di < draftLength; ++di)
-                {
-                    kvCacheManager.addToken(seqSlot);
-                }
-            }
-
-            if (crossKvCacheManagerPtr != nullptr)
-            {
-                crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
-            }
-
-            auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
-            TLLM_CHECK(prepopulatedPromptLen < promptLen);
-
-            if (prepopulatedPromptLen > 0)
-            {
-                // Currently, the runtime process is to apply for cache first and then determine prepopulation.
-                // Use the prepopulated length to advance the context position and decrease chunk size if necessary.
-                if (llmReq->isFullContextRequest())
-                {
-                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
-                    llmReq->setContextChunkSize(promptLen);
-                }
-                else
-                {
-                    auto chunkSize = llmReq->getContextChunkSize();
-                    if (prepopulatedPromptLen + chunkSize < promptLen)
-                    {
-                        // make sure to end at block boundary after current chunk
-                        auto const flooredEndPosition = (prepopulatedPromptLen + chunkSize)
-                            / kvCacheManager.getTokensPerBlock() * kvCacheManager.getTokensPerBlock();
-                        chunkSize = flooredEndPosition - prepopulatedPromptLen;
-                        TLLM_CHECK(chunkSize <= llmReq->getContextChunkSize());
-                    }
-                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
-                    llmReq->setContextChunkSize(chunkSize);
-                }
-                if (!llmReq->isLastContextChunk())
-                {
-                    TLLM_CHECK_WITH_INFO((llmReq->getContextCurrentPosition() + llmReq->getContextChunkSize())
-                                % kvCacheManager.getTokensPerBlock()
-                            == 0,
-                        "To prevent cache fragmentation, the context position after current chunk should be divisible "
-                        "by the number of tokens per block, except for the last chunk.");
-                }
-            }
-        }
-    }
-
-    for (auto const& llmReq : scheduledRequests.generationRequests)
-    {
-        // Get slot of the current sequence in the KV cache
-        auto const seqSlot = llmReq->mSeqSlot.value();
-        auto const draftLength = llmReq->getNumDraftTokens();
-
-        for (SizeType32 di = 0; di < draftLength + 1; ++di)
-        {
-            kvCacheManager.addToken(seqSlot);
-        }
-    }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
-} // namespace
 
 bool TrtGptModelInflightBatching::optionalParamsAreValid(
     ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
@@ -264,7 +75,7 @@ bool TrtGptModelInflightBatching::optionalParamsAreValid(
     return true;
 }
 
-TrtGptModelOptionalParams const TrtGptModelInflightBatching::fixOptionalParams(
+TrtGptModelOptionalParams TrtGptModelInflightBatching::fixOptionalParams(
     ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
 {
     // Make sure logic in this function matches optionalParamsAreValid
@@ -366,12 +177,19 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
     if (modelConfig.getManageWeightsType() != ModelConfig::ManageWeightsType::kDisabled)
     {
-        auto const enginePath = rawEngine.getPathOpt();
-        TLLM_CHECK_WITH_INFO(enginePath.has_value(), "Engine path is not set.");
-        auto weightPath = enginePath->parent_path()
-            / ("rank" + std::to_string(worldConfig.getLocalRank()) + "_managed_weights.safetensors");
-        mRuntime->loadManagedWeights(weightPath.string());
+        mRuntime->loadManagedWeights(rawEngine, worldConfig.getLocalRank());
     }
+
+    if (mModelConfig.useLoraPlugin())
+    {
+        mPeftCacheManager = std::make_shared<PeftCacheManager>(
+            optionalParams.peftCacheManagerConfig, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
+    }
+    else
+    {
+        mPeftCacheManager = std::make_shared<NoOpPeftCacheManager>();
+    }
+
     if (mModelConfig.isRnnBased())
     {
         createRnnStateManager();
@@ -403,16 +221,6 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
     mSeqSlotManager
         = std::make_shared<SequenceSlotManager>(getMaxNumSequences(), optionalParams.maxSeqIdleMicroseconds);
-
-    if (mModelConfig.useLoraPlugin())
-    {
-        mPeftCacheManager = std::make_shared<PeftCacheManager>(
-            optionalParams.peftCacheManagerConfig, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
-    }
-    else
-    {
-        mPeftCacheManager = std::make_shared<NoOpPeftCacheManager>();
-    }
 
     mMicroBatchScheduledRequests.resize(mNumMicroBatches);
     mDecoderWaitEvents.resize(mNumMicroBatches);
@@ -507,7 +315,7 @@ void TrtGptModelInflightBatching::reshapeKvTensors(KVCacheManager const& kvCache
     }
 }
 
-std::shared_ptr<KVCacheManager> TrtGptModelInflightBatching::createKvCacheManager(
+std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::createKvCacheManager(
     KvCacheConfig const& kvCacheConfig, KvCacheType kvCacheType)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -529,11 +337,6 @@ std::shared_ptr<KVCacheManager> TrtGptModelInflightBatching::createKvCacheManage
     }
     TLLM_CHECK_WITH_INFO(
         getMaxBeamWidth() == 1 || !enableCyclicKvCache, "Can't support cyclic kv cache with beam search.");
-    TLLM_CHECK_WITH_INFO(
-        !(kvCacheConfig.enableBlockReuse && enableCyclicKvCache), "Can't support cyclic kv cache with block reuse.");
-
-    TLLM_CHECK_WITH_INFO(!kvCacheConfig.enableBlockReuse || getMaxSequenceLen() == getMaxAttentionWindow(),
-        "KV cache reuse is currently not supported with cyclic KV cache");
 
     auto const [blocksInPrimaryPool, blocksInSecondaryPool] = KVCacheManager::calculateMaxNumBlocks(
         kvCacheConfig, kvDtype, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
@@ -883,7 +686,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             if (mKvCacheManager)
             {
-                allocateKvCache(currRequests, mKvCacheManager.get(), mCrossKvCacheManager.get());
+                utils::allocateKvCache(currRequests, mKvCacheManager.get(), mCrossKvCacheManager.get());
             }
             mPeftTables.at(mMicroBatchId) = mPeftCacheManager->ensureBatch(currRequests, true);
             executeBatch(currRequests);
@@ -1362,28 +1165,25 @@ void TrtGptModelInflightBatching::assignReqSeqSlots(ScheduledRequests const& sch
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::dumpIOTensors(RequestVector const& contextRequests,
+void TrtGptModelInflightBatching::debugIOTensors(RequestVector const& contextRequests,
     RequestVector const& generationRequests, TensorMap const& inputMap, TensorMap const& outputMap)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    utils::dumpRequestIds(mIterCounter, contextRequests, generationRequests, mWorldConfig, mRuntime);
+    TLLM_CHECK(mDebugConfig);
 
-    if (mDebugConfig->getDebugTensorNames().empty())
+    auto const& manager = mRuntime->getBufferManager();
+    auto requestIds = utils::collectRequestIds(contextRequests, generationRequests);
+
+    if (mDebugConfig->getDebugTensorsMaxIterations() > 0)
     {
-        if (mDebugConfig->getDumpInputTensors())
-        {
-            utils::dumpTensors(mIterCounter, inputMap, mWorldConfig, mRuntime);
-        }
-        if (mDebugConfig->getDumpOutputTensors())
-        {
-            utils::dumpTensors(mIterCounter, outputMap, mWorldConfig, mRuntime);
-        }
+        mLastIterationDebugTensors.clear();
+        mLastIterationDebugTensors = utils::storeIOTensors(*mDebugConfig, requestIds, inputMap, outputMap, manager);
     }
     else
     {
-        utils::dumpDebugTensors(
-            mIterCounter, mDebugConfig->getDebugTensorNames(), inputMap, outputMap, mWorldConfig, mRuntime);
+        utils::dumpIOTensors(*mDebugConfig, mIterCounter, requestIds, inputMap, outputMap, mWorldConfig, manager);
     }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -1418,7 +1218,7 @@ void TrtGptModelInflightBatching::executeStep(
 
     if (mDebugConfig)
     {
-        dumpIOTensors(contextRequests, generationRequests, inputMap, outputMap);
+        debugIOTensors(contextRequests, generationRequests, inputMap, outputMap);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -1544,7 +1344,8 @@ void TrtGptModelInflightBatching::postProcessRequest(
         auto const& genRuntimeBuffers = *mBuffers.at(genBufferId);
 
         auto constexpr beforeDecoder = false;
-        copyGenerationLogits(genRuntimeBuffers, bufferManager, llmReq, batchIdx, beforeDecoder, numDroppedTokens);
+        utils::copyGenerationLogits(
+            genRuntimeBuffers, bufferManager, llmReq, batchIdx, beforeDecoder, numDroppedTokens);
 
         bufferManager.getStream().synchronize();
     }
@@ -1775,7 +1576,7 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
         if (mModelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
             auto& medusaLogitsHeads = mDecoderBuffers->draftBuffers.predictedDraftLogits.at(seqSlot);
-            setupMedusaLogits(medusaLogitsHeads, contextRuntimeBuffers.medusaBuffers->medusaLogitsDevice,
+            utils::setupMedusaLogits(medusaLogitsHeads, contextRuntimeBuffers.medusaBuffers->medusaLogitsDevice,
                 mModelConfig.getSpeculativeDecodingModule().getMaxDraftPathLen(), logitsIndex - numDecoderLogits,
                 numDecoderLogits);
         }
@@ -1784,7 +1585,7 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
         // save the accepted token logits from target model
         if (llmReq->getReturnGenerationLogits())
         {
-            copyLastContextLogits(logitsView, *llmReq, manager);
+            utils::copyLastContextLogits(logitsView, *llmReq, manager);
         }
 
         TLLM_CHECK_DEBUG_WITH_INFO(
@@ -1857,19 +1658,19 @@ TrtGptModelInflightBatching::TokenPtr TrtGptModelInflightBatching::decoderStepAs
             TLLM_CHECK(llmReq->getGenerationLogitsFragmentsSize() <= GENERATION_LOGITS_BUFFER_LENGTH);
             if (llmReq->isStreaming())
             {
-                copyStreamingGenerationLogits(manager, *llmReq);
+                utils::copyStreamingGenerationLogits(manager, *llmReq);
             }
             // Copy back to host for every GENERATION_LOGITS_BUFFER_LENGTH steps to mitigate GPU memory pressure
             else if (llmReq->getGenerationLogitsFragmentsSize() == GENERATION_LOGITS_BUFFER_LENGTH)
             {
                 auto constexpr beforeDecoder = true;
-                copyGenerationLogits(genRuntimeBuffers, manager, *llmReq, batchIdx, beforeDecoder);
+                utils::copyGenerationLogits(genRuntimeBuffers, manager, *llmReq, batchIdx, beforeDecoder);
             }
         }
         if (mModelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
             auto& medusaLogitsHeads = mDecoderBuffers->draftBuffers.predictedDraftLogits.at(seqSlot);
-            setupMedusaLogits(medusaLogitsHeads, genRuntimeBuffers.medusaBuffers->medusaLogitsDevice,
+            utils::setupMedusaLogits(medusaLogitsHeads, genRuntimeBuffers.medusaBuffers->medusaLogitsDevice,
                 mModelConfig.getSpeculativeDecodingModule().getMaxDraftPathLen(), logitsIndex, draftLength);
         }
         logitsIndex += numLogits;
@@ -2469,6 +2270,19 @@ void TrtGptModelInflightBatching::getCurrentRequestStats(executor::RequestStatsP
             = mLastIterationStatsIFB.scheduledRequests.count(static_cast<RequestIdType>(requestStat.id));
         requestStat.paused = mLastIterationStatsIFB.pausedRequests.count(static_cast<RequestIdType>(requestStat.id));
     }
+}
+
+executor::DebugTensorsPerIteration TrtGptModelInflightBatching::getCurrentDebugTensors() const
+{
+    executor::DebugTensorsPerIteration debugTensors;
+    debugTensors.iter = mIterCounter;
+
+    for (auto const& [name, tensor] : mLastIterationDebugTensors)
+    {
+        debugTensors.debugTensors.emplace(name, executor::detail::ofITensor(tensor));
+    }
+
+    return debugTensors;
 }
 
 void TrtGptModelInflightBatching::initDataTransceiver(KVCacheManager* cacheManager)

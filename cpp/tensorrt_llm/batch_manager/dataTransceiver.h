@@ -14,6 +14,7 @@
 #include <future>
 
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/executor/contextPhaseState.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -33,6 +34,9 @@ public:
     /// @param dstConfig Target data arrangement.
     /// @return Whether the sender is applicable to the source and target.
     [[nodiscard]] virtual bool inquireSupport(TConfig const& selfconfig, TConfig const& dstConfig) const = 0;
+
+    /// @brief Destructor.
+    virtual ~IOFormatter() = default;
 };
 
 // Operators required for data transmission in specific communication protocols.
@@ -47,6 +51,11 @@ public:
     /// @param llmRequest The request object to which the data belongs.
     virtual void sendSync(LlmRequest const& llmRequest) = 0;
 
+    /// @brief Return the internal communicator status.
+    /// @return The communicator status.
+    [[nodiscard]] virtual executor::kv_cache::CommState const& getCommState() const = 0;
+
+    /// @brief Destructor.
     virtual ~DataSender() = default;
 };
 
@@ -62,6 +71,7 @@ public:
     /// @param llmRequest The request object to which the data belongs.
     virtual void receiveSync(LlmRequest const& llmRequest) = 0;
 
+    /// @brief Destructor.
     virtual ~DataReceiver() = default;
 };
 
@@ -77,6 +87,10 @@ public:
     /// should remain valid until future synchronization.
     /// @return Once the data is fully sent, the future object will become valid.
     [[nodiscard]] std::future<void> respondAndSendAsync(LlmRequest const& llmRequest) const;
+
+    /// @brief Return the internal communicator status.
+    /// @return The communicator status.
+    [[nodiscard]] executor::kv_cache::CommState const& getCommState() const;
 
     /// @brief Destructor.
     ~DataResponder();

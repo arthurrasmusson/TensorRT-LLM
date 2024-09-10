@@ -51,10 +51,10 @@ auto const DATA_PATH = TEST_RESOURCE_PATH / "data";
 auto constexpr GPT_MODEL_DIR = "gpt2";
 auto constexpr GPTJ_MODEL_DIR = "gpt-j-6b";
 auto constexpr LLAMA_MODEL_DIR = "llama-7b-hf";
-auto constexpr MEDUSA_MODEL_DIR = "vicuna-7b-v1.3";
+auto constexpr MEDUSA_MODEL_DIR = "vicuna-7b-medusa";
 auto constexpr MAMBA_MODEL_DIR = "mamba-2.8b-hf";
 auto constexpr RECURRENTGEMMA_MODEL_DIR = "recurrentgemma-2b";
-auto constexpr EXPLICIT_DRAFT_MODEL_DIR = "vicuna_redrafter";
+auto constexpr EXPLICIT_DRAFT_MODEL_DIR = "vicuna-7b-redrafter";
 auto constexpr CHATGLM_MODEL_DIR = "chatglm-6b";
 auto constexpr GLM_MODEL_DIR = "glm-10b";
 
@@ -1516,8 +1516,7 @@ INSTANTIATE_TEST_SUITE_P(DISABLED_LlamaLookaheadDecodingTests, ParamTest,
 
     generateTestName);
 
-// TODO: enable after Drafter checkpoint is public
-INSTANTIATE_TEST_SUITE_P(DISABLED_ExplicitDraftTokensDecodingTests, ParamTest,
+INSTANTIATE_TEST_SUITE_P(ExplicitDraftTokensDecodingTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{EXPLICIT_DRAFT_MODEL_DIR, {2, 2}}),
         testing::Values(
             //
@@ -1526,6 +1525,7 @@ INSTANTIATE_TEST_SUITE_P(DISABLED_ExplicitDraftTokensDecodingTests, ParamTest,
                 .usePackedInput()
                 .setKVCacheType(KVCacheType::kPAGED)
                 .useExplicitDraftTokensDecoding()
+                .setMaxOutputLength(128)
                 .setBatchSizes({8})),
         testing::Values(TrtGptModelType::InflightFusedBatching), testing::Values(TrtGptModelIfbTestType::BULK),
         testing::Values(BeamConfig{1, {1}}), // beamConfig

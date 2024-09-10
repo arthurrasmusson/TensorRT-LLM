@@ -92,8 +92,8 @@ public:
     }
 
     void getCurrentIterationStats(executor::IterationStats& stats) const override;
-
     void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
+    [[nodiscard]] executor::DebugTensorsPerIteration getCurrentDebugTensors() const override;
 
     void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched) override;
     void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) override;

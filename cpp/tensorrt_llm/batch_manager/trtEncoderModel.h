@@ -97,6 +97,7 @@ public:
 
     void getCurrentIterationStats(executor::IterationStats& stats) const override;
     void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
+    [[nodiscard]] executor::DebugTensorsPerIteration getCurrentDebugTensors() const override;
 
     void setLayerProfiler() override;
     std::string getLayerProfileInfo() const override;

@@ -81,7 +81,7 @@ public:
     Impl(BufferView const& engineBufferView, std::string const& jsonConfigStr,
         std::optional<BufferView> const& encoderEngineBufferView,
         std::optional<std::string> const& encoderJsonConfigStr, [[maybe_unused]] ModelType modelType,
-        ExecutorConfig const& executorConfig);
+        ExecutorConfig const& executorConfig, std::optional<std::map<std::string, Tensor>> const& managedWeightsOpt);
 
     Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr<Model>> encoderModel,
         ExecutorConfig const& executorConfig);
@@ -112,8 +112,8 @@ public:
     void shutdown();
 
     std::deque<IterationStats> getLatestIterationStats();
-
     std::deque<RequestStatsPerIteration> getLatestRequestStats();
+    std::deque<DebugTensorsPerIteration> getLatestDebugTensors();
 
     bool canEnqueueRequests() const;
 
@@ -126,7 +126,8 @@ private:
     void initialize(ExecutorConfig const& executorConfig);
 
     void loadModel(std::optional<std::filesystem::path> const& modelPath, std::optional<BufferView> const& engineBuffer,
-        runtime::GptJsonConfig const& jsonConfig, ExecutorConfig const& executorConfig, bool isEncoder);
+        runtime::GptJsonConfig const& jsonConfig, ExecutorConfig const& executorConfig, bool isEncoder,
+        std::optional<std::map<std::string, Tensor>> const& managedWeightsOpt);
 
     static std::shared_ptr<Model> createModel(runtime::RawEngine const& rawEngine,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
@@ -167,6 +168,8 @@ private:
 
     void forwardAsync(RequestList& activeRequests);
 
+    void prepRequestsForEncoderSkip(RequestList& activeRequests);
+
     void terminateActiveRequests(RequestList& activeRequests, std::string const& err);
 
     IterationStats getCurrentIterationStats(RequestList const& activeRequests, double iterLatencyMS,
@@ -179,6 +182,8 @@ private:
     RequestStatsPerIteration getCurrentRequestStats(
         RequestList const& activeRequests, RequestList const& finishedRequests);
     void updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests);
+
+    void appendCurrentDebugTensors();
 
     void terminateCancelledRequests(RequestList& activeRequests);
 
@@ -241,6 +246,8 @@ private:
     // memory usage to stores request ID intervals rather than individual request ID numbers.
     IntervalSet<IdType> mTerminatedReqIds;
 
+    std::unordered_map<IdType, std::vector<IdType>> mChildReqIdsMap;
+
     // Iteration stats
     IterationType mIterStatsMaxIterations;
     std::mutex mIterStatsMtx;
@@ -250,6 +257,11 @@ private:
     IterationType mRequestStatsMaxIterations;
     std::mutex mRequestStatsMtx;
     std::deque<RequestStatsPerIteration> mRequestStats;
+
+    // Debug
+    IterationType mDebugTensorsMaxIterations;
+    std::mutex mDebugTensorsMtx;
+    std::deque<DebugTensorsPerIteration> mDebugTensors;
 
     IdType mLastReqId = 1;
 

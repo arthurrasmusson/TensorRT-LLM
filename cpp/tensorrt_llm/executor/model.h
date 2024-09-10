@@ -71,6 +71,8 @@ public:
     /// @param stats The request stats to be updated
     virtual void getCurrentRequestStats(RequestStatsPerIteration& stats) const = 0;
 
+    [[nodiscard]] virtual DebugTensorsPerIteration getCurrentDebugTensors() const = 0;
+
     using LogitsPostProcessorBatched = std::function<void(std::vector<batch_manager::LlmRequest::RequestIdType> const&,
         std::vector<batch_manager::LlmRequest::TensorPtr>&,
         std::vector<std::reference_wrapper<batch_manager::LlmRequest::BeamTokens const>> const&,

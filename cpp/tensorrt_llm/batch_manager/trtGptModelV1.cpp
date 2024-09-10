@@ -639,6 +639,16 @@ void TrtGptModelV1::getCurrentRequestStats(executor::RequestStatsPerIteration& s
     }
 }
 
+executor::DebugTensorsPerIteration TrtGptModelV1::getCurrentDebugTensors() const
+{
+    executor::DebugTensorsPerIteration debugTensors;
+    debugTensors.iter = mIterCounter;
+
+    TLLM_LOG_WARNING("TrtGptModelV1 doesn't support getting debug tensors.");
+
+    return debugTensors;
+}
+
 void TrtGptModelV1::setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched)
 {
     TLLM_CHECK_WITH_INFO(

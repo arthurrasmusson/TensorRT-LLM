@@ -28,6 +28,7 @@ std::vector<char> tensorrt_llm::executor::RequestWithId::serializeReqWithIds(
     {
         totalSize += su::serializedSize(reqWithId.id);
         totalSize += su::serializedSize(reqWithId.req);
+        totalSize += su::serializedSize(reqWithId.childReqIds);
     }
 
     std::vector<char> buffer(totalSize);
@@ -40,6 +41,7 @@ std::vector<char> tensorrt_llm::executor::RequestWithId::serializeReqWithIds(
     {
         su::serialize(reqWithId.id, ostream);
         su::serialize(reqWithId.req, ostream);
+        su::serialize(reqWithId.childReqIds, ostream);
     }
     return buffer;
 }
@@ -49,11 +51,13 @@ std::vector<RequestWithId> tensorrt_llm::executor::RequestWithId::deserializeReq
     std::vector<RequestWithId> reqWithIds;
     su::VectorWrapBuf<char> strbuf{buffer};
     std::istream istream{&strbuf};
-    auto numReq = su::deserialize<std::int64_t>(istream);
-    for (int64_t req = 0; req < numReq; ++req)
+    auto numReq = su::deserialize<size_t>(istream);
+    for (size_t req = 0; req < numReq; ++req)
     {
-        auto const id = su::deserialize<std::uint64_t>(istream);
-        reqWithIds.emplace_back(RequestWithId{Serialization::deserializeRequest(istream), id});
+        auto const id = su::deserialize<size_t>(istream);
+        auto const request = Serialization::deserializeRequest(istream);
+        auto const childReqIds = su::deserialize<std::vector<IdType>>(istream);
+        reqWithIds.emplace_back(RequestWithId{request, id, childReqIds});
     }
     return reqWithIds;
 }

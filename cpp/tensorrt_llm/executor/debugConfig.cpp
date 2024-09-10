@@ -17,27 +17,30 @@
 namespace tensorrt_llm::executor
 {
 
-DebugConfig::DebugConfig(bool dumpInputTensors, bool dumpOuputTensors, StringVec debugTensorNames)
-    : mDumpInputTensors{dumpInputTensors}
-    , mDumpOuputTensors{dumpOuputTensors}
+DebugConfig::DebugConfig(
+    bool debugInputTensors, bool debugOutputTensors, StringVec debugTensorNames, SizeType32 debugTensorsMaxIterations)
+    : mDebugInputTensors{debugInputTensors}
+    , mDebugOutputTensors{debugOutputTensors}
     , mDebugTensorNames{std::move(debugTensorNames)}
+    , mDebugTensorsMaxIterations{debugTensorsMaxIterations}
 {
 }
 
 bool DebugConfig::operator==(DebugConfig const& other) const
 {
-    return mDumpInputTensors == other.mDumpInputTensors && mDumpOuputTensors == other.mDumpOuputTensors
-        && mDebugTensorNames == other.mDebugTensorNames;
+    return mDebugInputTensors == other.mDebugInputTensors && mDebugOutputTensors == other.mDebugOutputTensors
+        && mDebugTensorNames == other.mDebugTensorNames
+        && mDebugTensorsMaxIterations == other.mDebugTensorsMaxIterations;
 }
 
-[[nodiscard]] bool DebugConfig::getDumpInputTensors() const
+[[nodiscard]] bool DebugConfig::getDebugInputTensors() const
 {
-    return mDumpInputTensors;
+    return mDebugInputTensors;
 }
 
-[[nodiscard]] bool DebugConfig::getDumpOutputTensors() const
+[[nodiscard]] bool DebugConfig::getDebugOutputTensors() const
 {
-    return mDumpOuputTensors;
+    return mDebugOutputTensors;
 }
 
 [[nodiscard]] DebugConfig::StringVec const& DebugConfig::getDebugTensorNames() const
@@ -45,19 +48,29 @@ bool DebugConfig::operator==(DebugConfig const& other) const
     return mDebugTensorNames;
 }
 
-void DebugConfig::setDumpInputTensors(bool dumpInputTensors)
+[[nodiscard]] SizeType32 DebugConfig::getDebugTensorsMaxIterations() const
 {
-    mDumpInputTensors = dumpInputTensors;
+    return mDebugTensorsMaxIterations;
 }
 
-void DebugConfig::setDumpOuputTensors(bool dumpOuputTensors)
+void DebugConfig::setDebugInputTensors(bool debugInputTensors)
 {
-    mDumpOuputTensors = dumpOuputTensors;
+    mDebugInputTensors = debugInputTensors;
+}
+
+void DebugConfig::setDebugOutputTensors(bool debugOutputTensors)
+{
+    mDebugOutputTensors = debugOutputTensors;
 }
 
 void DebugConfig::setDebugTensorNames(StringVec const& debugTensorNames)
 {
     mDebugTensorNames = debugTensorNames;
+}
+
+void DebugConfig::setDebugTensorsMaxIterations(SizeType32 debugTensorsMaxIterations)
+{
+    mDebugTensorsMaxIterations = debugTensorsMaxIterations;
 }
 
 } // namespace tensorrt_llm::executor

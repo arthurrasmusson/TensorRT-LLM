@@ -28,9 +28,9 @@ Executor::Executor(std::filesystem::path const& encoderModelPath, std::filesyste
 }
 
 Executor::Executor(BufferView const& engineBuffer, std::string const& jsonConfigStr, ModelType modelType,
-    ExecutorConfig const& executorConfig)
+    ExecutorConfig const& executorConfig, std::optional<std::map<std::string, Tensor>> const& managedWeights)
     : mImpl(std::make_unique<Executor::Impl>(
-        engineBuffer, jsonConfigStr, std::nullopt, std::nullopt, modelType, executorConfig))
+        engineBuffer, jsonConfigStr, std::nullopt, std::nullopt, modelType, executorConfig, managedWeights))
 {
 }
 
@@ -38,7 +38,7 @@ Executor::Executor(BufferView const& encoderEngineBuffer, std::string const& enc
     BufferView const& decoderEngineBuffer, std::string const& decoderJsonConfigStr, ModelType modelType,
     ExecutorConfig const& executorConfig)
     : mImpl(std::make_unique<Executor::Impl>(decoderEngineBuffer, decoderJsonConfigStr, encoderEngineBuffer,
-        encoderJsonConfigStr, modelType, executorConfig))
+        encoderJsonConfigStr, modelType, executorConfig, std::nullopt))
 {
 }
 
@@ -105,6 +105,11 @@ std::deque<IterationStats> Executor::getLatestIterationStats()
 std::deque<RequestStatsPerIteration> Executor::getLatestRequestStats()
 {
     return mImpl->getLatestRequestStats();
+}
+
+std::deque<DebugTensorsPerIteration> Executor::getLatestDebugTensors()
+{
+    return mImpl->getLatestDebugTensors();
 }
 
 bool Executor::canEnqueueRequests() const

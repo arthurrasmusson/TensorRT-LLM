@@ -45,9 +45,13 @@ TEST(RequestWithIdTest, serializeDeserialize)
         ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
     request2.setEncoderInputFeatures(encoderInputFeatures);
 
+    auto request3 = Request({37, 19, 87, 29}, 4, false, SamplingConfig(1, 1, 0.9), OutputConfig(false, false));
+    request3.setNumReturnSequences(3);
+
     std::vector<RequestWithId> reqWithIds;
     reqWithIds.emplace_back(RequestWithId{request1, 1});
     reqWithIds.emplace_back(RequestWithId{request2, 2});
+    reqWithIds.emplace_back(RequestWithId{request2, 3, {4, 5}});
 
     auto serialized = RequestWithId::serializeReqWithIds(reqWithIds);
     auto reqWithIdsOut = RequestWithId::deserializeReqWithIds(serialized);
@@ -56,14 +60,20 @@ TEST(RequestWithIdTest, serializeDeserialize)
 
     for (int i = 0; i < reqWithIdsOut.size(); ++i)
     {
-        auto const& reqWithIdOut = reqWithIdsOut.at(i).req;
-        auto const& reqWithId = reqWithIds.at(i).req;
+        auto const& reqWithIdOut = reqWithIdsOut.at(i);
+        auto const& reqWithId = reqWithIds.at(i);
 
-        EXPECT_EQ(reqWithIdOut.getInputTokenIds(), reqWithId.getInputTokenIds());
-        EXPECT_EQ(reqWithIdOut.getMaxTokens(), reqWithId.getMaxTokens());
-        EXPECT_EQ(reqWithIdOut.getSamplingConfig(), reqWithId.getSamplingConfig());
-        EXPECT_EQ(reqWithIdOut.getStopWords(), reqWithId.getStopWords());
-        EXPECT_EQ(reqWithIdOut.getExternalDraftTokensConfig().value().getTokens(),
-            reqWithId.getExternalDraftTokensConfig().value().getTokens());
+        EXPECT_EQ(reqWithIdOut.id, reqWithId.id);
+        EXPECT_EQ(reqWithIdOut.childReqIds, reqWithId.childReqIds);
+
+        auto const& reqOut = reqWithIdOut.req;
+        auto const& req = reqWithId.req;
+        EXPECT_EQ(reqOut.getInputTokenIds(), req.getInputTokenIds());
+        EXPECT_EQ(reqOut.getMaxTokens(), req.getMaxTokens());
+        EXPECT_EQ(reqOut.getSamplingConfig(), req.getSamplingConfig());
+        EXPECT_EQ(reqOut.getNumReturnSequences(), req.getNumReturnSequences());
+        EXPECT_EQ(reqOut.getStopWords(), req.getStopWords());
+        EXPECT_EQ(reqOut.getExternalDraftTokensConfig().value().getTokens(),
+            req.getExternalDraftTokensConfig().value().getTokens());
     }
 }

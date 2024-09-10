@@ -86,6 +86,9 @@ static_assert(hasSerializedSize<SamplingConfig>(size_t()));
 static_assert(hasSerializedSize<OutputConfig>(size_t()));
 static_assert(hasSerializedSize<PromptTuningConfig>(size_t()));
 static_assert(hasSerializedSize<LoraConfig>(size_t()));
+static_assert(hasSerializedSize<kv_cache::CommState>(size_t()));
+static_assert(hasSerializedSize<kv_cache::SocketState>(size_t()));
+static_assert(hasSerializedSize<kv_cache::CacheState>(size_t()));
 static_assert(hasSerializedSize<ContextPhaseState>(size_t()));
 static_assert(hasSerializedSize<ContextPhaseParams>(size_t()));
 static_assert(hasSerializedSize<ExternalDraftTokensConfig>(size_t()));
@@ -181,6 +184,9 @@ static_assert(hasSerialize<PeftCacheConfig>(nullptr));
 static_assert(hasSerialize<DecodingMode>(nullptr));
 static_assert(hasSerialize<LookaheadDecodingConfig>(nullptr));
 static_assert(hasSerialize<DecodingConfig>(nullptr));
+static_assert(hasSerialize<kv_cache::CommState>(nullptr));
+static_assert(hasSerialize<kv_cache::SocketState>(nullptr));
+static_assert(hasSerialize<kv_cache::CacheState>(nullptr));
 static_assert(hasSerialize<ContextPhaseState>(nullptr));
 static_assert(hasSerialize<ContextPhaseParams>(nullptr));
 static_assert(!hasSerialize<std::string>(nullptr));
@@ -296,6 +302,18 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::LoraConfig>::value)
     {
         return Serialization::deserializeLoraConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::CommState>::value)
+    {
+        return Serialization::deserializeCommState(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::SocketState>::value)
+    {
+        return Serialization::deserializeSocketState(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::CacheState>::value)
+    {
+        return Serialization::deserializeCacheState(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::ContextPhaseState>::value)
     {

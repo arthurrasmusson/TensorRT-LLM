@@ -129,8 +129,8 @@ public:
     [[nodiscard]] runtime::BufferManager::CudaStreamPtr getRuntimeStreamPtr() const override;
 
     void getCurrentIterationStats(executor::IterationStats& stats) const override;
-
     void getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const override;
+    [[nodiscard]] executor::DebugTensorsPerIteration getCurrentDebugTensors() const override;
 
     [[nodiscard]] executor::IterationType getIterCounter() const noexcept override
     {
@@ -139,7 +139,7 @@ public:
 
     [[nodiscard]] static bool optionalParamsAreValid(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
-    [[nodiscard]] static TrtGptModelOptionalParams const fixOptionalParams(
+    [[nodiscard]] static TrtGptModelOptionalParams fixOptionalParams(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
     void prepareDistGenInitRequests(RequestList const& activeRequests);
 
@@ -176,8 +176,7 @@ private:
     void executeStep(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
-    //! @brief Dump engine IO tensors.
-    void dumpIOTensors(RequestVector const& contextRequests, RequestVector const& generationRequests,
+    void debugIOTensors(RequestVector const& contextRequests, RequestVector const& generationRequests,
         TensorMap const& inputMap, TensorMap const& outputMap);
 
     void createRuntimeContexts();
@@ -389,6 +388,8 @@ private:
     IterationStatsIFB mLastIterationStatsIFB{-1};
     // Iteration counter used to distinguish debug output
     executor::IterationType mIterCounter{0};
+    // Debug tensors of last itreation
+    TensorMap mLastIterationDebugTensors;
 
     /******************** Cache transceiver ********************/
     std::unique_ptr<DataResponder> mDataResponder;

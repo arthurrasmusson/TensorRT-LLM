@@ -199,63 +199,157 @@ size_t Serialization::serializedSize(LoraConfig const& config)
     return totalSize;
 }
 
-// ContextPhaseState
-ContextPhaseState Serialization::deserializeContextPhaseState(std::istream& is)
+// SocketState
+kv_cache::SocketState Serialization::deserializeSocketState(std::istream& is)
 {
-    auto reqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
-    auto commType = su::deserialize<ContextPhaseState::CommType>(is);
-    if (commType == ContextPhaseState::CommType::MPI)
+    auto port = su::deserialize<decltype(kv_cache::SocketState::mPort)>(is);
+    auto ip = su::deserialize<decltype(kv_cache::SocketState::mIp)>(is);
+    return kv_cache::SocketState{port, std::move(ip)};
+}
+
+void Serialization::serialize(kv_cache::SocketState const& state, std::ostream& os)
+{
+    su::serialize(state.mPort, os);
+    su::serialize(state.mIp, os);
+}
+
+size_t Serialization::serializedSize(kv_cache::SocketState const& state)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.mPort);
+    totalSize += su::serializedSize(state.mIp);
+    return totalSize;
+}
+
+// CommState
+kv_cache::CommState Serialization::deserializeCommState(std::istream& is)
+{
+    using namespace kv_cache;
+    auto index = su::deserialize<std::size_t>(is);
+    constexpr std::size_t mpiIdx{1}, socketIdx{2};
+    static_assert(std::is_same_v<MpiState, std::variant_alternative_t<mpiIdx, decltype(CommState::mState)>>);
+    static_assert(
+        std::is_same_v<std::vector<SocketState>, std::variant_alternative_t<socketIdx, decltype(CommState::mState)>>);
+    if (index == mpiIdx)
     {
-        auto ranks = su::deserialize<decltype(ContextPhaseState::MpiComm::mRanks)>(is);
-        return ContextPhaseState{std::move(reqId), std::move(ranks)};
+        auto ranks = su::deserialize<decltype(MpiState::mRanks)>(is);
+        return CommState{std::move(ranks)};
     }
-    else if (commType == ContextPhaseState::CommType::SOCKET)
+    else if (index == socketIdx)
     {
-        auto port = su::deserialize<decltype(ContextPhaseState::SocketComm::mPort)>(is);
-        auto ip = su::deserialize<decltype(ContextPhaseState::SocketComm::mIp)>(is);
-        return ContextPhaseState{std::move(reqId), port, std::move(ip)};
+        auto state = su::deserialize<std::vector<SocketState>>(is);
+        return CommState{std::move(state)};
     }
-    TLLM_THROW("Unknown context phase state communication type.");
     return {};
 }
 
-void Serialization::serialize(ContextPhaseState const& state, std::ostream& os)
+void Serialization::serialize(kv_cache::CommState const& state, std::ostream& os)
 {
-    su::serialize(state.mReqId, os);
-    su::serialize(state.mCommType, os);
-    if (state.mCommType == ContextPhaseState::CommType::MPI)
+    su::serialize(state.mState.index(), os);
+    if (state.isMpiState())
     {
-        su::serialize(state.getMpiComm().mRanks, os);
+        su::serialize(state.getMpiState().mRanks, os);
     }
-    else if (state.mCommType == ContextPhaseState::CommType::SOCKET)
+    else if (state.isSocketState())
     {
-        su::serialize(state.getSocketComm().mPort, os);
-        su::serialize(state.getSocketComm().mIp, os);
+        su::serialize(state.getSocketState(), os);
     }
     else
     {
         TLLM_THROW("Unknown context phase state communication type.");
     }
+}
+
+size_t Serialization::serializedSize(kv_cache::CommState const& state)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.mState.index());
+    if (state.isMpiState())
+    {
+        totalSize += su::serializedSize(state.getMpiState().mRanks);
+    }
+    else if (state.isSocketState())
+    {
+        totalSize += su::serializedSize(state.getSocketState());
+    }
+    else
+    {
+        TLLM_THROW("Unknown context phase state communication type.");
+    }
+    return totalSize;
+}
+
+// CacheState
+kv_cache::CacheState Serialization::deserializeCacheState(std::istream& is)
+{
+    using CacheState = kv_cache::CacheState;
+    auto nbAttentionLayers = su::deserialize<decltype(CacheState::ModelConfig::mNbAttentionLayers)>(is);
+    auto nbKvHeads = su::deserialize<decltype(CacheState::ModelConfig::mNbKvHeads)>(is);
+    auto sizePerHead = su::deserialize<decltype(CacheState::ModelConfig::mSizePerHead)>(is);
+    auto tokensPerBlock = su::deserialize<decltype(CacheState::ModelConfig::mTokensPerBlock)>(is);
+    auto tensorParallelism = su::deserialize<decltype(CacheState::ParallelConfig::mTensorParallelism)>(is);
+    auto pipelineParallelism = su::deserialize<decltype(CacheState::ParallelConfig::mPipelineParallelism)>(is);
+    auto dataType = su::deserialize<decltype(CacheState::mDataType)>(is);
+
+    return CacheState{
+        nbAttentionLayers, nbKvHeads, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dataType};
+}
+
+void Serialization::serialize(kv_cache::CacheState const& state, std::ostream& os)
+{
+    su::serialize(state.mModelConfig.mNbAttentionLayers, os);
+    su::serialize(state.mModelConfig.mNbKvHeads, os);
+    su::serialize(state.mModelConfig.mSizePerHead, os);
+    su::serialize(state.mModelConfig.mTokensPerBlock, os);
+    su::serialize(state.mParallelConfig.mTensorParallelism, os);
+    su::serialize(state.mParallelConfig.mPipelineParallelism, os);
+    su::serialize(state.mDataType, os);
+}
+
+size_t Serialization::serializedSize(kv_cache::CacheState const& state)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.mModelConfig.mNbAttentionLayers);
+    totalSize += su::serializedSize(state.mModelConfig.mNbKvHeads);
+    totalSize += su::serializedSize(state.mModelConfig.mSizePerHead);
+    totalSize += su::serializedSize(state.mModelConfig.mTokensPerBlock);
+    totalSize += su::serializedSize(state.mParallelConfig.mTensorParallelism);
+    totalSize += su::serializedSize(state.mParallelConfig.mPipelineParallelism);
+    totalSize += su::serializedSize(state.mDataType);
+    return totalSize;
+}
+
+// ContextPhaseState
+ContextPhaseState Serialization::deserializeContextPhaseState(std::istream& is)
+{
+    auto reqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
+    ContextPhaseState state{reqId};
+    auto commState = su::deserialize<decltype(ContextPhaseState::mCommState)>(is);
+    if (commState)
+    {
+        state.setCommState(std::move(commState).value());
+    }
+    auto cacheState = su::deserialize<decltype(ContextPhaseState::mCacheState)>(is);
+    if (cacheState)
+    {
+        state.setCacheState(std::move(cacheState).value());
+    }
+    return state;
+}
+
+void Serialization::serialize(ContextPhaseState const& state, std::ostream& os)
+{
+    su::serialize(state.mReqId, os);
+    su::serialize(state.mCommState, os);
+    su::serialize(state.mCacheState, os);
 }
 
 size_t Serialization::serializedSize(ContextPhaseState const& state)
 {
     size_t totalSize = 0;
     totalSize += su::serializedSize(state.mReqId);
-    totalSize += su::serializedSize(state.mCommType);
-    if (state.mCommType == ContextPhaseState::CommType::MPI)
-    {
-        totalSize += su::serializedSize(state.getMpiComm().mRanks);
-    }
-    else if (state.mCommType == ContextPhaseState::CommType::SOCKET)
-    {
-        totalSize += su::serializedSize(state.getSocketComm().mPort);
-        totalSize += su::serializedSize(state.getSocketComm().mIp);
-    }
-    else
-    {
-        TLLM_THROW("Unknown context phase state communication type.");
-    }
+    totalSize += su::serializedSize(state.mCommState);
+    totalSize += su::serializedSize(state.mCacheState);
     return totalSize;
 }
 
@@ -322,13 +416,14 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
     auto encoderInputFeatures = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
+    auto numReturnSequences = su::deserialize<SizeType32>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
         returnAllGeneratedTokens, priority, requestType, std::move(contextPhaseParams), std::move(encoderInputFeatures),
-        encoderOutputLength);
+        encoderOutputLength, numReturnSequences);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -480,10 +575,13 @@ Result Serialization::deserializeResult(std::istream& is)
     auto encoderOutput = su::deserialize<std::optional<Tensor>>(is);
     auto finishReasons = su::deserialize<std::vector<FinishReason>>(is);
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
+    auto decodingIter = su::deserialize<SizeType32>(is);
+    auto sequenceIndex = su::deserialize<SizeType32>(is);
+    auto isSequenceFinal = su::deserialize<bool>(is);
 
     return Result{isFinal, std::move(outputTokenIds), std::move(cumLogProbs), std::move(logProbs),
         std::move(contextLogits), std::move(generationLogits), std::move(encoderOutput), std::move(finishReasons),
-        std::move(contextPhaseParams)};
+        std::move(contextPhaseParams), decodingIter, sequenceIndex, isSequenceFinal};
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -497,6 +595,9 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.encoderOutput, os);
     su::serialize(result.finishReasons, os);
     su::serialize(result.contextPhaseParams, os);
+    su::serialize(result.decodingIter, os);
+    su::serialize(result.sequenceIndex, os);
+    su::serialize(result.isSequenceFinal, os);
 }
 
 size_t Serialization::serializedSize(Result const& result)
@@ -511,6 +612,9 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.encoderOutput);
     totalSize += su::serializedSize(result.finishReasons);
     totalSize += su::serializedSize(result.contextPhaseParams);
+    totalSize += su::serializedSize(result.decodingIter);
+    totalSize += su::serializedSize(result.sequenceIndex);
+    totalSize += su::serializedSize(result.isSequenceFinal);
     return totalSize;
 }
 
@@ -947,29 +1051,33 @@ size_t Serialization::serializedSize(DecodingConfig const& decodingConfig)
 // DebugConfig
 DebugConfig Serialization::deserializeDebugConfig(std::istream& is)
 {
-    auto dumpInputTensors
-        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDumpInputTensors), DebugConfig>>(is);
-    auto dumpOutputTensors
-        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDumpOutputTensors), DebugConfig>>(is);
+    auto debugInputTensors
+        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugInputTensors), DebugConfig>>(is);
+    auto debugOutputTensors
+        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugOutputTensors), DebugConfig>>(is);
     auto debugTensorNames = su::deserialize<std::remove_cv_t<
         std::remove_reference_t<std::invoke_result_t<decltype(&DebugConfig::getDebugTensorNames), DebugConfig>>>>(is);
+    auto debugTensorsMaxIterations
+        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugTensorsMaxIterations), DebugConfig>>(is);
 
-    return DebugConfig{dumpInputTensors, dumpOutputTensors, debugTensorNames};
+    return DebugConfig{debugInputTensors, debugOutputTensors, debugTensorNames, debugTensorsMaxIterations};
 }
 
 void Serialization::serialize(DebugConfig const& debugConfig, std::ostream& os)
 {
-    su::serialize(debugConfig.getDumpInputTensors(), os);
-    su::serialize(debugConfig.getDumpOutputTensors(), os);
+    su::serialize(debugConfig.getDebugInputTensors(), os);
+    su::serialize(debugConfig.getDebugOutputTensors(), os);
     su::serialize(debugConfig.getDebugTensorNames(), os);
+    su::serialize(debugConfig.getDebugTensorsMaxIterations(), os);
 }
 
 size_t Serialization::serializedSize(DebugConfig const& debugConfig)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(debugConfig.getDumpInputTensors());
-    totalSize += su::serializedSize(debugConfig.getDumpOutputTensors());
+    totalSize += su::serializedSize(debugConfig.getDebugInputTensors());
+    totalSize += su::serializedSize(debugConfig.getDebugOutputTensors());
     totalSize += su::serializedSize(debugConfig.getDebugTensorNames());
+    totalSize += su::serializedSize(debugConfig.getDebugTensorsMaxIterations());
     return totalSize;
 }
 

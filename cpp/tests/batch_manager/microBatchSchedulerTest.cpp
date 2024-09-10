@@ -48,7 +48,8 @@ protected:
         {
             draftTokens = std::make_shared<std::vector<int32_t>>(draftTokensLen, 2);
         }
-        return std::make_shared<LlmRequest>(reqId, maxNewTokens, inputTokens, samplingConfig, /*isStreaming=*/false,
+        return std::make_shared<LlmRequest>(reqId, maxNewTokens, inputTokens, samplingConfig,
+            /*isStreaming=*/false,
             /*endId=*/std::nullopt,
             /*padId=*/std::nullopt, /*embeddingBias=*/std::nullopt,
             /*badWordsList=*/std::nullopt, /*stopWordsList=*/std::nullopt, /*positionIds=*/std::nullopt,

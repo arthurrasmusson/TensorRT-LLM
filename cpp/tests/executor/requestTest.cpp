@@ -172,6 +172,7 @@ TEST(RequestTest, serializeDeserialize)
     EXPECT_EQ(newRequest.getInputTokenIds(), request.getInputTokenIds());
     EXPECT_EQ(newRequest.getMaxTokens(), request.getMaxTokens());
     EXPECT_EQ(newRequest.getStreaming(), request.getStreaming());
+    EXPECT_EQ(newRequest.getNumReturnSequences(), request.getNumReturnSequences());
     EXPECT_EQ(newRequest.getEndId(), request.getEndId());
     EXPECT_EQ(newRequest.getPadId(), request.getPadId());
     EXPECT_EQ(newRequest.getPositionIds(), request.getPositionIds());

@@ -92,6 +92,11 @@ std::string ModelSpec::getSpeculativeDecodingModeString() const
     return "";
 }
 
+std::string ModelSpec::getInputFile() const
+{
+    return mInputFile;
+}
+
 std::string ModelSpec::getModelPath() const
 {
     std::vector<std::string> ret;

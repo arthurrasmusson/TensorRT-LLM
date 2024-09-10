@@ -21,6 +21,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
+#include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/contextPhaseState.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/requestUtils.h"
@@ -31,6 +32,7 @@
 #include "tensorrt_llm/runtime/memoryCounters.h"
 
 #include <cuda_profiler_api.h>
+#include <optional>
 #include <utility>
 
 namespace tensorrt_llm::executor
@@ -162,7 +164,8 @@ std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::
 
 void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& modelPathOpt,
     std::optional<BufferView> const& engineBufferOpt, runtime::GptJsonConfig const& jsonConfig,
-    ExecutorConfig const& executorConfig, bool isEncoder)
+    ExecutorConfig const& executorConfig, bool isEncoder,
+    std::optional<std::map<std::string, Tensor>> const& managedWeightsOpt)
 {
     auto const gpusPerNode = jsonConfig.getGpusPerNode();
     auto const tp = jsonConfig.getTensorParallelism();
@@ -176,9 +179,16 @@ void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& model
         ? runtime::RawEngine(engineBufferOpt.value().data(), engineBufferOpt.value().size())
         : runtime::RawEngine(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
 
-    if (rawEngine.getType() != tensorrt_llm::runtime::RawEngine::FilePath && modelPathOpt.has_value())
+    if (rawEngine.getType() != tensorrt_llm::runtime::RawEngine::FilePath)
     {
-        rawEngine.setPath(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
+        if (modelPathOpt.has_value())
+        {
+            rawEngine.setPath(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
+        }
+        if (managedWeightsOpt.has_value())
+        {
+            rawEngine.setManagedWeightsMap(managedWeightsOpt.value());
+        }
     }
 
     auto const& modelConfig = jsonConfig.getModelConfig();
@@ -208,28 +218,36 @@ Executor::Impl::Impl(std::filesystem::path const& modelPath,
     {
         if (modelType == ModelType::kENCODER_DECODER)
         {
-            TLLM_CHECK(encoderModelPath.has_value());
+            if (encoderModelPath.has_value())
+            {
+                auto const encoderJsonConfig = runtime::GptJsonConfig::parse(encoderModelPath.value() / "config.json");
 
-            auto const encoderJsonConfig = runtime::GptJsonConfig::parse(encoderModelPath.value() / "config.json");
+                auto const encoderMaxInputLen = encoderJsonConfig.getModelConfig().getMaxInputLen();
+                auto const encoderHiddenSize = encoderJsonConfig.getModelConfig().getHiddenSize()
+                    * encoderJsonConfig.getTensorParallelism(); // recover full hidden size
+                // add encoder info to decoder for encoder-decoder models
+                // note: GptJsonConfig can no longer have modelConfig as const member since it must be mutable here
+                decoderJsonConfig.getModelConfigMutable().setMaxEncoderLen(encoderMaxInputLen);
+                decoderJsonConfig.getModelConfigMutable().setEncoderHiddenSize(encoderHiddenSize);
 
-            auto const encoderMaxInputLen = encoderJsonConfig.getModelConfig().getMaxInputLen();
-            auto const encoderHiddenSize = encoderJsonConfig.getModelConfig().getHiddenSize()
-                * encoderJsonConfig.getTensorParallelism(); // recover full hidden size
-            // add encoder info to decoder for encoder-decoder models
-            // note: GptJsonConfig can no longer have modelConfig as const member since it must be mutable here
-            decoderJsonConfig.getModelConfigMutable().setMaxEncoderLen(encoderMaxInputLen);
-            decoderJsonConfig.getModelConfigMutable().setEncoderHiddenSize(encoderHiddenSize);
+                loadModel(
+                    encoderModelPath.value(), std::nullopt, encoderJsonConfig, executorConfig, true, std::nullopt);
+            }
+            else
+            {
 
-            loadModel(encoderModelPath.value(), std::nullopt, encoderJsonConfig, executorConfig, true);
+                TLLM_LOG_WARNING("Encoder model path not provided. Skipping Encoder Run.");
+            }
         }
-        loadModel(modelPath, std::nullopt, decoderJsonConfig, executorConfig, false);
+        loadModel(modelPath, std::nullopt, decoderJsonConfig, executorConfig, false, std::nullopt);
     }
     initialize(executorConfig);
 }
 
 Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& jsonConfigStr,
     std::optional<BufferView> const& encoderEngineBufferView, std::optional<std::string> const& encoderJsonConfigStr,
-    ModelType const modelType, ExecutorConfig const& executorConfig)
+    ModelType const modelType, ExecutorConfig const& executorConfig,
+    std::optional<std::map<std::string, Tensor>> const& managedWeightsOpt)
 {
     auto decoderJsonConfig = runtime::GptJsonConfig::parse(jsonConfigStr);
 
@@ -243,6 +261,8 @@ Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& json
         if (modelType == ModelType::kENCODER_DECODER)
         {
             TLLM_CHECK(encoderEngineBufferView.has_value() && encoderJsonConfigStr.has_value());
+            TLLM_CHECK_WITH_INFO(
+                !managedWeightsOpt.has_value(), "Managed weights are not supported for enc-dec models");
 
             auto const encoderJsonConfig = runtime::GptJsonConfig::parse(encoderJsonConfigStr.value());
 
@@ -254,9 +274,10 @@ Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& json
             decoderJsonConfig.getModelConfigMutable().setMaxEncoderLen(encoderMaxInputLen);
             decoderJsonConfig.getModelConfigMutable().setEncoderHiddenSize(encoderHiddenSize);
 
-            loadModel(std::nullopt, encoderEngineBufferView.value(), encoderJsonConfig, executorConfig, true);
+            loadModel(
+                std::nullopt, encoderEngineBufferView.value(), encoderJsonConfig, executorConfig, true, std::nullopt);
         }
-        loadModel(std::nullopt, engineBufferView, decoderJsonConfig, executorConfig, false);
+        loadModel(std::nullopt, engineBufferView, decoderJsonConfig, executorConfig, false, managedWeightsOpt);
     }
     initialize(executorConfig);
 }
@@ -283,6 +304,10 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     mShutdownCalled = false;
     mIterStatsMaxIterations = executorConfig.getIterStatsMaxIterations();
     mRequestStatsMaxIterations = executorConfig.getRequestStatsMaxIterations();
+    mDebugTensorsMaxIterations
+        = executorConfig.getDebugConfig() ? executorConfig.getDebugConfig()->getDebugTensorsMaxIterations() : 0;
+    TLLM_CHECK_WITH_INFO(mDebugTensorsMaxIterations == 0 || mCommMode == CommunicationMode::kLEADER,
+        "debugTensorsMaxIterations > 0 is only allowed in leader mode.");
     mBatchingType = executorConfig.getBatchingType();
     mIsSchedulerGuaranteedNoEvict = (executorConfig.getSchedulerConfig().getCapacitySchedulerPolicy()
         == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT);
@@ -697,7 +722,20 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
         for (auto& req : requests)
         {
             ids.emplace_back(generateReqId());
-            requestWithIds.emplace_back(RequestWithId{req, ids.back(), now});
+
+            std::vector<IdType> childReqIds;
+            auto numReturnSequences = req.getNumReturnSequences();
+            if (numReturnSequences > 1)
+            {
+                childReqIds.reserve(numReturnSequences - 1);
+                for (int seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
+                {
+                    childReqIds.emplace_back(generateReqId());
+                }
+            }
+            requestWithIds.emplace_back(RequestWithId{req, ids.back(), std::move(childReqIds), now});
+
+            TLLM_LOG_DEBUG("Request ids: %d", ids.back());
         }
     }
 
@@ -708,7 +746,14 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
             if (mMaxQueueSize)
             {
                 auto const maxQueueSize = mMaxQueueSize.value();
-                if (maxQueueSize > 0 && mQueuedRequests.size() >= static_cast<size_t>(maxQueueSize))
+
+                auto totalRequestSize = 0;
+                for (auto&& reqWithId : requestWithIds)
+                {
+                    totalRequestSize += reqWithId.req.getNumReturnSequences();
+                }
+
+                if (maxQueueSize > 0 && mQueuedRequests.size() + totalRequestSize > static_cast<size_t>(maxQueueSize))
                 {
                     TLLM_THROW("Maximum queue size of %d has been reached, please try again later", maxQueueSize);
                 }
@@ -980,6 +1025,22 @@ std::deque<RequestStatsPerIteration> Executor::Impl::getLatestRequestStats()
     return std::exchange(mRequestStats, {});
 }
 
+std::deque<DebugTensorsPerIteration> Executor::Impl::getLatestDebugTensors()
+{
+    TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    if (mCommMode == CommunicationMode::kORCHESTRATOR)
+    {
+        TLLM_LOG_WARNING("getLatestDebugTensors is not supported in ORCHESTRATOR mode yet");
+        return {};
+    }
+    if (mEncoderModel)
+    {
+        TLLM_LOG_WARNING("getLatestDebugTensors is not supported for encoder model yet");
+    }
+    std::scoped_lock<std::mutex> lck(mDebugTensorsMtx);
+    return std::exchange(mDebugTensors, {});
+}
+
 bool Executor::Impl::canEnqueueRequests() const
 {
     return !mShutdownCalled
@@ -1015,8 +1076,13 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
                     mQueuedRequests.pop_front();
                 };
 
-                for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests; ++req)
+                for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests;)
                 {
+                    req += mQueuedRequests.front().req.getNumReturnSequences();
+                    if (req > maxNewRequests)
+                    {
+                        break;
+                    }
                     insertQueuedRequestIntoReqWithIds();
                 }
 
@@ -1092,86 +1158,109 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
             TLLM_CHECK_WITH_INFO(!applyLogitsPostProcessorBatched || mLogitsPostProcessorBatched,
                 "Batched logits post processor is not defined.");
 
-            auto newReq = std::make_shared<batch_manager::LlmRequest>(
+            auto newLlmReq = std::make_shared<batch_manager::LlmRequest>(
                 reqWithId.id, std::move(reqWithId.req), logitsPostProcessor, applyLogitsPostProcessorBatched);
+            auto numReturnSequences = newLlmReq->getNumReturnSequences();
 
-            // If static batching and streaming, disable streaming and exclude input
-            if (mBatchingType == BatchingType::kSTATIC && newReq->isStreaming())
+            if (numReturnSequences > 1)
             {
-                newReq->setStreaming(false);
-                newReq->setExcludeInputFromOutput(true);
+                TLLM_CHECK(reqWithId.childReqIds.size() == static_cast<size_t>(numReturnSequences - 1));
+                mChildReqIdsMap[reqWithId.id] = reqWithId.childReqIds;
             }
 
-            // Validate the request parameters
-            newReq->validate(mModel->getMaxInputLen(), mModel->getMaxSequenceLen(), mModel->getMaxDraftLen(),
-                mEncoderModel ? std::optional<SizeType32>(mEncoderModel->getMaxInputLen()) : std::nullopt,
-                mEnableBlockReuse);
-
-            // When streaming is enabled and scheduling policy permits evict/restart, need to guard against the case
-            // where the sequence is truncated on eviction (to respect maxInputLen limits), resulting in loss of some
-            // tokens that have been streamed out. In this case, resuming generation may result in different completion
-            // for locations whose tokens have already been returned. There is no way to protect against this, so
-            // disallowing.
-            if (newReq->isStreaming() && !mIsSchedulerGuaranteedNoEvict && !mIsChunkedContext)
+            for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
             {
-                auto maxReqSeqLen = newReq->mPromptLen + newReq->mMaxNewTokens;
-                TLLM_CHECK_WITH_INFO(maxReqSeqLen <= mModel->getMaxInputLen(),
-                    "Request sequence length is potentially greater than max input length. This cannot be run unless "
-                    "streaming is disabled, context chunking is enabled or the GUARANTEED_NO_EVICT scheduling policy "
-                    "is used");
-            }
+                auto newReq
+                    = seqIdx == 0 ? newLlmReq : newLlmReq->createChildRequest(reqWithId.childReqIds.at(seqIdx - 1));
 
-            // Create the encoder output tensor
-            if (mEncoderModel)
-            {
-                TLLM_CHECK_WITH_INFO(mModel || (!mModel && newReq->getReturnEncoderOutput()),
-                    "Encoder-Decoder models allow optionally returning encoder output. But if it is Encoder-only "
-                    "models, please make sure returnEncoderOutput is always true.");
-
-                // gpu buffers for passing to the next phase
-                newReq->allocEncoderOutput(mEncoderModel->getBufferManager(), mEncoderModel->getLogitDataType());
-                newReq->allocEncoderHiddenStates(mEncoderModel->getBufferManager(), mEncoderModel->getLogitDataType());
-                // pinned buffers for returning results to host
-                if (newReq->getReturnEncoderOutput())
+                // If static batching and streaming, disable streaming and exclude input
+                if (mBatchingType == BatchingType::kSTATIC && newReq->isStreaming())
                 {
-                    newReq->allocEncoderOutputHost(
-                        mEncoderModel->getHiddenSize() * mEncoderModel->getWorldConfig().getTensorParallelism(),
-                        mEncoderModel->getLogitDataType());
+                    newReq->setStreaming(false);
+                    newReq->setExcludeInputFromOutput(true);
                 }
-            }
 
-            // Create the context logits tensor
-            if (newReq->getReturnContextLogits())
-            {
-                TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeContextLogits(),
-                    "Return context logit need to build engine with gather_context_logits");
-                newReq->allocContextLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
-            }
+                // Validate the request parameters
+                newReq->validate(mModel->getMaxInputLen(), mModel->getMaxSequenceLen(), mModel->getMaxDraftLen(),
+                    mEncoderModel ? std::optional<SizeType32>(mEncoderModel->getMaxInputLen()) : std::nullopt,
+                    mEnableBlockReuse);
 
-            // Create the generation logits tensor
-            if (newReq->getReturnGenerationLogits())
-            {
-                TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeGenerationLogits(),
-                    "Return generation logit need to build engine with gather_generation_logits");
-
-                if (mModel->getModelConfig().getSpeculativeDecodingMode().isDraftTokensExternal())
+                // When streaming is enabled and scheduling policy permits evict/restart, need to guard against the case
+                // where the sequence is truncated on eviction (to respect maxInputLen limits), resulting in loss of
+                // some tokens that have been streamed out. In this case, resuming generation may result in different
+                // completion for locations whose tokens have already been returned. There is no way to protect against
+                // this, so disallowing.
+                if (newReq->isStreaming() && !mIsSchedulerGuaranteedNoEvict && !mIsChunkedContext)
                 {
-                    newReq->allocTargetModelAcceptedTokenLogitsHost(
-                        mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                    auto maxReqSeqLen = newReq->mPromptLen + newReq->mMaxNewTokens;
+                    TLLM_CHECK_WITH_INFO(maxReqSeqLen <= mModel->getMaxInputLen(),
+                        "Request sequence length is potentially greater than max input length. This cannot be run "
+                        "unless streaming is disabled, context chunking is enabled or the GUARANTEED_NO_EVICT "
+                        "scheduling policy is used");
                 }
-                else
-                {
-                    newReq->allocGenerationLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
-                }
-            }
 
-            mModel->updatePeftCache(newReq);
+                // Create the encoder output tensor
+                if (mEncoderModel)
+                {
+                    TLLM_CHECK_WITH_INFO(mModel || (!mModel && newReq->getReturnEncoderOutput()),
+                        "Encoder-Decoder models allow optionally returning encoder output. But if it is Encoder-only "
+                        "models, please make sure returnEncoderOutput is always true.");
+
+                    // gpu buffers for passing to the next phase
+                    newReq->allocEncoderOutput(mEncoderModel->getBufferManager(), mEncoderModel->getLogitDataType());
+                    newReq->allocEncoderHiddenStates(
+                        mEncoderModel->getBufferManager(), mEncoderModel->getLogitDataType());
+                    // pinned buffers for returning results to host
+                    if (newReq->getReturnEncoderOutput())
+                    {
+                        newReq->allocEncoderOutputHost(
+                            mEncoderModel->getHiddenSize() * mEncoderModel->getWorldConfig().getTensorParallelism(),
+                            mEncoderModel->getLogitDataType());
+                    }
+                }
+
+                if (!mEncoderModel && newReq->getEncoderInputFeatures())
+                {
+                    TLLM_LOG_INFO("Allocating buffers for encoder output");
+                    // gpu buffers for passing to the next phase
+                    newReq->allocEncoderOutput(mModel->getBufferManager(), mModel->getLogitDataType());
+                    newReq->allocEncoderHiddenStates(mModel->getBufferManager(), mModel->getLogitDataType());
+                }
+
+                // Create the context logits tensor
+                if (newReq->getReturnContextLogits())
+                {
+                    TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeContextLogits(),
+                        "Return context logit need to build engine with gather_context_logits");
+                    newReq->allocContextLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                }
+
+                // Create the generation logits tensor
+                if (newReq->getReturnGenerationLogits())
+                {
+                    TLLM_CHECK_WITH_INFO(mModel->getModelConfig().computeGenerationLogits(),
+                        "Return generation logit need to build engine with gather_generation_logits");
+
+                    if (mModel->getModelConfig().getSpeculativeDecodingMode().isDraftTokensExternal())
+                    {
+                        newReq->allocTargetModelAcceptedTokenLogitsHost(
+                            mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                    }
+                    else
+                    {
+                        newReq->allocGenerationLogitsHost(mModel->getVocabSizePadded(), mModel->getLogitDataType());
+                    }
+                }
+
+                mModel->updatePeftCache(newReq);
+
+                newRequests.emplace_back(std::move(newReq));
+            }
 
             auto queuedEnd = std::chrono::steady_clock::now();
             auto reqQueueLatencyMS
                 = std::chrono::duration<double, std::milli>(queuedEnd - reqWithId.queuedStart).count();
             newActiveRequestsQueueLatencyMS += reqQueueLatencyMS;
-            newRequests.emplace_back(std::move(newReq));
         }
         catch (runtime::LoraExpectedException const& e)
         {
@@ -1228,11 +1317,30 @@ void Executor::Impl::forwardSync(RequestList& activeRequests)
     }
 }
 
+// The function is used to change the state of a request to context_init from encoder_init for enc-dec model whose
+// encoder is skipped. The encoder output is populated accordingly with input features given through model executor of
+// decoder.
+void Executor::Impl::prepRequestsForEncoderSkip(RequestList& activeRequests)
+{
+
+    for (auto& req : activeRequests)
+    {
+
+        if (req->mState == batch_manager::REQUEST_STATE_ENCODER_INIT && req->getEncoderInputFeatures())
+        {
+            TLLM_LOG_INFO("Changing state of request and setting encoder output to skip encoder run");
+            req->mState = batch_manager::REQUEST_STATE_CONTEXT_INIT;
+            req->setEncoderOutput(req->getEncoderInputFeatures());
+        }
+    }
+}
+
 void Executor::Impl::forwardAsync(RequestList& activeRequests)
 {
     try
     {
         TLLM_LOG_DEBUG("num active requests in scope: %d", activeRequests.size());
+
         if (mEncoderModel)
         {
             mEncoderModel->forwardAsync(activeRequests);
@@ -1242,6 +1350,12 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
             encoderStream.record(encoderFinished);
             decoderStream.wait(encoderFinished);
         }
+
+        if (!mEncoderModel)
+        {
+            prepRequestsForEncoderSkip(activeRequests);
+        }
+
         mModel->forwardAsync(activeRequests);
     }
     catch (std::exception const& e)
@@ -1391,6 +1505,19 @@ void Executor::Impl::updateRequestStats(RequestList const& activeRequests, Reque
     }
 }
 
+void Executor::Impl::appendCurrentDebugTensors()
+{
+    if (mDebugTensorsMaxIterations > 0)
+    {
+        std::scoped_lock<std::mutex> lck(mDebugTensorsMtx);
+        if (mDebugTensors.size() >= mDebugTensorsMaxIterations)
+        {
+            mDebugTensors.pop_front();
+        }
+        mDebugTensors.emplace_back(mModel->getCurrentDebugTensors());
+    }
+}
+
 void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
 {
     auto const broadcastCancelledRequests = [this, &activeRequests]
@@ -1517,8 +1644,9 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
         bool requestDone = false;
         if (llmReq->isContextOnlyRequest())
         {
-            auto contextState = std::make_unique<executor::ContextPhaseState>(llmReq->mRequestId,
-                std::vector<SizeType32>{tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session())});
+            auto contextState = std::make_unique<executor::ContextPhaseState>(llmReq->mRequestId);
+            contextState->setCommState(kv_cache::CommState{
+                std::vector<SizeType32>{tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session())}});
             // Since `LlmRequest` is a template class, the context state needs to be prepared in the external
             // implementation.
             llmReq->setContextPhaseParams(executor::ContextPhaseParams{{}, contextState.release()});
@@ -1526,7 +1654,7 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
         auto response = llmReq->createResponse();
         if (response)
         {
-            requestDone = response.value().getResult().isFinal;
+            requestDone = response.value().getResult().isSequenceFinal;
             newResponses.emplace_back(std::move(response.value()));
             reqIds.push_back(reqId);
         }
@@ -1557,6 +1685,8 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
 
 void Executor::Impl::executionLoop()
 {
+    tensorrt_llm::common::setThreadName("executionLoop");
+
     auto const [profileIterIdxs, stopIterIdxs] = tensorrt_llm::common::populateIterationIndexes(
         kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
 
@@ -1618,6 +1748,7 @@ void Executor::Impl::executionLoop()
             updateIterationStats(activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS,
                 static_cast<SizeType32>(finishedRequests.size()));
             updateRequestStats(activeRequests, finishedRequests);
+            appendCurrentDebugTensors();
         }
     }
 
@@ -1661,6 +1792,8 @@ void Executor::Impl::enqueueNewResponses(std::vector<Response>&& newResponses)
 // Orchestrator thread sending new requests to leader of the model
 void Executor::Impl::orchSendReqThread()
 {
+    tensorrt_llm::common::setThreadName("orchSendReq");
+
     while (true)
     {
         auto message = mSendQueue.pop();
@@ -1717,6 +1850,8 @@ void Executor::Impl::orchSendReqThread()
 // Leader thread receiving new requests from orchestrator
 void Executor::Impl::leaderRecvReqThread()
 {
+    tensorrt_llm::common::setThreadName("leaderRecvReq");
+
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
@@ -1806,6 +1941,8 @@ void Executor::Impl::leaderRecvReqThread()
 // Leader thread sending responses to orchestrator
 void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTag, int32_t dataTag)
 {
+    tensorrt_llm::common::setThreadName("leaderSend");
+
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
@@ -1843,6 +1980,8 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
 
 void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
 {
+    tensorrt_llm::common::setThreadName("orchRecv");
+
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
@@ -1916,6 +2055,14 @@ void Executor::Impl::addTerminatedReqId(std::vector<Response> const& responses, 
         if (response.hasError() || (!response.hasError() && response.getResult().isFinal))
         {
             mTerminatedReqIds.insert(reqId);
+            if (mChildReqIdsMap.find(reqId) != mChildReqIdsMap.end())
+            {
+                for (auto childReqId : mChildReqIdsMap.at(reqId))
+                {
+                    mTerminatedReqIds.insert(childReqId);
+                }
+                mChildReqIdsMap.erase(reqId);
+            }
         }
     }
 }

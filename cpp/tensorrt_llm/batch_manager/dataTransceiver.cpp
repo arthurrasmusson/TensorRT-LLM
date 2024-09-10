@@ -11,6 +11,7 @@
  */
 
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
+#include "tensorrt_llm/common/utils.h"
 #include <map>
 
 namespace tensorrt_llm::batch_manager
@@ -46,6 +47,11 @@ public:
         return future;
     }
 
+    [[nodiscard]] executor::kv_cache::CommState const& getCommState() const
+    {
+        return mSender->getCommState();
+    }
+
     ~Impl()
     {
         terminate();
@@ -62,6 +68,7 @@ private:
     {
         try
         {
+            tensorrt_llm::common::setThreadName("dataTransResp");
             TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
             while (!mTerminate || !mAnyReady)
             {
@@ -189,6 +196,11 @@ DataResponder::DataResponder(std::unique_ptr<DataSender> sender)
 std::future<void> DataResponder::respondAndSendAsync(LlmRequest const& llmRequest) const
 {
     return mImpl->respondAndSendAsync(llmRequest);
+}
+
+executor::kv_cache::CommState const& DataResponder::getCommState() const
+{
+    return mImpl->getCommState();
 }
 
 DataResponder::~DataResponder() = default;

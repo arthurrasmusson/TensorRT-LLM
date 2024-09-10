@@ -76,6 +76,9 @@ void compareResult(texec::Result res, texec::Result res2)
     EXPECT_EQ(res.cumLogProbs, res2.cumLogProbs);
     EXPECT_EQ(res.logProbs, res2.logProbs);
     EXPECT_EQ(res.finishReasons, res2.finishReasons);
+    EXPECT_EQ(res.decodingIter, res2.decodingIter);
+    EXPECT_EQ(res.sequenceIndex, res2.sequenceIndex);
+    EXPECT_EQ(res.isSequenceFinal, res2.isSequenceFinal);
 }
 
 void compareResponse(texec::Response res, texec::Response res2)
@@ -302,7 +305,7 @@ TEST(SerializeUtilsTest, ResultResponse)
 {
     texec::Result res = texec::Result{false, {{1, 2, 3}}, texec::VecLogProbs{1.0, 2.0},
         std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
-        std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}};
+        std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}, texec::ContextPhaseParams({9, 37}), 3, 2, true};
     {
         testSerializeDeserialize(res);
     }
@@ -420,11 +423,12 @@ TEST(SerializeUtilsTest, DecodingConfig)
 
 TEST(SerializeUtilsTest, DebugConfig)
 {
-    texec::DebugConfig debugConfig(true, true, {"test"});
+    texec::DebugConfig debugConfig(true, true, {"test"}, 3);
     auto debugConfig2 = serializeDeserialize(debugConfig);
-    EXPECT_EQ(debugConfig.getDumpInputTensors(), debugConfig2.getDumpInputTensors());
-    EXPECT_EQ(debugConfig.getDumpOutputTensors(), debugConfig2.getDumpOutputTensors());
+    EXPECT_EQ(debugConfig.getDebugInputTensors(), debugConfig2.getDebugInputTensors());
+    EXPECT_EQ(debugConfig.getDebugOutputTensors(), debugConfig2.getDebugOutputTensors());
     EXPECT_EQ(debugConfig.getDebugTensorNames(), debugConfig2.getDebugTensorNames());
+    EXPECT_EQ(debugConfig.getDebugTensorsMaxIterations(), debugConfig2.getDebugTensorsMaxIterations());
 }
 
 TEST(SerializeUtilsTest, OrchestratorConfig)
@@ -526,14 +530,17 @@ TEST(SerializeUtilsTest, ContextPhaseParams)
     }
 
     {
-        auto state = std::make_unique<texec::ContextPhaseState>(1, std::vector<texec::SizeType32>{10, 20});
+        auto state = std::make_unique<texec::ContextPhaseState>(1);
+        state->setCommState(texec::kv_cache::CommState{{10, 20}});
         auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
 
     {
-        auto state = std::make_unique<texec::ContextPhaseState>(1, 12, "127.0.0.1");
+        auto state = std::make_unique<texec::ContextPhaseState>(1);
+        state->setCommState(texec::kv_cache::CommState{12, "127.0.0.1"});
+        state->setCacheState(texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT});
         auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);

@@ -58,13 +58,85 @@ TEST_F(CacheConfigTest, EqualTo)
     modelConfig.setTokensPerBlock(tokensPerBlock);
     tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism};
 
-    CacheConfig config0{modelConfig, worldConfig, dtype};
-    CacheConfig config1{
+    texec::kv_cache::CacheState state0{modelConfig, worldConfig, dtype};
+    texec::kv_cache::CacheState state1{
         nbAttentionLayers, nbHeads, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dtype};
-    EXPECT_EQ(config0, config1);
+    EXPECT_EQ(state0, state1);
 }
 
-// TODO: Restore gmock and multi-rank tests.
+// ---------------------------------------
+//          MockTransceiverTest
+// ---------------------------------------
+
+class MockDataSender : public DataSender
+{
+public:
+    MockDataSender()
+    {
+        ON_CALL(*this, getCommState).WillByDefault(ReturnRef(mState));
+        ON_CALL(*this, recvRequestId).WillByDefault(Return(0));
+    }
+
+    MOCK_METHOD(LlmRequest::RequestIdType, recvRequestId, (), (override));
+    MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
+    MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const override));
+
+private:
+    static texec::kv_cache::CommState mState;
+};
+
+texec::kv_cache::CommState MockDataSender::mState;
+
+class MockDataReceiver : public DataReceiver
+{
+public:
+    MOCK_METHOD(void, sendRequestId, (LlmRequest const&), (override));
+    MOCK_METHOD(void, receiveSync, (LlmRequest const&), (override));
+};
+
+class MockTransceiverTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+{
+public:
+    void SetUp() override {}
+
+    void TearDown() override {}
+
+    static auto makeLlmRequest(
+        LlmRequest::RequestIdType requestId = 0, SizeType32 maxNewTokens = 1, VecTokens inputTokens = {-1})
+    {
+        texec::Request request{std::move(inputTokens), maxNewTokens};
+        auto state = std::make_unique<texec::ContextPhaseState>(requestId);
+        auto stats = texec::ContextPhaseParams({}, state.release());
+        request.setContextPhaseParams(std::move(stats));
+        return std::make_unique<LlmRequest>(requestId, std::move(request));
+    }
+};
+
+TEST_F(MockTransceiverTest, MpiResponderBasic)
+{
+    auto sender = std::make_unique<MockDataSender>();
+    EXPECT_CALL(*sender, recvRequestId).WillOnce(Return(0));
+    EXPECT_CALL(*sender, sendSync).WillOnce(Return());
+
+    DataResponder responder{std::move(sender)};
+    auto request = makeLlmRequest(0);
+    auto future = responder.respondAndSendAsync(*request);
+    future.get();
+}
+
+TEST_F(MockTransceiverTest, MpiRequesterBasic)
+{
+    auto receiver = std::make_unique<MockDataReceiver>();
+    EXPECT_CALL(*receiver, sendRequestId).WillOnce(Return());
+    EXPECT_CALL(*receiver, receiveSync).WillOnce(Return());
+
+    DataRequester requester{std::move(receiver)};
+    auto request = makeLlmRequest(0);
+    auto future = requester.requestAndReceiveAsync(*request);
+    future.get();
+}
+
+// TODO: Restore multi-rank tests.
 
 // ---------------------------------------
 //          RealTransceiverTest
@@ -137,7 +209,8 @@ protected:
     {
         constexpr SizeType32 maxNewTokens{1};
         texec::Request request{VecTokens(length), maxNewTokens};
-        auto state = std::make_unique<texec::ContextPhaseState>(mRequestId, std::move(contextRanks));
+        auto state = std::make_unique<texec::ContextPhaseState>(mRequestId);
+        state->setCommState(texec::kv_cache::CommState{std::move(contextRanks)});
         auto stats = texec::ContextPhaseParams({}, state.release());
         request.setContextPhaseParams(std::move(stats));
         return std::make_unique<LlmRequest>(mRequestId++, std::move(request));

@@ -13,6 +13,7 @@
 #include "trtEncoderModel.h"
 #include "encoderBuffers.h"
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/tllmLogger.h"
@@ -104,6 +105,16 @@ void TrtEncoderModel::getCurrentIterationStats(executor::IterationStats& stats) 
 void TrtEncoderModel::getCurrentRequestStats(executor::RequestStatsPerIteration& stats) const
 {
     stats.iter = mIterCounter;
+}
+
+executor::DebugTensorsPerIteration TrtEncoderModel::getCurrentDebugTensors() const
+{
+    executor::DebugTensorsPerIteration debugTensors;
+    debugTensors.iter = mIterCounter;
+
+    TLLM_LOG_WARNING("TrtEncoderModel doesn't support getting debug tensors.");
+
+    return debugTensors;
 }
 
 void TrtEncoderModel::setLayerProfiler()

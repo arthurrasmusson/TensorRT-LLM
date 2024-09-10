@@ -57,16 +57,18 @@ private:
     int mRank;
 };
 
-template <typename TDataConfig>
+template <typename TDataState>
 class MpiDataSender : public DataSender
 {
 public:
-    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataConfig>>;
+    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataState>>;
 
-    MpiDataSender(mpi::MpiComm const& comm, TFormatter formatter)
+    template <typename... TArgs>
+    MpiDataSender(mpi::MpiComm const& comm, TArgs... formatters)
         : mComm{std::addressof(comm)}
     {
-        mFormatter = std::move(formatter);
+        mFormatters.emplace_back(std::move(formatters)...);
+        TLLM_CHECK(mFormatters.size() == 1);
     }
 
     [[nodiscard]] LlmRequest::RequestIdType recvRequestId() override
@@ -91,32 +93,41 @@ public:
     {
         auto rank = mRequestToRank[llmRequest.mRequestId];
         MpiComm comm{*mComm, rank};
-        (*mFormatter)(llmRequest, {std::addressof(comm)});
+        auto const& formatter = mFormatters.front();
+        (*formatter)(llmRequest, {std::addressof(comm)});
+    }
+
+    [[nodiscard]] executor::kv_cache::CommState const& getCommState() const override
+    {
+        return mCommState;
     }
 
 private:
     mpi::MpiComm const* mComm{};
+    executor::kv_cache::CommState mCommState;
     std::map<LlmRequest::RequestIdType, int> mRequestToRank;
-    TFormatter mFormatter;
+    std::vector<TFormatter> mFormatters;
 };
 
-template <typename TDataConfig>
+template <typename TDataState>
 class MpiDataReceiver : public DataReceiver
 {
 public:
-    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataConfig>>;
+    using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataState>>;
 
-    MpiDataReceiver(mpi::MpiComm const& comm, TFormatter formatter)
+    template <typename... TArgs>
+    MpiDataReceiver(mpi::MpiComm const& comm, TArgs... formatters)
         : mComm{std::addressof(comm)}
     {
-        mFormatter = std::move(formatter);
+        mFormatters.emplace_back(std::move(formatters)...);
+        TLLM_CHECK(mFormatters.size() == 1);
     }
 
     void sendRequestId(LlmRequest const& llmRequest) override
     {
         uint64_t requestId = llmRequest.getContextPhaseState().getReqId();
-        tensorrt_llm::executor::SizeType32 responderRank
-            = llmRequest.getContextPhaseState().getMpiComm().mRanks.front();
+        auto const& mpiState = llmRequest.getContextPhaseState().getCommState().value().getMpiState();
+        tensorrt_llm::executor::SizeType32 responderRank = mpiState.mRanks.front();
         MpiComm::Id id{MpiComm::Id::REQUEST_SEND};
         mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
         mComm->send(std::addressof(requestId), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
@@ -124,14 +135,16 @@ public:
 
     void receiveSync(LlmRequest const& llmRequest) override
     {
-        auto rank = llmRequest.getContextPhaseState().getMpiComm().mRanks.front();
+        auto const& mpiState = llmRequest.getContextPhaseState().getCommState().value().getMpiState();
+        auto rank = mpiState.mRanks.front();
         MpiComm comm{*mComm, rank};
-        (*mFormatter)(llmRequest, {std::addressof(comm)});
+        auto const& formatter = mFormatters.front();
+        (*formatter)(llmRequest, {std::addressof(comm)});
     }
 
 private:
     mpi::MpiComm const* mComm{};
-    TFormatter mFormatter;
+    std::vector<TFormatter> mFormatters;
 };
 
 std::unique_ptr<DataResponder> makeMpiCacheResponder(

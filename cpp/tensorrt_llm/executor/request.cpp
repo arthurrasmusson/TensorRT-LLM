@@ -28,13 +28,13 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
     std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
     std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
-    std::optional<SizeType32> encoderOutputLength)
+    std::optional<SizeType32> encoderOutputLength, SizeType32 numReturnSequences)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
         returnAllGeneratedTokens, priority, type, std::move(contextPhaseParams), std::move(encoderInputFeatures),
-        encoderOutputLength))
+        encoderOutputLength, numReturnSequences))
 {
 }
 
@@ -184,6 +184,11 @@ std::optional<SizeType32> Request::getEncoderOutputLength() const
     return mImpl->getEncoderOutputLength();
 }
 
+SizeType32 Request::getNumReturnSequences() const
+{
+    return mImpl->getNumReturnSequences();
+}
+
 void Request::setStreaming(bool streaming)
 {
     return mImpl->setStreaming(streaming);
@@ -292,6 +297,11 @@ void Request::setEncoderInputFeatures(Tensor encoderInputFeatures)
 void Request::setEncoderOutputLength(SizeType32 encoderOutputLength)
 {
     return mImpl->setEncoderOutputLength(encoderOutputLength);
+}
+
+void Request::setNumReturnSequences(SizeType32 numReturnSequences)
+{
+    return mImpl->setNumReturnSequences(numReturnSequences);
 }
 
 } // namespace tensorrt_llm::executor

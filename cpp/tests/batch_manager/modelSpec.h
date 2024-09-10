@@ -255,6 +255,8 @@ public:
     }
 
     // Computed properties
+    [[nodiscard]] std::string getInputFile() const;
+
     [[nodiscard]] std::string getModelPath() const;
 
     [[nodiscard]] std::string getResultsFileInternal(

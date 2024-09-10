@@ -17,15 +17,15 @@
 namespace tensorrt_llm::batch_manager
 {
 
-template class MpiDataSender<kv_cache_manager::CacheConfig>;
+template class MpiDataSender<executor::kv_cache::CacheState>;
 
-template class MpiDataReceiver<kv_cache_manager::CacheConfig>;
+template class MpiDataReceiver<executor::kv_cache::CacheState>;
 
 std::unique_ptr<DataResponder> makeMpiCacheResponder(
     mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager)
 {
     using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-    return std::make_unique<DataResponder>(std::make_unique<MpiDataSender<CacheConfig>>(
+    return std::make_unique<DataResponder>(std::make_unique<MpiDataSender<executor::kv_cache::CacheState>>(
         comm, std::make_unique<CacheOutputFormatter<MpiComm>>(cacheManager)));
 }
 
@@ -33,7 +33,7 @@ std::unique_ptr<DataRequester> makeMpiCacheRequester(
     mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager)
 {
     using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-    return std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver<CacheConfig>>(
+    return std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver<executor::kv_cache::CacheState>>(
         comm, std::make_unique<CacheInputFormatter<MpiComm>>(cacheManager)));
 }
 

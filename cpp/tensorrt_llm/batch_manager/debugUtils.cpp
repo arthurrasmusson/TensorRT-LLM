@@ -10,14 +10,9 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "tensorrt_llm/batch_manager/debugUtils.h"
-#include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "debugUtils.h"
+
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/runtime/bufferManager.h"
-#include "tensorrt_llm/runtime/iBuffer.h"
-#include "tensorrt_llm/runtime/iTensor.h"
-#include "tensorrt_llm/runtime/tllmRuntime.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 
 #include <filesystem>
@@ -29,6 +24,7 @@ namespace tensorrt_llm::batch_manager::utils
 {
 using executor::IterationType;
 using runtime::ITensor;
+using TensorPtr = runtime::ITensor::SharedPtr;
 using TensorMap = runtime::ITensor::TensorMap;
 using runtime::BufferManager;
 
@@ -53,42 +49,71 @@ void dumpTensor(
     runtime::utils::saveNpy(manager, tensor, outputFile.string());
 }
 
-void dumpRequestIds(fs::path const& outputPath, RequestVector const& contextRequests,
-    RequestVector const& generationRequests, BufferManager const& manager)
+template <class TensorConsumer>
+void forEachDebugTensor(std::vector<std::string> const& debugTensorNames, TensorMap const& inputMap,
+    TensorMap const& outputMap, TensorConsumer tensorConsumer)
 {
-    // Collect request IDs
-    auto const numRequests = static_cast<ITensor::DimType64>(contextRequests.size() + generationRequests.size());
-    auto requestIds
-        = runtime::BufferManager::cpu(ITensor::makeShape({numRequests}), runtime::TRTDataType<RequestIdType>::value);
-    auto requestIdsRange = runtime::BufferRange<RequestIdType>(*requestIds);
-    auto batchIdx{0};
-    for (auto const& requests : {contextRequests, generationRequests})
+    for (auto const& debugTensorName : debugTensorNames)
     {
-        for (auto const& request : requests)
+        auto foundTensor = false;
+        for (auto const& tensorMap : {inputMap, outputMap})
         {
-            requestIdsRange[batchIdx++] = request->mRequestId;
+            auto tensorIt = tensorMap.find(debugTensorName);
+            if (tensorIt != tensorMap.end())
+            {
+                auto const& [tensorName, tensor] = *tensorIt;
+                tensorConsumer(tensorName, tensor);
+                foundTensor = true;
+            }
+        }
+        if (!foundTensor)
+        {
+            TLLM_LOG_WARNING("Debug tensor with name '%s' not found", debugTensorName.c_str());
         }
     }
+}
 
-    dumpTensor(outputPath, std::string("request_ids"), *requestIds, manager);
+template <class TensorConsumer>
+void forEachTensor(executor::DebugConfig const& debugConfig, TensorPtr const& requestIds, TensorMap const& inputMap,
+    TensorMap const& outputMap, TensorConsumer tensorConsumer)
+{
+    tensorConsumer(std::string("request_ids"), requestIds);
+
+    if (debugConfig.getDebugTensorNames().empty())
+    {
+        if (debugConfig.getDebugInputTensors())
+        {
+            for (auto const& [tensorName, tensor] : inputMap)
+            {
+                tensorConsumer(tensorName, tensor);
+            }
+        }
+        if (debugConfig.getDebugOutputTensors())
+        {
+            for (auto const& [tensorName, tensor] : outputMap)
+            {
+                tensorConsumer(tensorName, tensor);
+            }
+        }
+    }
+    else
+    {
+        forEachDebugTensor(debugConfig.getDebugTensorNames(), inputMap, outputMap, tensorConsumer);
+    }
 }
 
 } // namespace
 
-void dumpRequestIds(IterationType iterCounter, RequestVector const& contextRequests,
-    RequestVector const& generationRequests, runtime::WorldConfig const& worldConfig,
-    std::shared_ptr<runtime::TllmRuntime> const& runtime)
+void dumpTensor(IterationType iterCounter, std::string const& tensorName, ITensor const& tensor,
+    runtime::WorldConfig const& worldConfig, BufferManager const& manager)
 {
-    auto const& manager = runtime->getBufferManager();
     auto const outputPath = getOutputPath(iterCounter, worldConfig);
-    dumpRequestIds(outputPath, contextRequests, generationRequests, manager);
+    dumpTensor(outputPath, tensorName, tensor, manager);
 }
 
 void dumpTensors(IterationType iterCounter, TensorMap const& tensorMap, runtime::WorldConfig const& worldConfig,
-    std::shared_ptr<runtime::TllmRuntime> const& runtime)
+    BufferManager const& manager)
 {
-    auto const& manager = runtime->getBufferManager();
-
     auto const outputPath = getOutputPath(iterCounter, worldConfig);
 
     for (auto const& [tensorName, tensor] : tensorMap)
@@ -99,31 +124,40 @@ void dumpTensors(IterationType iterCounter, TensorMap const& tensorMap, runtime:
 
 void dumpDebugTensors(IterationType iterCounter, std::vector<std::string> const& debugTensorNames,
     TensorMap const& inputMap, TensorMap const& outputMap, runtime::WorldConfig const& worldConfig,
-    std::shared_ptr<runtime::TllmRuntime> const& runtime)
-
+    BufferManager const& manager)
 {
-    auto const& manager = runtime->getBufferManager();
+    auto dumpTensorFunc = [outputPath = getOutputPath(iterCounter, worldConfig), &manager](
+                              std::string const& tensorName, TensorPtr const& tensor)
+    { dumpTensor(outputPath, tensorName, *tensor, manager); };
 
-    auto const outputPath = getOutputPath(iterCounter, worldConfig);
+    forEachDebugTensor(debugTensorNames, inputMap, outputMap, dumpTensorFunc);
+}
 
-    for (auto const& debugTensorName : debugTensorNames)
+void dumpIOTensors(executor::DebugConfig const& debugConfig, IterationType iterCounter, TensorPtr const& requestIds,
+    TensorMap const& inputMap, TensorMap const& outputMap, runtime::WorldConfig const& worldConfig,
+    BufferManager const& manager)
+{
+    auto dumpTensorFunc = [outputPath = getOutputPath(iterCounter, worldConfig), &manager](
+                              std::string const& tensorName, TensorPtr const& tensor)
+    { dumpTensor(outputPath, tensorName, *tensor, manager); };
+
+    forEachTensor(debugConfig, requestIds, inputMap, outputMap, dumpTensorFunc);
+}
+
+TensorMap storeIOTensors(executor::DebugConfig const& debugConfig, TensorPtr const& requestIds,
+    TensorMap const& inputMap, TensorMap const& outputMap, BufferManager const& manager)
+{
+    TensorMap tensors;
+
+    auto storeTensor = [&tensors, &manager](std::string const& tensorName, TensorPtr const& tensor)
     {
-        auto foundTensor = false;
-        for (auto const& tensorMap : {inputMap, outputMap})
-        {
-            auto tensorIt = tensorMap.find(debugTensorName);
-            if (tensorIt != tensorMap.end())
-            {
-                auto const& [tensorName, tensor] = *tensorIt;
-                dumpTensor(outputPath, tensorName, *tensor, manager);
-                foundTensor = true;
-            }
-        }
-        if (!foundTensor)
-        {
-            TLLM_LOG_WARNING("Debug tensor with name '%s' not found", debugTensorName.c_str());
-        }
-    }
+        TensorPtr tensorCopy = manager.copyFrom(*tensor, tensor->getMemoryType());
+        tensors.emplace(tensorName, tensorCopy);
+    };
+
+    forEachTensor(debugConfig, requestIds, inputMap, outputMap, storeTensor);
+
+    return tensors;
 }
 
 } // namespace tensorrt_llm::batch_manager::utils
