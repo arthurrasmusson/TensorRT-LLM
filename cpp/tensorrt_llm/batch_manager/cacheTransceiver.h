@@ -12,83 +12,47 @@
 
 #pragma once
 
-#include "dataTransceiver.h"
 #include "mpiDataTransceiver.h"
-#include "tensorrt_llm/batch_manager/kvCacheUtils.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
-#include <iterator>
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/common/mpiUtils.h"
+#include <future>
+#include <map>
 
-namespace tensorrt_llm::batch_manager::kv_cache_manager
+namespace tensorrt_llm::batch_manager
 {
 
-// Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
-// parallel topology is completely identical, making it the preferred method.
-template <typename TComm>
-class CacheInputFormatter final : public IOFormatter<TComm, executor::kv_cache::CacheState>
-{
-public:
-    CacheInputFormatter(KVCacheManager* cacheManager)
-        : mCacheManager{cacheManager}
-    {
-        TLLM_CHECK(mCacheManager);
-    }
-
-    void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& srcs) override
-    {
-        TLLM_CHECK(srcs.size() == 1);
-        auto const& src = srcs.front();
-        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
-        constexpr SizeType32 beam{0};
-        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
-        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
-        {
-            src->recvBuffer(*it);
-        }
-    }
-
-    [[nodiscard]] virtual bool inquireSupport(executor::kv_cache::CacheState const& selfconfig,
-        executor::kv_cache::CacheState const& dstConfig) const override
-    {
-        return selfconfig == dstConfig;
-    }
-
-private:
-    KVCacheManager* mCacheManager{};
-};
-
-// Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
-// parallel topology is completely identical, making it the preferred method.
-template <typename TComm>
-class CacheOutputFormatter final : public IOFormatter<TComm, executor::kv_cache::CacheState>
+class CacheTransceiver
 {
 public:
-    CacheOutputFormatter(KVCacheManager* cacheManager)
-        : mCacheManager{cacheManager}
+    enum class CommType : std::uint8_t
     {
-        TLLM_CHECK(mCacheManager);
-    }
+        UNKNOWN = 0,
+        MPI = 1,
+        UCX = 2
+    };
 
-    void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& dsts) override
-    {
-        TLLM_CHECK(dsts.size() == 1);
-        auto const& dst = dsts.front();
-        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
-        constexpr SizeType32 beam{0};
-        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
-        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
-        {
-            dst->sendBuffer(*it);
-        }
-    }
+    CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManager, CommType commType,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
-    [[nodiscard]] virtual bool inquireSupport(executor::kv_cache::CacheState const& selfconfig,
-        executor::kv_cache::CacheState const& dstConfig) const override
-    {
-        return selfconfig == dstConfig;
-    }
+    void respondAndSendAsync(LlmRequest* llmRequest);
+
+    void requestAndReceiveSync(LlmRequest* llmRequest);
+
+    void checkTranferStatus(bool blocking = false);
 
 private:
-    KVCacheManager* mCacheManager{};
+    void initializeCommState();
+
+    void setContextState(LlmRequest* llmRequest);
+
+    CommType mCommType;
+    std::unique_ptr<DataResponder> mDataResponder;
+    std::unique_ptr<DataRequester> mDataRequester;
+    std::map<LlmRequest*, std::future<void>> mResponderFutures;
+    mpi::MpiComm const *mMpiGroupComm{}, *mMpiWorldComm{};
+    executor::kv_cache::CommState const* mCommState;
+    std::unique_ptr<executor::kv_cache::CacheState> mCacheState;
 };
 
-} // namespace tensorrt_llm::batch_manager::kv_cache_manager
+} // namespace tensorrt_llm::batch_manager

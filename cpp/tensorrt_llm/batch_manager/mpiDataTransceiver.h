@@ -14,7 +14,7 @@
 
 #include <map>
 
-#include "cacheTransceiver.h"
+#include "cacheFormatter.h"
 #include "dataTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
@@ -26,6 +26,7 @@ namespace tensorrt_llm::batch_manager
 class MpiComm
 {
 public:
+    using TPtrContainer = std::vector<std::unique_ptr<MpiComm>>;
     enum class Id : uint64_t
     {
         REQUEST_SEND = 1,
@@ -61,11 +62,16 @@ template <typename TDataState>
 class MpiDataSender : public DataSender
 {
 public:
+    using SizeType32 = tensorrt_llm::runtime::SizeType32;
     using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataState>>;
 
     template <typename... TArgs>
-    MpiDataSender(mpi::MpiComm const& comm, TArgs... formatters)
+    MpiDataSender(mpi::MpiComm const& comm, executor::kv_cache::CacheState selfCacheState, SizeType32 selfIndex,
+        TArgs... formatters)
         : mComm{std::addressof(comm)}
+        , mSelfCacheState{std::move(selfCacheState)}
+        , mSelfIdx{selfIndex}
+        , mCommState{tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session())}
     {
         mFormatters.emplace_back(std::move(formatters)...);
         TLLM_CHECK(mFormatters.size() == 1);
@@ -92,9 +98,11 @@ public:
     void sendSync(LlmRequest const& llmRequest) override
     {
         auto rank = mRequestToRank[llmRequest.mRequestId];
-        MpiComm comm{*mComm, rank};
         auto const& formatter = mFormatters.front();
-        (*formatter)(llmRequest, {std::addressof(comm)});
+        std::vector<std::unique_ptr<MpiComm>> comms;
+        // TODO: fix me
+        comms.emplace_back(std::make_unique<MpiComm>(*mComm, rank));
+        (*formatter)(llmRequest, std::move(comms));
     }
 
     [[nodiscard]] executor::kv_cache::CommState const& getCommState() const override
@@ -104,20 +112,26 @@ public:
 
 private:
     mpi::MpiComm const* mComm{};
-    executor::kv_cache::CommState mCommState;
     std::map<LlmRequest::RequestIdType, int> mRequestToRank;
+    executor::kv_cache::CacheState mSelfCacheState;
+    SizeType32 mSelfIdx{};
     std::vector<TFormatter> mFormatters;
+    executor::kv_cache::CommState mCommState;
 };
 
 template <typename TDataState>
 class MpiDataReceiver : public DataReceiver
 {
 public:
+    using SizeType32 = tensorrt_llm::runtime::SizeType32;
     using TFormatter = std::unique_ptr<IOFormatter<MpiComm, TDataState>>;
 
     template <typename... TArgs>
-    MpiDataReceiver(mpi::MpiComm const& comm, TArgs... formatters)
+    MpiDataReceiver(mpi::MpiComm const& comm, executor::kv_cache::CacheState selfCacheState, SizeType32 selfIndex,
+        TArgs... formatters)
         : mComm{std::addressof(comm)}
+        , mSelfCacheState{std::move(selfCacheState)}
+        , mSelfIdx{selfIndex}
     {
         mFormatters.emplace_back(std::move(formatters)...);
         TLLM_CHECK(mFormatters.size() == 1);
@@ -125,32 +139,44 @@ public:
 
     void sendRequestId(LlmRequest const& llmRequest) override
     {
-        uint64_t requestId = llmRequest.getContextPhaseState().getReqId();
-        auto const& mpiState = llmRequest.getContextPhaseState().getCommState().value().getMpiState();
-        tensorrt_llm::executor::SizeType32 responderRank = mpiState.mRanks.front();
+        auto const& contextState = llmRequest.getContextPhaseState();
+        uint64_t requestId = contextState.getReqId();
+        auto const& mpiState = contextState.getCommState().value().getMpiState();
+        auto const& destCacheState = contextState.getCacheState().value();
         MpiComm::Id id{MpiComm::Id::REQUEST_SEND};
-        mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
-        mComm->send(std::addressof(requestId), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
+        auto const& formatter = mFormatters.front();
+        TLLM_CHECK_WITH_INFO(
+            mpiState.mRanks.size() == 1, "At present, cache transfer is only supported for ranks of size 2.");
+
+        for (auto index : formatter->getCounterparts(mSelfCacheState, mSelfIdx, destCacheState))
+        {
+            TLLM_CHECK(mpiState.mRanks.size() > static_cast<std::size_t>(index));
+            tensorrt_llm::executor::SizeType32 responderRank = mpiState.mRanks.at(index);
+            mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
+            mComm->send(std::addressof(requestId), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
+        }
     }
 
     void receiveSync(LlmRequest const& llmRequest) override
     {
-        auto const& mpiState = llmRequest.getContextPhaseState().getCommState().value().getMpiState();
-        auto rank = mpiState.mRanks.front();
-        MpiComm comm{*mComm, rank};
+        auto const& contextState = llmRequest.getContextPhaseState();
+        auto const& mpiState = contextState.getCommState().value().getMpiState();
+        auto const& destCacheState = contextState.getCacheState().value();
         auto const& formatter = mFormatters.front();
-        (*formatter)(llmRequest, {std::addressof(comm)});
+        std::vector<std::unique_ptr<MpiComm>> comms;
+        for (auto index : formatter->getCounterparts(mSelfCacheState, mSelfIdx, destCacheState))
+        {
+            TLLM_CHECK(mpiState.mRanks.size() > static_cast<std::size_t>(index));
+            comms.emplace_back(std::make_unique<MpiComm>(*mComm, mpiState.mRanks.at(index)));
+        }
+        (*formatter)(llmRequest, std::move(comms));
     }
 
 private:
     mpi::MpiComm const* mComm{};
+    executor::kv_cache::CacheState mSelfCacheState;
+    SizeType32 mSelfIdx{};
     std::vector<TFormatter> mFormatters;
 };
-
-std::unique_ptr<DataResponder> makeMpiCacheResponder(
-    mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager);
-
-std::unique_ptr<DataRequester> makeMpiCacheRequester(
-    mpi::MpiComm const& comm, kv_cache_manager::KVCacheManager* cacheManager);
 
 } // namespace tensorrt_llm::batch_manager

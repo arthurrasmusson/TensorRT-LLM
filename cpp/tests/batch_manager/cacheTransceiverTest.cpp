@@ -58,7 +58,7 @@ TEST_F(CacheConfigTest, EqualTo)
     modelConfig.setTokensPerBlock(tokensPerBlock);
     tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism};
 
-    texec::kv_cache::CacheState state0{modelConfig, worldConfig, dtype};
+    texec::kv_cache::CacheState state0{modelConfig, worldConfig};
     texec::kv_cache::CacheState state1{
         nbAttentionLayers, nbHeads, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dtype};
     EXPECT_EQ(state0, state1);
@@ -152,8 +152,9 @@ protected:
     SizeType32 setUpCommunicator()
     {
         tensorrt_llm::mpi::initialize(tensorrt_llm::mpi::MpiThreadSupport::THREAD_MULTIPLE);
-        mComm = std::addressof(tensorrt_llm::mpi::MpiComm::session());
+        mComm = std::addressof(tensorrt_llm::mpi::MpiComm::world());
         mWorldSize = mComm->getSize();
+        mlocalRank = mComm->getRank() / 2;
         isSender = mComm->getRank() % 2 == 0;
         return mWorldSize;
     }
@@ -183,34 +184,40 @@ protected:
 
         auto constexpr enableBlockReuse = false;
         auto constexpr onboardBlocks = true;
+        auto constexpr dataType = nvinfer1::DataType::kFLOAT;
 
         mManager = std::make_unique<KVCacheManager>(numLayers, numHeads, sizePerHead, tokensPerBlock, totalNumBlocks,
             blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow, sinkTokenLength, useOneMoreBlock,
             stream, enableBlockReuse, onboardBlocks);
+        mCacheState = std::make_unique<texec::kv_cache::CacheState>(
+            numLayers, numHeads, sizePerHead, tokensPerBlock, 1, 1, dataType);
 
         // UVM seems to be incompatible with MPI, and it is continuing to investigate.
         bool constexpr useUvm = false;
-        mManager->allocatePools(nvinfer1::DataType::kFLOAT, useUvm);
+        mManager->allocatePools(dataType, useUvm);
     }
 
     void setUpCacheTransceiver()
     {
         if (isSender)
         {
-            mResponder = makeMpiCacheResponder(*mComm, mManager.get());
+            mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender<texec::kv_cache::CacheState>>(
+                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheOutputFormatter<MpiComm>>(mManager.get())));
         }
         else
         {
-            mRequester = makeMpiCacheRequester(*mComm, mManager.get());
+            mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver<texec::kv_cache::CacheState>>(
+                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheInputFormatter<MpiComm>>(mManager.get())));
         }
     }
 
-    auto makeLlmRequest(SizeType32 length, std::vector<texec::SizeType32> contextRanks)
+    auto makeLlmRequest(SizeType32 length)
     {
         constexpr SizeType32 maxNewTokens{1};
         texec::Request request{VecTokens(length), maxNewTokens};
         auto state = std::make_unique<texec::ContextPhaseState>(mRequestId);
-        state->setCommState(texec::kv_cache::CommState{std::move(contextRanks)});
+        state->setCommState(texec::kv_cache::CommState{std::vector<int>{0}});
+        state->setCacheState(*mCacheState);
         auto stats = texec::ContextPhaseParams({}, state.release());
         request.setContextPhaseParams(std::move(stats));
         return std::make_unique<LlmRequest>(mRequestId++, std::move(request));
@@ -251,12 +258,13 @@ protected:
     bool isSender{false};
     tensorrt_llm::mpi::MpiComm const* mComm;
     SizeType32 mSeqSlotIdx{0};
-    SizeType32 mWorldSize{0};
+    SizeType32 mWorldSize{0}, mlocalRank{0};
     LlmRequest::RequestIdType mRequestId{0};
     SizeType32 mMaxNumSequences{};
     std::unique_ptr<KVCacheManager> mManager;
     std::unique_ptr<DataResponder> mResponder;
     std::unique_ptr<DataRequester> mRequester;
+    std::unique_ptr<texec::kv_cache::CacheState> mCacheState;
 };
 
 TEST_F(MpiSymmetricalCacheTest, SimpleTest)
@@ -270,6 +278,6 @@ TEST_F(MpiSymmetricalCacheTest, SimpleTest)
     setUpCacheTransceiver();
     for (auto len : {10, 20, 30})
     {
-        addRequestAndTransportCache(makeLlmRequest(len, {0}));
+        addRequestAndTransportCache(makeLlmRequest(len));
     }
 }

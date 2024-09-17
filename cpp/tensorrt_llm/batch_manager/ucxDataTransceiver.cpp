@@ -12,7 +12,7 @@
 
 #include "ucxDataTransceiver.h"
 
-#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/cacheFormatter.h"
 
 namespace tensorrt_llm::batch_manager
 {

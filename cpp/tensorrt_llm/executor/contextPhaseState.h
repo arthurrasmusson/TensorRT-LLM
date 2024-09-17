@@ -31,12 +31,11 @@ namespace kv_cache
 class CacheState final
 {
 public:
-    CacheState(
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig, nvinfer1::DataType dataType)
+    CacheState(runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
         : mModelConfig{modelConfig.getNbAttentionLayers(1), modelConfig.getNbKvHeads(), modelConfig.getSizePerHead(),
             modelConfig.getTokensPerBlock()}
         , mParallelConfig{worldConfig.getTensorParallelism(), worldConfig.getPipelineParallelism()}
-        , mDataType{dataType}
+        , mDataType{modelConfig.getKvDataType()}
     {
     }
 

@@ -14,8 +14,6 @@
 
 #include "runtimeBuffers.h"
 #include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/debugUtils.h"
-#include "tensorrt_llm/batch_manager/inflightBatchingUtils.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
@@ -23,6 +21,8 @@
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/requestScheduler.h"
 #include "tensorrt_llm/batch_manager/rnnStateManager.h"
+#include "tensorrt_llm/batch_manager/utils/debugUtils.h"
+#include "tensorrt_llm/batch_manager/utils/inflightBatchingUtils.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/logger.h"
@@ -199,10 +199,21 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
         mKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig, KvCacheType::kSELF);
         if (mModelConfig.useCrossAttention())
         {
+            TLLM_LOG_INFO("Enable MPI KV cache transport.");
             // assume encoder and decoder configs are the same
             mCrossKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig, KvCacheType::kCROSS);
         }
-        initDataTransceiver(mKvCacheManager.get());
+        if (std::getenv("TLLM_USE_UCX_KVCACHE"))
+        {
+            TLLM_LOG_INFO("Enable UCX KV cache transport.");
+            mCacheTransceiver = std::make_unique<CacheTransceiver>(
+                mKvCacheManager.get(), CacheTransceiver::CommType::UCX, mModelConfig, mWorldConfig);
+        }
+        else
+        {
+            mCacheTransceiver = std::make_unique<CacheTransceiver>(
+                mKvCacheManager.get(), CacheTransceiver::CommType::MPI, mModelConfig, mWorldConfig);
+        }
     }
 
     if (mWorldConfig.isPipelineParallel())
@@ -266,7 +277,10 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
 TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
 {
-    checkCacheTranferStatus(true);
+    if (mCacheTransceiver)
+    {
+        mCacheTransceiver->checkTranferStatus(true);
+    }
     if (mMpiWaitThread)
     {
         mMpiWaitThread->join();
@@ -577,13 +591,7 @@ void TrtGptModelInflightBatching::forwardSync()
                 // If a context-only request is finished, send its KV cache and mark it.
                 if (llmReq->isContextOnlyRequest() && llmReq->isGenerationInProgressState())
                 {
-                    if (mResponderFutures.find(llmReq.get()) != mResponderFutures.end())
-                    {
-                        continue;
-                    }
-                    llmReq->mState = REQUEST_STATE_DISAGG_CONTEXT_TRANS_IN_PROGRESS;
-                    auto future = mDataResponder->respondAndSendAsync(*llmReq);
-                    mResponderFutures.insert({llmReq.get(), std::move(future)});
+                    mCacheTransceiver->respondAndSendAsync(llmReq.get());
                 }
             }
         }
@@ -595,8 +603,10 @@ void TrtGptModelInflightBatching::forwardSync()
     {
         mRuntime->reportToProfiler(contextId);
     }
-    checkCacheTranferStatus();
-
+    if (mCacheTransceiver)
+    {
+        mCacheTransceiver->checkTranferStatus();
+    }
     ++mIterCounter;
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -1139,9 +1149,7 @@ void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& 
             {
                 newGenReq->addNewToken(firstGenTokens.at(beam), beam);
             }
-            auto future = mDataRequester->requestAndReceiveAsync(*newGenReq);
-            future.get();
-            newGenReq->mState = tensorrt_llm::batch_manager::REQUEST_STATE_GENERATION_IN_PROGRESS;
+            mCacheTransceiver->requestAndReceiveSync(newGenReq.get());
         }
     }
 }
@@ -2283,29 +2291,6 @@ executor::DebugTensorsPerIteration TrtGptModelInflightBatching::getCurrentDebugT
     }
 
     return debugTensors;
-}
-
-void TrtGptModelInflightBatching::initDataTransceiver(KVCacheManager* cacheManager)
-{
-    mDataResponder = makeMpiCacheResponder(tensorrt_llm::mpi::MpiComm::world(), cacheManager);
-    mDataRequester = makeMpiCacheRequester(tensorrt_llm::mpi::MpiComm::world(), cacheManager);
-}
-
-void TrtGptModelInflightBatching::checkCacheTranferStatus(bool blocking)
-{
-    for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
-    {
-        if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
-        {
-            it->second.get();
-            it->first->mState = REQUEST_STATE_DISAGG_CONTEXT_COMPLETE;
-            it = mResponderFutures.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
 }
 
 } // namespace tensorrt_llm::batch_manager

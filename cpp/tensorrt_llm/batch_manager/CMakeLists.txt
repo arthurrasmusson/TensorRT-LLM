@@ -15,6 +15,7 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # keep this list sorted alphabetically
 set(SRCS
+    cacheTransceiver.cpp
     capacityScheduler.cpp
     dataTransceiver.cpp
     decoderBuffers.cpp
@@ -40,8 +41,8 @@ set(SRCS
     trtEncoderModel.cpp
     trtGptModelInflightBatching.cpp
     trtGptModelV1.cpp
-    debugUtils.cpp
-    inflightBatchingUtils.cpp)
+    utils/debugUtils.cpp
+    utils/inflightBatchingUtils.cpp)
 
 if(ENABLE_UCX)
   set(SRCS ${SRCS} ucxDataTransceiver.cpp)

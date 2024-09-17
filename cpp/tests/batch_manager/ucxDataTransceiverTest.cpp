@@ -11,7 +11,7 @@
  */
 
 #include "tensorrt_llm/batch_manager/ucxDataTransceiver.h"
-#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/cacheFormatter.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/contextPhaseState.h"
@@ -229,6 +229,10 @@ public:
 
     MOCK_METHOD(
         bool, inquireSupport, (tle::kv_cache::CacheState const&, tle::kv_cache::CacheState const&), (const, override));
+
+    MOCK_METHOD(std::vector<SizeType32>, getCounterparts,
+        (tle::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx, tle::kv_cache::CacheState const& destConfig),
+        (const, override));
 };
 
 class MockTransceiverTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)

@@ -66,8 +66,9 @@ NLOHMANN_JSON_SERIALIZE_ENUM(RequestStage,
     {{RequestStage::kQUEUED, "QUEUED"}, {RequestStage::kCONTEXT_IN_PROGRESS, "CONTEXT_IN_PROGRESS"},
         {RequestStage::kGENERATION_IN_PROGRESS, "GENERATION_IN_PROGRESS"},
         {RequestStage::kGENERATION_COMPLETE, "GENERATION_COMPLETE"}});
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
-    RequestStats, id, stage, contextPrefillPosition, numGeneratedTokens, avgNumDecodedTokensPerIter, scheduled, paused);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisServingRequestStats, kvCacheTransferMS);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStats, id, stage, contextPrefillPosition, numGeneratedTokens,
+    avgNumDecodedTokensPerIter, scheduled, paused, disServingStats);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStatsPerIteration, iter, requestStats);
 
 std::string JsonSerialization::toJsonStr(IterationStats const& iterationStats)

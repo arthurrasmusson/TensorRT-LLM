@@ -287,10 +287,6 @@ protected:
         mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
     }
 
-    void initDataTransceiver(KVCacheManager* cacheManager);
-
-    void checkCacheTranferStatus(bool blocking = false);
-
 private:
     /******************** Configs ********************/
     // Parameters of the model (TRT engine)
@@ -392,9 +388,7 @@ private:
     TensorMap mLastIterationDebugTensors;
 
     /******************** Cache transceiver ********************/
-    std::unique_ptr<DataResponder> mDataResponder;
-    std::unique_ptr<DataRequester> mDataRequester;
-    std::map<LlmRequest*, std::future<void>> mResponderFutures;
+    std::unique_ptr<CacheTransceiver> mCacheTransceiver;
 };
 
 } // namespace tensorrt_llm::batch_manager

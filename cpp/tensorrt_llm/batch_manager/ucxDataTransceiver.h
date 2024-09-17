@@ -29,6 +29,8 @@ namespace tensorrt_llm::batch_manager
 class UcxComm
 {
 public:
+    using TPtrContainer = std::vector<UcxComm const*>;
+
     explicit UcxComm() {}
 
     explicit UcxComm(std::shared_ptr<ucxx::Endpoint> const& endpoint)

@@ -1400,6 +1400,16 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
 {
     std::vector<RequestStats> requestStatsVec;
 
+    auto includeDisServingStats = [](LlmRequestPtr const& request, tensorrt_llm::executor::RequestStats& requestStats)
+    {
+        auto requestType = request->getLlmRequestType();
+        if (requestType == batch_manager::LlmRequestType::LLMREQUEST_TYPE_CONTEXT_ONLY
+            || requestType == batch_manager::LlmRequestType::LLMREQUEST_TYPE_GENERATION_ONLY)
+        {
+            requestStats.disServingStats = executor::DisServingRequestStats{request->getKvCacheTransferTimeMS()};
+        }
+    };
+
     for (auto const& request : activeRequests)
     {
         RequestStats requestStats;
@@ -1421,6 +1431,7 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.contextPrefillPosition = request->getContextCurrentPosition();
         requestStats.numGeneratedTokens = request->getMaxBeamNumTokens() - request->getOrigPromptLen();
         requestStats.avgNumDecodedTokensPerIter = request->getAvgDecodedTokensPerIter();
+        includeDisServingStats(request, requestStats);
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1448,6 +1459,7 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.contextPrefillPosition = request->getContextCurrentPosition();
         requestStats.numGeneratedTokens = request->getMaxBeamNumTokens() - request->getOrigPromptLen();
         requestStats.avgNumDecodedTokensPerIter = request->getAvgDecodedTokensPerIter();
+        includeDisServingStats(request, requestStats);
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1642,15 +1654,6 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
         auto llmReq = (*it);
         auto const& reqId = llmReq->mRequestId;
         bool requestDone = false;
-        if (llmReq->isContextOnlyRequest())
-        {
-            auto contextState = std::make_unique<executor::ContextPhaseState>(llmReq->mRequestId);
-            contextState->setCommState(kv_cache::CommState{
-                std::vector<SizeType32>{tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session())}});
-            // Since `LlmRequest` is a template class, the context state needs to be prepared in the external
-            // implementation.
-            llmReq->setContextPhaseParams(executor::ContextPhaseParams{{}, contextState.release()});
-        }
         auto response = llmReq->createResponse();
         if (response)
         {

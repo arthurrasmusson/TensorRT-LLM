@@ -24,16 +24,27 @@ template <typename TComm, typename TConfig>
 class IOFormatter
 {
 public:
+    using SizeType32 = tensorrt_llm::runtime::SizeType32;
+
     /// @brief Perform data transmission with formatting actions.
     /// @param llmRequest The request associated with this data transmission.
     /// @param comm The communicator associated with this data transmission.
-    virtual void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& comm) = 0;
+    virtual void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm) = 0;
 
     /// @brief Determine whether the sender is applicable to the source and target.
     /// @param selfconfig Source data arrangement.
-    /// @param dstConfig Target data arrangement.
+    /// @param destConfig Target data arrangement.
     /// @return Whether the sender is applicable to the source and target.
-    [[nodiscard]] virtual bool inquireSupport(TConfig const& selfconfig, TConfig const& dstConfig) const = 0;
+    [[nodiscard]] virtual bool inquireSupport(TConfig const& selfconfig, TConfig const& destConfig) const = 0;
+
+    /// @brief Obtain the indies of the counterparts that need to be actually communicated with.
+    /// @param selfconfig Source data arrangement.
+    /// @param selfIdx The sequential index of the current executor process within the entire parallel group.
+    /// @param destConfig Target data arrangement.
+    /// @return The indies of the counterparts.
+    [[nodiscard]] virtual std::vector<SizeType32> getCounterparts(
+        TConfig const& selfconfig, SizeType32 selfIdx, TConfig const& destConfig) const
+        = 0;
 
     /// @brief Destructor.
     virtual ~IOFormatter() = default;

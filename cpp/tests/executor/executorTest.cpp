@@ -1252,6 +1252,8 @@ TEST_F(GptExecutorTest, GetLatestRequestStats)
                 FAIL() << "Out-of-boundary contextPrefillPosition in stats: " << rStat.contextPrefillPosition
                        << " out of " << contextSize;
             }
+            // Sanity check that disaggregated serving stats is not set in typical use case
+            EXPECT_FALSE(rStat.disServingStats.has_value());
         }
         ++currentIter;
     }
@@ -1900,6 +1902,7 @@ public:
         , mComm(tensorrt_llm::mpi::MpiComm::world().split(0, 1011))
     {
         ExecutorConfig executorConfigC = executorConfig;
+        executorConfigC.setRequestStatsMaxIterations(1000);
 
         auto parallelConfig = executorConfigC.getParallelConfig().value_or(ParallelConfig{});
         std::vector<int> participantIds;
@@ -1970,6 +1973,11 @@ public:
     {
 
         return mExecutor->awaitResponses();
+    }
+
+    std::deque<RequestStatsPerIteration> getLatestRequestStats()
+    {
+        return mExecutor->getLatestRequestStats();
     }
 
     void sendRequest(Request const& request)
@@ -2352,6 +2360,25 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
     }
 }
 
+void verifyGenerateDistStats(std::deque<RequestStatsPerIteration> const& iterationStats)
+{
+    for (auto const& iteration : iterationStats)
+    {
+        for (auto const& requestStats : iteration.requestStats)
+        {
+            if (requestStats.stage != RequestStage::kQUEUED)
+            {
+                EXPECT_TRUE(requestStats.disServingStats.has_value());
+                EXPECT_GT(requestStats.disServingStats.value().kvCacheTransferMS, 0.0);
+            }
+            else
+            {
+                EXPECT_FALSE(requestStats.disServingStats.has_value());
+            }
+        }
+    }
+}
+
 void runDistTest(DistExecutor& executor, tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput,
     ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded,
     BeamResult const& beamResult, OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs,
@@ -2533,6 +2560,7 @@ void runDistTest(DistExecutor& executor, tensorrt_llm::runtime::BufferManager& m
         EXPECT_LT(iter, maxWaitMs);
         verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
             flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, numReturnSequences, false);
+        verifyGenerateDistStats(executor.getLatestRequestStats());
     }
 }
 
