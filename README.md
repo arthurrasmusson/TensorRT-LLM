@@ -13,7 +13,7 @@ TensorRT-LLM
 [![cuda](https://img.shields.io/badge/cuda-12.5.1-green)](https://developer.nvidia.com/cuda-downloads)
 [![trt](https://img.shields.io/badge/TRT-10.3.0-green)](https://developer.nvidia.com/tensorrt)
 [![version](https://img.shields.io/badge/release-0.13.0.dev-green)](./tensorrt_llm/version.py)
-[![license](https://img.shields.io/badge/license-Apache%202-blue)](./LICENSE)
+[![license](https://img.shields.io/badge/license-NVIDIA%20TensorRT%20Source%20Code%20License%20Agreement-blue)](./NVIDIA%20TensorRT%20Source%20Code%20License%20Agreement.pdf)
 
 [Architecture](./docs/source/architecture/overview.md)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Results](./docs/source/performance/perf-overview.md)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Examples](./examples/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Documentation](./docs/source/)
 
