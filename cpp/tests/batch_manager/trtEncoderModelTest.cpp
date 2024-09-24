@@ -189,7 +189,7 @@ void runEncoderTest(std::unique_ptr<BufferManager>& bufferManager, ModelConfig c
             for (auto const& req : requestList)
             {
                 ASSERT_TRUE(req->getEncoderOutputHost()) << "Encoder output is empty!";
-                EXPECT_EQ(req->mState, REQUEST_STATE_CONTEXT_INIT);
+                EXPECT_EQ(req->mState, LlmRequestState::kCONTEXT_INIT);
                 auto actualOut = bufferCast<half>(*(req->getEncoderOutputHost()));
                 auto unequalFraction = arrayEqual(curOutPtr, actualOut, *curLengthPtr);
                 EXPECT_TRUE(unequalFraction == 0)

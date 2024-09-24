@@ -25,7 +25,7 @@ using SizeType32 = tensorrt_llm::runtime::SizeType32;
 
 MicroBatchScheduler::MicroBatchScheduler(SizeType32 maxBatchSize, std::optional<SizeType32> maxNumTokens,
     std::optional<ContextChunkingConfig> ctxChunkConfig, std::optional<SizeType32> maxContextLength,
-    LlmRequestState_t noScheduleUntilState, LlmRequestState_t noScheduleAfterState)
+    LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
     : mMaxBatchSize{maxBatchSize}
     , mMaxNumTokens(maxNumTokens)
     , mMaxContextLength(maxContextLength)

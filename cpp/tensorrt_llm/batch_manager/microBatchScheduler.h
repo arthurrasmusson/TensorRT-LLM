@@ -42,8 +42,8 @@ public:
     explicit MicroBatchScheduler(SizeType32 maxBatchSize, std::optional<SizeType32> maxNumTokens = std::nullopt,
         std::optional<ContextChunkingConfig> ctxChunkConfig = std::nullopt,
         std::optional<SizeType32> maxContextLength = std::nullopt,
-        LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-        LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
     ScheduledRequests scheduleRequests(RequestVector const& activeRequests, ReqIdsSet const& inflightReqIds);
 
@@ -77,8 +77,8 @@ private:
     std::optional<ContextChunkingConfig> mCtxChunkConfig;
 
     /// The state until/after which the scheduler should not schedule requests
-    LlmRequestState_t mNoScheduleUntilState;
-    LlmRequestState_t mNoScheduleAfterState;
+    LlmRequestState mNoScheduleUntilState;
+    LlmRequestState mNoScheduleAfterState;
 };
 
 } // namespace tensorrt_llm::batch_manager::batch_scheduler

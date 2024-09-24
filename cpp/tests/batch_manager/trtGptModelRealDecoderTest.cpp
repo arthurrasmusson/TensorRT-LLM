@@ -637,7 +637,7 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
         // Check which requests are done, move them out
         for (auto it = requestList.cbegin(); it != requestList.cend();)
         {
-            if ((*it)->mState == REQUEST_STATE_GENERATION_COMPLETE)
+            if ((*it)->mState == LlmRequestState::kGENERATION_COMPLETE)
             {
                 finishedRequestList.push_back(*it);
                 requestList.erase(it++);
@@ -1493,7 +1493,7 @@ INSTANTIATE_TEST_SUITE_P(MedusaTests, ParamTest,
         ),
     generateTestName);
 
-INSTANTIATE_TEST_SUITE_P(DISABLED_LlamaLookaheadDecodingTests, ParamTest,
+INSTANTIATE_TEST_SUITE_P(LlamaLookaheadDecodingTests, ParamTest,
     testing::Combine(testing::Values(ModelParams{LLAMA_MODEL_DIR, {2, 2}}),
         testing::Values(
             //

@@ -270,6 +270,11 @@ runtime::BufferManager::CudaStreamPtr TrtGptModelV1::getRuntimeStreamPtr() const
     return mSession->getRuntimeStreamPtr();
 }
 
+SizeType32 TrtGptModelV1::getNumMicroBatches() const
+{
+    return 1;
+}
+
 nvinfer1::DataType TrtGptModelV1::getLogitDataType() const
 {
     return mSession->getLogitDataType();
@@ -514,7 +519,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
         }
 
         llmReq->setGeneratedTokens(generatedTokens);
-        llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
         bid++;
     }
     outputIds->release();

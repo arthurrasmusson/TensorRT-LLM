@@ -56,6 +56,7 @@ public:
     [[nodiscard]] virtual SizeType32 getMaxSequenceLen() const = 0;
     [[nodiscard]] virtual SizeType32 getVocabSizePadded() const = 0;
     [[nodiscard]] virtual SizeType32 getMaxDraftLen() const = 0;
+    [[nodiscard]] virtual SizeType32 getNumMicroBatches() const = 0;
     [[nodiscard]] virtual nvinfer1::DataType getLogitDataType() const = 0;
     [[nodiscard]] virtual runtime::WorldConfig const& getWorldConfig() const = 0;
     [[nodiscard]] virtual runtime::ModelConfig const& getModelConfig() const = 0;

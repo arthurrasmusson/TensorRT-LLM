@@ -564,9 +564,9 @@ void TrtGptModelInflightBatching::forwardSync()
                     {
                         llmReq->setNumPreDecodedTokens(0, beam);
                     }
-                    if (llmReq->mState == REQUEST_STATE_GENERATION_TO_COMPLETE)
+                    if (llmReq->mState == LlmRequestState::kGENERATION_TO_COMPLETE)
                     {
-                        llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
                         terminateRequest(llmReq);
                     }
                 }
@@ -726,7 +726,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                         {
                             TLLM_LOG_DEBUG("request %lu finishes decoder ctx phase", llmReq->mRequestId);
 
-                            llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+                            llmReq->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
 
                             // for encoder-decoder models, free encoder output buffers after decoder context phase is
                             // completed
@@ -1124,7 +1124,7 @@ void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& 
 
     for (auto& newGenReq : newGenReqs)
     {
-        if (newGenReq->mState == REQUEST_STATE_DISAGG_GENERATION_INIT)
+        if (newGenReq->mState == LlmRequestState::kDISAGG_GENERATION_INIT)
         {
             auto const reqSeqSlot = mSeqSlotManager->getSequenceSlot(true, newGenReq->mRequestId);
             newGenReq->mSeqSlot = reqSeqSlot;
@@ -1289,7 +1289,6 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
             }
             else if (mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
             {
-                decoderRequest.generatedTokensPerEngineStep = 1;
                 decoderRequest.lookaheadRuntimeConfig = llmReq->getLookaheadConfig()
                     ? llmReq->getLookaheadConfig()
                     : mDecodingConfig.getLookaheadDecodingConfig();
@@ -2109,12 +2108,12 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
 
                 if (!mWorldConfig.isPipelineParallel() || !mWorldConfig.isLastPipelineParallelRank())
                 {
-                    llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                    llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
                     terminateRequest(llmReq);
                 }
                 else
                 {
-                    llmReq->mState = REQUEST_STATE_GENERATION_TO_COMPLETE;
+                    llmReq->mState = LlmRequestState::kGENERATION_TO_COMPLETE;
                 }
             }
             else
@@ -2126,7 +2125,7 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
                 }
                 if (llmReq->isContextInitState())
                 {
-                    llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
                 }
             }
             ++batchIdx;

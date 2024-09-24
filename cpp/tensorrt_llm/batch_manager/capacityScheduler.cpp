@@ -119,7 +119,7 @@ std::unique_ptr<CapacityScheduler> makeCapacityScheduler(SizeType32 maxNumReques
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
     std::shared_ptr<BasePeftCacheManager> peftCacheManager, executor::CapacitySchedulerPolicy capacitySchedulerPolicy,
-    bool manyMicroBatches, LlmRequestState_t noScheduleUntilState, LlmRequestState_t noScheduleAfterState)
+    bool manyMicroBatches, LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
 {
     if (!kvCacheManager && !peftCacheManager->enabled())
     {
@@ -145,8 +145,8 @@ std::unique_ptr<CapacityScheduler> makeCapacityScheduler(SizeType32 maxNumReques
 
 MaxRequestsScheduler::MaxRequestsScheduler(SizeType32 maxNumRequests,
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager, LlmRequestState_t noScheduleUntilState,
-    LlmRequestState_t noScheduleAfterState)
+    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager, LlmRequestState noScheduleUntilState,
+    LlmRequestState noScheduleAfterState)
     : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
@@ -157,8 +157,8 @@ MaxRequestsScheduler::MaxRequestsScheduler(SizeType32 maxNumRequests,
 MaxUtilizationScheduler::MaxUtilizationScheduler(SizeType32 maxNumRequests,
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
-    std::shared_ptr<BasePeftCacheManager> peftCacheManager, bool manyMicroBatches,
-    LlmRequestState_t noScheduleUntilState, LlmRequestState_t noScheduleAfterState)
+    std::shared_ptr<BasePeftCacheManager> peftCacheManager, bool manyMicroBatches, LlmRequestState noScheduleUntilState,
+    LlmRequestState noScheduleAfterState)
     : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
@@ -171,8 +171,8 @@ MaxUtilizationScheduler::MaxUtilizationScheduler(SizeType32 maxNumRequests,
 GuaranteedNoEvictScheduler::GuaranteedNoEvictScheduler(SizeType32 maxNumRequests,
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
-    std::shared_ptr<BasePeftCacheManager> peftCacheManager, LlmRequestState_t noScheduleUntilState,
-    LlmRequestState_t noScheduleAfterState)
+    std::shared_ptr<BasePeftCacheManager> peftCacheManager, LlmRequestState noScheduleUntilState,
+    LlmRequestState noScheduleAfterState)
     : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
@@ -228,6 +228,7 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
 
     // Now check if we can add pending requests
     auto const maxBlocks = mKvCacheManager->getMaxNumBlocks();
+    auto const maxCrossBlocks = mCrossKvCacheManager ? mCrossKvCacheManager->getMaxNumBlocks() : 0;
     auto const maxPeftCachePages = mPeftCacheManager->getMaxDevicePages();
 
     // Keep track of blocks contributed by requests in context phase
@@ -240,6 +241,7 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
     // If it's been allocated, it had resource to run to completion
     // Also keep track of blocks needed to drive all in-progress requests to completion
     SizeType32 reservedBlocks{0};
+    SizeType32 reservedCrossBlocks{0};
     SizeType32 claimedPeftPages{0};
     std::unordered_set<uint64_t> uniqTaskIds{};
     RequestVector pendingRequests;
@@ -252,7 +254,8 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
             continue;
         }
 
-        if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests) || reservedBlocks == maxBlocks)
+        if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests) || reservedBlocks == maxBlocks
+            || (mCrossKvCacheManager && reservedCrossBlocks == maxCrossBlocks))
         {
             break;
         }
@@ -268,6 +271,7 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
                 claimedPeftPages += mPeftCacheManager->determineNumPages(req);
                 uniqTaskIds.insert(req->getLoraTaskId().value());
             }
+            reservedCrossBlocks += mCrossKvCacheManager ? mCrossKvCacheManager->getNeededBlocksToCompletion(*req) : 0;
         }
         else
         {
@@ -277,6 +281,7 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
 
     // Now check if we can add pending requests
     auto availableBlocks = maxBlocks - reservedBlocks;
+    auto availableCrossBlocks = maxCrossBlocks - reservedCrossBlocks;
     auto availablePeftPages = maxPeftCachePages - claimedPeftPages;
     for (auto const& req : pendingRequests)
     {
@@ -294,21 +299,24 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
         else if (req->isContextInitState())
         {
             auto neededBlocks = mKvCacheManager->getNeededBlocksToCompletion(*req);
+            auto neededCrossBlocks = mCrossKvCacheManager ? mCrossKvCacheManager->getNeededBlocksToCompletion(*req) : 0;
             bool reqHasLora = req->getLoraTaskId().has_value();
             bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
             auto neededPeftPages = isNewTask ? mPeftCacheManager->determineNumPages(req) : 0;
 
-            if (neededBlocks <= availableBlocks && neededPeftPages <= availablePeftPages)
+            if (neededBlocks <= availableBlocks && neededCrossBlocks <= availableCrossBlocks
+                && neededPeftPages <= availablePeftPages)
             {
                 scheduledRequests.emplace_back(req);
                 availableBlocks -= neededBlocks;
+                availableCrossBlocks -= neededCrossBlocks;
                 availablePeftPages -= neededPeftPages;
                 if (isNewTask)
                 {
                     uniqTaskIds.insert(req->getLoraTaskId().value());
                 }
             }
-            else if (neededBlocks > availableBlocks)
+            else if (neededBlocks > availableBlocks || neededCrossBlocks > availableCrossBlocks)
             {
                 // If one requests fails to be scheduled, break
                 break;
@@ -322,6 +330,7 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::scheduleReques
     RequestList const& activeRequests) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
+    TLLM_CHECK_WITH_INFO(!mCrossKvCacheManager, "crossKvCacheManager not supported in MaxUtilizationScheduler");
     mKvCacheManager->startScheduling();
 
     // Keep track of number of requests and block needed for the scheduled requests

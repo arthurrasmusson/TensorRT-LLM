@@ -289,7 +289,7 @@ TEST_F(GptManagerTest, BasicValidationTest)
                         llmReq->addNewTokens({100 * callCount + static_cast<tr::TokenIdType>(llmReq->mRequestId)});
                         if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                         {
-                            llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                            llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
                         }
                     }
 
@@ -357,7 +357,7 @@ TEST_F(GptManagerTest, ZeroOutputLength)
                     for (auto llmReq : requestList)
                     {
                         // Don't add any tokens to simulate no output tokens
-                        llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
                     }
 
                     callCount++;

@@ -1733,7 +1733,7 @@ void testNeededBlocksOneStep(bool kv_cache_block_reuse, int beamWidth, int draft
             EXPECT_EQ(numUsedBlocksThisStep, neededBlocksOneStep);
 
             // Simulate adding new tokens during generation
-            llmRequest->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+            llmRequest->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
             for (int i = draftLen; i < maxNewTokens && (inputLength + i) < maxAttentionWindow; i += (draftLen + 1))
             {
                 auto numCurrentlyUsedBlocks = kvCacheManager.getUsedNumBlocks();

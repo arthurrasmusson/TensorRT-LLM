@@ -248,6 +248,13 @@ private:
 
     std::unordered_map<IdType, std::vector<IdType>> mChildReqIdsMap;
 
+    // Micro batching of new and cancelled requests
+    std::vector<std::vector<RequestWithId>> mMicroBatchedNewReqs;
+    std::vector<std::unordered_set<IdType>> mMicroBatchedCancelIds;
+    SizeType32 mNewReqMicroBatchId{0};
+    SizeType32 mCancelReqMicroBatchId{0};
+    bool mTerminateReqReceived = false;
+
     // Iteration stats
     IterationType mIterStatsMaxIterations;
     std::mutex mIterStatsMtx;
@@ -268,6 +275,7 @@ private:
     static constexpr IdType mTerminateReqId = 0;
 
     BatchingType mBatchingType;
+    bool mIsSchedulerMaxUtilization;
     bool mIsSchedulerGuaranteedNoEvict;
     bool mIsChunkedContext;
 
@@ -296,8 +304,8 @@ private:
 
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommTensorParallel;
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommPipelineParallel;
-    std::unique_ptr<std::thread> mRequestWithIdWaitThread;
-    std::unique_ptr<std::thread> mCancelledRequestsWaitThread;
+    std::vector<std::unique_ptr<std::thread>> mRequestWithIdWaitThreads;
+    std::vector<std::unique_ptr<std::thread>> mCancelledRequestsWaitThreads;
 
     // for validating requests
     bool mEnableBlockReuse;

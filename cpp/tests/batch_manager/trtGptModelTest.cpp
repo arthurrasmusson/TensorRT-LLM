@@ -120,7 +120,7 @@ protected:
             numFinished = 0;
             for (auto& request : requestList)
             {
-                if (request->mState == REQUEST_STATE_GENERATION_COMPLETE)
+                if (request->mState == LlmRequestState::kGENERATION_COMPLETE)
                 {
                     ++numFinished;
                 }
@@ -192,7 +192,7 @@ TEST_F(TrtGptModelTest, Forward)
     trtGptModel->forwardSync();
 
     EXPECT_EQ(requestList.size(), 1);
-    EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_IN_PROGRESS);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_IN_PROGRESS);
     EXPECT_EQ(requestList.front()->getNumTokens(0), 5);
     EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
     EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(1, 2, 3, 4, 2));
@@ -229,7 +229,7 @@ TEST_F(TrtGptModelLoraTest, Forward)
     trtGptModel->forwardSync();
 
     EXPECT_EQ(requestList.size(), 1);
-    EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_IN_PROGRESS);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_IN_PROGRESS);
     EXPECT_EQ(requestList.front()->getNumTokens(0), 5);
     EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
     EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(1, 2, 3, 4, 2));
@@ -443,7 +443,7 @@ TEST_F(TrtGptModelTest, ForwardFinished)
     trtGptModel->forwardSync();
 
     EXPECT_EQ(requestList.size(), 1);
-    EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_IN_PROGRESS);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_IN_PROGRESS);
     EXPECT_EQ(requestList.front()->getNumTokens(0), 6);
     EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
     EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10));
@@ -453,7 +453,7 @@ TEST_F(TrtGptModelTest, ForwardFinished)
     trtGptModel->forwardSync();
 
     EXPECT_EQ(requestList.size(), 1);
-    EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
     EXPECT_EQ(requestList.front()->getNumTokens(0), 7);
     EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 2);
     EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10, 6));
@@ -500,7 +500,7 @@ TEST_F(TrtGptModelTest, ForwardStopWords)
             trtGptModel->forwardSync();
             trtGptModel->forwardAsync(requestList);
             trtGptModel->forwardSync();
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10, 6, 10, 6));
         }
         // With stop words
@@ -524,7 +524,7 @@ TEST_F(TrtGptModelTest, ForwardStopWords)
             trtGptModel->forwardSync();
             trtGptModel->forwardAsync(requestList);
             trtGptModel->forwardSync();
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10, 6, 10));
         }
 
@@ -541,7 +541,7 @@ TEST_F(TrtGptModelTest, ForwardStopWords)
             RequestList requestList{llmRequest};
             trtGptModel->forwardAsync(requestList);
             trtGptModel->forwardSync();
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10));
         }
 
@@ -636,7 +636,7 @@ TEST_F(TrtGptModelTest, ForwardBadWords)
 
             SizeType32 maxNumIterations = 5;
             forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10, 6, 10, 6));
         }
         // With bad words, multiple tokens
@@ -656,7 +656,7 @@ TEST_F(TrtGptModelTest, ForwardBadWords)
             RequestList requestList{llmRequest};
             SizeType32 maxNumIterations = 5;
             forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             // Token at position 7 should be different than 10
             EXPECT_NE(requestList.front()->getTokens(0).at(7), 10);
         }
@@ -674,7 +674,7 @@ TEST_F(TrtGptModelTest, ForwardBadWords)
             RequestList requestList{llmRequest};
             SizeType32 maxNumIterations = 5;
             forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_NE(requestList.front()->getTokens(0).at(5), 10);
         }
 
@@ -767,7 +767,7 @@ TEST_F(TrtGptModelTest, ForwardEmbeddingBias)
 
             SizeType32 maxNumIterations = 5;
             forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(10, 9, 8, 7, 6, 10, 6, 10, 6));
         }
         // With embedding bias
@@ -787,7 +787,7 @@ TEST_F(TrtGptModelTest, ForwardEmbeddingBias)
             RequestList requestList{llmRequest};
             SizeType32 maxNumIterations = 5;
             forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
-            EXPECT_EQ(requestList.front()->mState, REQUEST_STATE_GENERATION_COMPLETE);
+            EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
             // All tokens should become 10 after applying bias
             EXPECT_EQ(requestList.front()->getTokens(0).at(5), 10);
             EXPECT_EQ(requestList.front()->getTokens(0).at(6), 10);

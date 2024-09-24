@@ -46,8 +46,8 @@ public:
         std::optional<SizeType32> maxNumTokens = std::nullopt,
         std::optional<ContextChunkingConfig> ctxChunkConfig = std::nullopt,
         std::optional<SizeType32> maxContextLength = std::nullopt,
-        LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-        LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE)
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE)
         : mMicroBatchScheduler{maxBatchSize, maxNumTokens, ctxChunkConfig, maxContextLength, noScheduleUntilState,
             noScheduleAfterState}
         , mCapacityScheduler{batch_scheduler::makeCapacityScheduler(numContexts * maxBatchSize, kvCacheManager,

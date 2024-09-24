@@ -528,7 +528,7 @@ BatchManagerErrorCode_t GptManager::pollStopSignals()
         auto requestId = req->mRequestId;
         if (stoppedReqIds.find(requestId) != stoppedReqIds.end())
         {
-            req->mState = REQUEST_STATE_GENERATION_COMPLETE;
+            req->mState = LlmRequestState::kGENERATION_COMPLETE;
             mTrtGptModel->terminateRequest(req);
         }
     }

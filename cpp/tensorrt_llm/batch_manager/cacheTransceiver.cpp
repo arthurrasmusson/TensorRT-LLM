@@ -73,7 +73,7 @@ void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
         return;
     }
     setContextState(llmRequest);
-    llmRequest->mState = REQUEST_STATE_DISAGG_CONTEXT_TRANS_IN_PROGRESS;
+    llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS;
     auto future = mDataResponder->respondAndSendAsync(*llmRequest);
     mResponderFutures.insert({llmRequest, std::move(future)});
 }
@@ -87,7 +87,7 @@ void CacheTransceiver::requestAndReceiveSync(LlmRequest* llmRequest)
         future.get();
         llmRequest->setKvCacheTransferEnd(std::chrono::steady_clock::now());
     }
-    llmRequest->mState = tensorrt_llm::batch_manager::REQUEST_STATE_GENERATION_IN_PROGRESS;
+    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::kGENERATION_IN_PROGRESS;
 }
 
 void CacheTransceiver::checkTranferStatus(bool blocking)
@@ -97,7 +97,7 @@ void CacheTransceiver::checkTranferStatus(bool blocking)
         if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
         {
             it->second.get();
-            it->first->mState = REQUEST_STATE_DISAGG_CONTEXT_COMPLETE;
+            it->first->mState = LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
             it = mResponderFutures.erase(it);
         }
         else

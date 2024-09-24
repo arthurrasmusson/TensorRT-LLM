@@ -3462,11 +3462,11 @@ TEST_P(LogitsProcParamsTest, All)
     {
         if (replicated)
         {
-            EXPECT_TRUE(worldRank >= (pp_size - 1) * tp_size);
+            EXPECT_TRUE(worldRank <= tp_size - 1);
         }
         else
         {
-            EXPECT_TRUE(worldRank == (pp_size - 1) * tp_size);
+            EXPECT_TRUE(worldRank == 0);
         }
         EXPECT_TRUE(clientId.value() == kClientId);
         SizeType32 numTokens = tokens.at(0).size();
@@ -3581,6 +3581,7 @@ public:
     MOCK_METHOD(SizeType32, getMaxSequenceLen, (), (const));
     MOCK_METHOD(SizeType32, getVocabSizePadded, (), (const));
     MOCK_METHOD(SizeType32, getMaxDraftLen, (), (const));
+    MOCK_METHOD(SizeType32, getNumMicroBatches, (), (const));
     MOCK_METHOD(nvinfer1::DataType, getLogitDataType, (), (const));
     MOCK_METHOD(void, getCurrentIterationStats, (IterationStats&), (const));
     MOCK_METHOD(void, getCurrentRequestStats, (RequestStatsPerIteration&), (const));
@@ -3620,10 +3621,10 @@ TEST_P(ParamTest, MockedModel)
                 {
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens(VecTokens(beamWidth, 1));
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                 }
                 callCount++;
@@ -3692,10 +3693,10 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens({1});
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                 }
                 callCount++;
@@ -3837,7 +3838,7 @@ TEST_F(GptExecutorTest, MockedModelReqStatsBug)
                 {
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens({1});
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                 }
                 callCount++;
             }));
@@ -3850,7 +3851,7 @@ TEST_F(GptExecutorTest, MockedModelReqStatsBug)
                 {
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                 }
                 return;
@@ -3945,7 +3946,7 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
                 {
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens({1});
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                 }
                 callCount++;
             }));
@@ -3958,7 +3959,7 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
                 {
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                 }
                 return;
@@ -4073,10 +4074,10 @@ TEST_P(ParamTest, MockedModelMultiGpu)
                     // Simulate leader rank communicating with comm session
                     VecTokens newTokens(beamWidth, tokenId);
                     llmReq->addNewTokens(newTokens);
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                     reqCallCount++;
                 }
@@ -4286,10 +4287,10 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
                 {
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens({1});
-                    llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                     {
-                        llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
                     }
                 }
                 callCount++;

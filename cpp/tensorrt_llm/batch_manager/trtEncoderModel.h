@@ -75,6 +75,11 @@ public:
         return mMaxInputLen;
     }
 
+    [[nodiscard]] SizeType32 getNumMicroBatches() const override
+    {
+        return mNumMicroBatches;
+    }
+
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override
     {
         return getModelConfig().getDataType();

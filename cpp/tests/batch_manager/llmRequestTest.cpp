@@ -53,7 +53,7 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getNumReturnSequences(), execReq.getNumReturnSequences());
         EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
         EXPECT_EQ(llmReq.getMaxSentTokenLen(), inputTokens.size());
-        EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+        EXPECT_EQ(llmReq.mState, tb::LlmRequestState::kCONTEXT_INIT);
         EXPECT_FALSE(llmReq.mSeqSlot);
         // No speculative decoding config, draft tokens should be empty
         EXPECT_EQ(llmReq.getDraftTokens()->size(), 0);
@@ -309,7 +309,7 @@ TEST_F(LlmRequestTest, pause)
     llmReq.pause(12);
     EXPECT_EQ(llmReq.mPromptLen, 10);
     EXPECT_EQ(llmReq.mMaxNewTokens, 61);
-    EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+    EXPECT_EQ(llmReq.mState, tb::LlmRequestState::kCONTEXT_INIT);
     EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 0);
 
     llmReq.addNewToken(1, 0);
@@ -323,7 +323,7 @@ TEST_F(LlmRequestTest, pause)
     // max Input is now smaller than num tokens
     EXPECT_EQ(llmReq.mPromptLen, 12);
     EXPECT_EQ(llmReq.mMaxNewTokens, 59);
-    EXPECT_EQ(llmReq.mState, tb::REQUEST_STATE_CONTEXT_INIT);
+    EXPECT_EQ(llmReq.mState, tb::LlmRequestState::kCONTEXT_INIT);
     EXPECT_EQ(llmReq.getMaxNumGeneratedTokens(), 0);
 }
 
@@ -566,7 +566,7 @@ TEST_P(ParamTest, createResponse)
                 llmReq->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
             }
 
-            llmReq->mState = tb::REQUEST_STATE_GENERATION_IN_PROGRESS;
+            llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
             auto response = llmReq->createResponse();
             EXPECT_TRUE(streaming == response.has_value());
 
@@ -608,7 +608,7 @@ TEST_P(ParamTest, createResponse)
         }
     }
 
-    llmRequests.at(0)->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+    llmRequests.at(0)->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
 
     auto const numNewTokens = numIterations * tokensPerIteration;
 
@@ -617,7 +617,7 @@ TEST_P(ParamTest, createResponse)
         auto llmReq = llmRequests.at(seqIdx);
         auto response = llmReq->createResponse();
 
-        if (!streaming && llmRequests.at(seqIdx)->mState != tb::REQUEST_STATE_GENERATION_COMPLETE)
+        if (!streaming && llmRequests.at(seqIdx)->mState != tb::LlmRequestState::kGENERATION_COMPLETE)
         {
             EXPECT_FALSE(response);
             continue;
@@ -687,7 +687,7 @@ TEST_P(ParamTest, createResponse)
             {
                 llmReq->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
             }
-            llmReq->mState = tb::REQUEST_STATE_GENERATION_COMPLETE;
+            llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
         }
 
         for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)

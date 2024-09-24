@@ -88,12 +88,12 @@ protected:
             llmReq->moveToNextContextChunk();
             if (!llmReq->getContextRemainingLength())
             {
-                llmReq->mState = REQUEST_STATE_GENERATION_IN_PROGRESS;
+                llmReq->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
                 llmReq->addNewTokens({mItCount});
             }
             if (llmReq->getNumTokens(0) == llmReq->mPromptLen + llmReq->mMaxNewTokens)
             {
-                llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
             }
         }
         for (auto const& llmReq : genRequests)
@@ -101,13 +101,13 @@ protected:
             llmReq->addNewTokens({mItCount});
             if (llmReq->getNumTokens(0) == llmReq->mPromptLen + llmReq->mMaxNewTokens)
             {
-                llmReq->mState = REQUEST_STATE_GENERATION_COMPLETE;
+                llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
             }
         }
 
         // Remove completed requests
         auto const activeEnd = std::remove_if(activeRequests.begin(), activeRequests.end(),
-            [](auto const& llmReq) { return llmReq->mState == REQUEST_STATE_GENERATION_COMPLETE; });
+            [](auto const& llmReq) { return llmReq->mState == LlmRequestState::kGENERATION_COMPLETE; });
         activeRequests.erase(activeEnd, activeRequests.end());
 
         auto& currContextRequests = mContextRequests.at(mRuntimeContextId);

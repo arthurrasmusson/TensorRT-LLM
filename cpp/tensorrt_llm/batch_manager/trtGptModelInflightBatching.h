@@ -102,14 +102,14 @@ public:
 
     /// @brief Function that waits for the decoding of requests in flight.
     ///        When the requests have finished or using speculative decoding, the state of requests
-    ///        will become REQUEST_STATE_GENERATION_COMPLETE. Else, it will be set to
-    ///        REQUEST_STATE_GENERATION_IN_PROGRESS.
+    ///        will become LlmRequestState::kGENERATION_COMPLETE. Else, it will be set to
+    ///        LlmRequestState::kGENERATION_IN_PROGRESS.
     void forwardSync() override;
 
     /// @brief Function that tries to advance the active requests.
     ///        Depending on resources available, it's possible that not all requests will get advanced.
-    ///        Requests that may be in state REQUEST_STATE_CONTEXT_INIT become REQUEST_STATE_GENERATION_IN_PROGRESS or
-    ///        REQUEST_STATE_GENERATION_TO_COMPLETE.
+    ///        Requests that may be in state LlmRequestState::kCONTEXT_INIT become
+    ///        LlmRequestState::kGENERATION_IN_PROGRESS or LlmRequestState::kGENERATION_TO_COMPLETE.
     /// @param activeRequests The list of request to try to advance.
     void forwardAsync(RequestList const& activeRequests) override;
 
@@ -240,6 +240,11 @@ private:
     [[nodiscard]] runtime::WorldConfig const& getWorldConfig() const override
     {
         return mWorldConfig;
+    }
+
+    [[nodiscard]] SizeType32 getNumMicroBatches() const override
+    {
+        return mNumMicroBatches;
     }
 
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;

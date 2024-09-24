@@ -80,6 +80,7 @@ public:
         return TrtGptModelType::V1;
     };
 
+    [[nodiscard]] SizeType32 getNumMicroBatches() const override;
     [[nodiscard]] runtime::WorldConfig const& getWorldConfig() const override;
     [[nodiscard]] IterationStatsV1 getLastIterationStats() const;
     [[nodiscard]] runtime::BufferManager const& getBufferManager() const override;

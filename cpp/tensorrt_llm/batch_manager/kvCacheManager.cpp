@@ -891,7 +891,7 @@ SizeType32 KVCacheManager::getNeededBlocksToCompletion(LlmRequest const& req) co
 {
     if (isCrossKv())
     {
-        return req.getEncoderOutputLen() / getTokensPerBlock();
+        return tc::ceilDiv(req.getEncoderOutputLen(), getTokensPerBlock());
     }
     SizeType32 numContextBlocks
         = (std::min(req.mPromptLen, mMaxAttentionWindow) + mSinkBubbleLength) / getTokensPerBlock();

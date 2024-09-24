@@ -70,14 +70,14 @@ TrtEncoderModel::TrtEncoderModel(runtime::ModelConfig const& modelConfig, WorldC
     mMicroBatchScheduledRequests.resize(mNumMicroBatches);
     // mEncoderWaitEvents.resize(mNumMicroBatches);
 
-    // set noScheduleUntilState to REQUEST_STATE_ENCODER_INIT for encoder model
+    // set noScheduleUntilState to LlmRequestState::kENCODER_INIT for encoder model
     auto PeftCacheManager = std::make_shared<NoOpPeftCacheManager>();
     // when null kv cache manager is given, request scheduler will use MaxRequests as capacity scheduler, i.e. no
     // handling of maximizing utlization or pause/evict
     // TODO: finer control on encoder requests scheduling
     mRequestScheduler = std::make_shared<batch_scheduler::RequestScheduler>(getMaxBatchSize(), mNumMicroBatches,
         nullptr, nullptr, PeftCacheManager, optionalParams.schedulerConfig, mModelConfig.getMaxNumTokens(),
-        std::nullopt, mModelConfig.getMaxInputLen(), REQUEST_STATE_ENCODER_INIT, REQUEST_STATE_CONTEXT_INIT);
+        std::nullopt, mModelConfig.getMaxInputLen(), LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT);
 
     mHiddenSize = modelConfig.getHiddenSize();
 
@@ -321,7 +321,7 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
                 {
                     if (llmReq->isEncoderInitState())
                     {
-                        llmReq->mState = REQUEST_STATE_CONTEXT_INIT;
+                        llmReq->mState = LlmRequestState::kCONTEXT_INIT;
                         TLLM_LOG_DEBUG("request ID: %u finishes encoder phase", llmReq->mRequestId);
                     }
                 }
@@ -362,9 +362,9 @@ void TrtEncoderModel::terminateRequest(std::shared_ptr<LlmRequest> const& llmReq
     // For enc-dec models, only remove cross kv cache after decoder
     // genenration has finished
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    if (llmReq->mState == REQUEST_STATE_ENCODER_INIT)
+    if (llmReq->mState == LlmRequestState::kENCODER_INIT)
     {
-        llmReq->mState = REQUEST_STATE_CONTEXT_INIT;
+        llmReq->mState = LlmRequestState::kCONTEXT_INIT;
     }
     else
     {
@@ -396,9 +396,9 @@ void TrtEncoderModel::fillEncoderOutputSync(RequestVector const& requestList, Te
         llmReq->setEncoderOutputHost(currentEncoderOutput);
         encoderOutputHostPtr += seqLen * mHiddenSize * bytesPerValue * mWorldConfig.getTensorParallelism();
 
-        if (llmReq->mState == REQUEST_STATE_ENCODER_INIT)
+        if (llmReq->mState == LlmRequestState::kENCODER_INIT)
         {
-            llmReq->mState = REQUEST_STATE_CONTEXT_INIT;
+            llmReq->mState = LlmRequestState::kCONTEXT_INIT;
         }
         else
         {

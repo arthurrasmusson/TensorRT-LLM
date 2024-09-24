@@ -37,7 +37,7 @@ namespace tensorrt_llm::batch_manager::batch_scheduler
 class CapacityScheduler
 {
 public:
-    explicit CapacityScheduler(LlmRequestState_t noScheduleUntilState, LlmRequestState_t noScheduleAfterState)
+    explicit CapacityScheduler(LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
         : mNoScheduleUntilState(noScheduleUntilState)
         , mNoScheduleAfterState(noScheduleAfterState)
     {
@@ -53,20 +53,20 @@ public:
         RequestList const& activeRequests) const
         = 0;
 
-    [[nodiscard]] LlmRequestState_t constexpr getNoScheduleUntilState() const noexcept
+    [[nodiscard]] LlmRequestState constexpr getNoScheduleUntilState() const noexcept
     {
         return mNoScheduleUntilState;
     }
 
-    [[nodiscard]] LlmRequestState_t constexpr getNoScheduleAfterState() const noexcept
+    [[nodiscard]] LlmRequestState constexpr getNoScheduleAfterState() const noexcept
     {
         return mNoScheduleAfterState;
     }
 
 private:
     /// The state until/after which the scheduler should not schedule requests
-    LlmRequestState_t mNoScheduleUntilState;
-    LlmRequestState_t mNoScheduleAfterState;
+    LlmRequestState mNoScheduleUntilState;
+    LlmRequestState mNoScheduleAfterState;
 };
 
 /// @brief Schedule up to maxNumRequests requests
@@ -76,8 +76,8 @@ public:
     explicit MaxRequestsScheduler(SizeType32 maxNumRequests,
         std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
         std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
-        LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-        LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
     [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
         RequestList const& activeRequests) const override;
@@ -97,8 +97,8 @@ public:
     MaxUtilizationScheduler(SizeType32 maxNumRequests, std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
         std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
         std::shared_ptr<BasePeftCacheManager> peftCacheManager, bool manyMicroBatches,
-        LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-        LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
     [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
         RequestList const& activeRequests) const override;
@@ -125,8 +125,8 @@ public:
         std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
         std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
         std::shared_ptr<BasePeftCacheManager> peftCacheManager,
-        LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-        LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
     [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
         RequestList const& activeRequests) const override;
@@ -142,7 +142,7 @@ std::unique_ptr<CapacityScheduler> makeCapacityScheduler(tensorrt_llm::runtime::
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
     std::shared_ptr<BasePeftCacheManager> peftCacheManager, executor::CapacitySchedulerPolicy capacitySchedulerPolicy,
-    bool manyMicroBatches = false, LlmRequestState_t noScheduleUntilState = REQUEST_STATE_CONTEXT_INIT,
-    LlmRequestState_t noScheduleAfterState = REQUEST_STATE_GENERATION_COMPLETE);
+    bool manyMicroBatches = false, LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+    LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
 } // namespace tensorrt_llm::batch_manager::batch_scheduler
