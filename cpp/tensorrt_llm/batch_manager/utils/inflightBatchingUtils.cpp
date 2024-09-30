@@ -160,42 +160,6 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
             {
                 crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
             }
-
-            auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
-            TLLM_CHECK(prepopulatedPromptLen < promptLen);
-
-            if (prepopulatedPromptLen > 0)
-            {
-                // Currently, the runtime process is to apply for cache first and then determine prepopulation.
-                // Use the prepopulated length to advance the context position and decrease chunk size if necessary.
-                if (llmReq->isFullContextRequest())
-                {
-                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
-                    llmReq->setContextChunkSize(promptLen);
-                }
-                else
-                {
-                    auto chunkSize = llmReq->getContextChunkSize();
-                    if (prepopulatedPromptLen + chunkSize < promptLen)
-                    {
-                        // make sure to end at block boundary after current chunk
-                        auto const flooredEndPosition = (prepopulatedPromptLen + chunkSize)
-                            / kvCacheManager.getTokensPerBlock() * kvCacheManager.getTokensPerBlock();
-                        chunkSize = flooredEndPosition - prepopulatedPromptLen;
-                        TLLM_CHECK(chunkSize <= llmReq->getContextChunkSize());
-                    }
-                    llmReq->setContextCurrentPosition(prepopulatedPromptLen);
-                    llmReq->setContextChunkSize(chunkSize);
-                }
-                if (!llmReq->isLastContextChunk())
-                {
-                    TLLM_CHECK_WITH_INFO((llmReq->getContextCurrentPosition() + llmReq->getContextChunkSize())
-                                % kvCacheManager.getTokensPerBlock()
-                            == 0,
-                        "To prevent cache fragmentation, the context position after current chunk should be divisible "
-                        "by the number of tokens per block, except for the last chunk.");
-                }
-            }
         }
     }
 
@@ -211,6 +175,103 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
         }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void CudaGraphExecutor::create(cudaGraph_t const& graph)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    assert(mInstance == nullptr);
+    TLLM_CUDA_CHECK(cudaGraphInstantiate(&mInstance, graph, nullptr, nullptr, 0));
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void CudaGraphExecutor::uploadToStream(runtime::CudaStream const& stream)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    assert(hasInstance());
+    TLLM_CUDA_CHECK(cudaGraphUpload(mInstance, stream.get()));
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void CudaGraphExecutor::launch(runtime::CudaStream const& stream)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_CUDA_CHECK(cudaGraphLaunch(mInstance, stream.get()));
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+bool CudaGraphExecutor::update(cudaGraph_t const& graph)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    return cudaGraphExecUpdate(mInstance, graph, nullptr) != cudaSuccess;
+}
+
+void CudaGraphExecutor::clear()
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    if (mInstance != nullptr)
+    {
+        TLLM_CUDA_CHECK(cudaGraphExecDestroy(mInstance));
+        mInstance = nullptr;
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void CudaGraphExecutor::prepareNextGraph(std::shared_ptr<runtime::TllmRuntime>& runtime, SizeType32 nextContextId)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    auto& stream = runtime->getStream();
+
+    cudaGraph_t nextGraph;
+    TLLM_CUDA_CHECK(cudaStreamBeginCapture(stream.get(), cudaStreamCaptureModeThreadLocal));
+    runtime->executeContext(nextContextId);
+    TLLM_CUDA_CHECK(cudaStreamEndCapture(stream.get(), &nextGraph));
+
+    if (hasInstance())
+    {
+        if (update(nextGraph))
+        {
+            clear();
+            create(nextGraph);
+        }
+    }
+    else
+    {
+        create(nextGraph);
+    }
+
+    TLLM_CUDA_CHECK(cudaGraphDestroy(nextGraph));
+    uploadToStream(stream);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+std::optional<std::shared_ptr<CudaGraphExecutor>> CudaGraphExecutorCache::get(BatchState const& state)
+{
+    auto it = mMap.find(state);
+    if (it == mMap.end())
+    {
+        return std::nullopt;
+    }
+    mCache.splice(mCache.begin(), mCache, it->second);
+    return it->second->second;
+}
+
+void CudaGraphExecutorCache::put(BatchState const& state, std::shared_ptr<CudaGraphExecutor> const& value)
+{
+    auto it = mMap.find(state);
+    if (it != mMap.end())
+    {
+        mCache.erase(it->second);
+    }
+    mCache.emplace_front(BatchStateGraphExecutorPair{state, value});
+    mMap[state] = mCache.begin();
+
+    if (static_cast<runtime::SizeType32>(mMap.size()) > mCapacity)
+    {
+        auto lastState = mCache.back().first;
+        mCache.pop_back();
+        mMap.erase(lastState);
+    }
 }
 
 } // namespace tensorrt_llm::batch_manager::utils

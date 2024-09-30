@@ -361,6 +361,35 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void RuntimeBuffers::prepareBuffersForCudaGraph()
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    NVTX3_SCOPED_RANGE(runtimeBuffersSetFromInputs);
+
+    TLLM_CHECK(numContextRequests == 0);
+
+    auto* pastKeyValueLengthsPtr
+        = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths) : nullptr;
+
+    if (pastKeyValueLengthsPtr)
+    {
+        auto maxAttentionWindowsPtr
+            = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->maxAttentionWindows) : nullptr;
+        auto const maxKvLength = maxAttentionWindowsPtr ? *std::max_element(maxAttentionWindowsPtr,
+                                     maxAttentionWindowsPtr + transformerBuffers->maxAttentionWindows->getShape().d[0])
+                                                        : 0;
+
+        // Set pastKeyValueLength for graph capturing. This way we will capture graph with
+        // maxKvCacheLengthRounded rounded to the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE.
+        // MMHA will launch excessive amount of blocks and some of them will exit early during the actual launch.
+        // We can reuse the same graph for the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE iterations.
+        auto const kvCacheLength = std::min(maxKvLength, maxKvCacheLengthRounded);
+        std::fill_n(pastKeyValueLengthsPtr, getNumSequences(), kvCacheLength);
+    }
+
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, RequestVector const& genRequests,
     SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers,
     kv_cache_manager::KVCacheManager* kvCacheManagerPtr, kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr,
@@ -389,6 +418,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto* logitsIdsHostPtr = bufferCast<SizeType32>(*logitsIdsHost);
     bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kChatGlm;
     bool const isGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
+
+    maxKvCacheLengthRounded = 0;
 
     // sequence length fill common loop
     {
@@ -441,9 +472,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             auto const draftLength = llmReq->getNumDraftTokens();
             auto const& positionIds = llmReq->getPositionIds();
 
-            decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
-            decoderInputLengthsHostPtr[batchIdx] = promptLen;
-
             auto const contextChunkSize
                 = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
             auto const beginCompute = llmReq->getContextCurrentPosition();
@@ -458,7 +486,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
                 std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
                 totalNumLogits += draftLength;
-                decoderInputHost.insert(decoderInputHost.end(), draftTokens->begin(), draftTokens->end());
+
+                decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
+                decoderInputLengthsHostPtr[batchIdx] = promptLen;
             }
             auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
             contextLengthsHostPtr[batchIdx] = inputLength;
@@ -523,6 +553,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             ++batchIdx;
         }
 
+        decoderInputsIds->reshape(ITensor::makeShape({static_cast<ITensor::DimType64>(decoderInputHost.size())}));
+        manager.copy(decoderInputHost.data(), *decoderInputsIds);
+
         if (rnnStateBuffers)
         {
             rnnStateBuffers->fillSlotMappings(contextRequests, rnnStateManagerPtr);
@@ -566,7 +599,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 auto const lastToken = llmReq->getLastTokens(beam);
                 auto const numTokens = llmReq->getNumTokens(beam);
                 inputHost.push_back(lastToken);
-                decoderInputHost.push_back(lastToken);
 
                 // If model updates generation position ids do not append them here.
                 if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
@@ -602,13 +634,11 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 if (draftLength > 0)
                 {
                     inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                    decoderInputHost.insert(decoderInputHost.end(), draftTokens->begin(), draftTokens->end());
                 }
             }
 
             SizeType32 pastKeyValueLength = sequenceLen - 1;
 
-            std::fill_n(decoderInputLengthsHostPtr + numSequences, reqBeamWidth, draftLength + 1);
             if (pastKeyValueLengthsPtr)
             {
                 std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
@@ -697,8 +727,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         NVTX3_SCOPED_RANGE(bufferCopies);
         inputsIds->reshape(ITensor::makeShape({totalInputSize}));
         manager.copy(inputHost.data(), *inputsIds);
-        decoderInputsIds->reshape(ITensor::makeShape({static_cast<int>(decoderInputHost.size())}));
-        manager.copy(decoderInputHost.data(), *decoderInputsIds);
         // In generation phase, device ptr of context lengths need to be tiled.
         manager.copy(*contextLengthsHost, *contextLengthsDevice);
         manager.copy(*sequenceLengthsHost, *sequenceLengthsDevice);
@@ -711,7 +739,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         if (transformerBuffers)
         {
             TensorPtr decoderPositionIds = modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
-                ? ITensor::slice(lookaheadBuffers->positionIdsDevice, 0, numGenRequests)
+                ? lookaheadBuffers->positionIdsDevice
                 : nullptr;
             transformerBuffers->copyPositionIds(runtime, positionIdsHost, isChatGlm || isGlm, decoderPositionIds);
         }
@@ -719,6 +747,15 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             rnnStateBuffers->copySlotMappingH2D(runtime);
         }
+    }
+
+    if (pastKeyValueLengthsPtr)
+    {
+        auto const maxKvCacheLength
+            = *std::max_element(pastKeyValueLengthsPtr, pastKeyValueLengthsPtr + getNumSequences());
+        // Round up kv cache length
+        maxKvCacheLengthRounded = common::ceilDiv(maxKvCacheLength, kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE)
+            * kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE;
     }
 
     if (worldConfig.isPipelineParallel())

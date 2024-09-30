@@ -54,7 +54,7 @@ class EncoderModelTestSingleGPU : public ::testing::Test // NOLINT(cppcoreguidel
 {
 protected:
     EncoderModelTestSingleGPU(std::filesystem::path const& modelPath)
-        : mModelConfig(1, 1, 1, 1, 1, nvinfer1::DataType::kFLOAT)
+        : mModelConfig(1, 2, 1, 1, 1, 1, nvinfer1::DataType::kFLOAT)
         , mModelPath(modelPath)
     {
     }

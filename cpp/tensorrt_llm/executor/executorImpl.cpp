@@ -22,7 +22,7 @@
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/common/utils.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
@@ -720,14 +720,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(std::vector<Request> const& 
 std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request const> const& requests)
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called, cannot enqueue requests");
-
-    // Non-leader are not expected to call enqueueRequests
-    // Otherwise this would imply we need to broadcast the requestId
-    TLLM_CHECK_WITH_INFO(!(mCommMode == CommunicationMode::kLEADER && !mIsLeader),
-        "With LEADER communication mode, only leader rank is expected to call enqueueRequests");
-
-    TLLM_CHECK_WITH_INFO(!(mCommMode == CommunicationMode::kORCHESTRATOR && !mIsOrchestrator),
-        "With ORCHESTRATOR communication mode, only orchestrator rank is expected to call enqueueRequests");
+    checkParallelApiUsage(__func__);
 
     TLLM_LOG_DEBUG("Enqueuing %d requests", requests.size());
     std::vector<RequestWithId> requestWithIds;
@@ -805,6 +798,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
 std::vector<Response> Executor::Impl::awaitResponses(std::optional<std::chrono::milliseconds> const& timeout)
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     std::vector<Response> responses;
     std::unique_lock<std::mutex> lck(mResponsesMtx);
     auto pred = [&mShutdown = mShutdown, &resp = this->mResponses]() -> bool { return !resp.empty() || mShutdown; };
@@ -837,6 +831,7 @@ std::vector<Response> Executor::Impl::awaitResponses(
     IdType const& reqId, std::optional<std::chrono::milliseconds> const& timeout)
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     std::vector<Response> responses;
     std::unique_lock<std::mutex> lck(mResponsesMtx);
     auto pred = [&mShutdown = mShutdown, &resp = this->mResponses, reqId]() -> bool
@@ -881,6 +876,7 @@ std::vector<std::vector<Response>> Executor::Impl::awaitResponses(
     std::vector<IdType> const& requestIds, std::optional<std::chrono::milliseconds> const& timeout)
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     std::vector<std::vector<Response>> v(requestIds.size());
     if (timeout)
     {
@@ -906,6 +902,7 @@ std::vector<std::vector<Response>> Executor::Impl::awaitResponses(
 SizeType32 Executor::Impl::getNumResponsesReady(std::optional<IdType> const& optId) const
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     std::scoped_lock<std::mutex> lck(mResponsesMtx);
     SizeType32 numResponsesReady = 0;
     if (optId)
@@ -995,16 +992,7 @@ void Executor::Impl::shutdown()
 void Executor::Impl::cancelRequest(IdType requestId)
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
-    // If leader mode, and not leader, throw error
-    if (mCommMode == CommunicationMode::kLEADER && !mIsLeader)
-    {
-        // Non-leader are not expected to call cancelRequest
-        TLLM_THROW("With LEADER communication mode, only leader rank is expected to call cancelRequest");
-    }
-    if (mCommMode == CommunicationMode::kORCHESTRATOR && !mIsOrchestrator)
-    {
-        TLLM_THROW("With ORCHESTRATOR communication mode, only orchestrator rank is expected to call cancelRequest");
-    }
+    checkParallelApiUsage(__func__);
 
     // Check if the request is terminated already. If so, return
     {
@@ -1033,6 +1021,7 @@ void Executor::Impl::cancelRequest(IdType requestId)
 std::deque<IterationStats> Executor::Impl::getLatestIterationStats()
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     std::scoped_lock<std::mutex> lck(mIterStatsMtx);
     return std::exchange(mIterationStats, {});
 }
@@ -1040,6 +1029,7 @@ std::deque<IterationStats> Executor::Impl::getLatestIterationStats()
 std::deque<RequestStatsPerIteration> Executor::Impl::getLatestRequestStats()
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
+    checkParallelApiUsage(__func__);
     if (mCommMode == CommunicationMode::kORCHESTRATOR)
     {
         TLLM_LOG_WARNING("getLatestRequestStats is not supported in ORCHESTRATOR mode yet");
@@ -1730,15 +1720,23 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
     if (!mCancelledReqIds.empty())
     {
         // Loop over active requests and terminate those that have been cancelled
+        std::unordered_set<IdType> terminatedReqIds;
         for (auto& req : activeRequests)
         {
-            auto reqId = req->mRequestId;
+            auto reqId = req->isChild() ? req->getParentRequestId() : req->mRequestId;
             if (mCancelledReqIds.find(reqId) != mCancelledReqIds.end())
             {
                 req->mState = batch_manager::LlmRequestState::kGENERATION_COMPLETE;
                 mModel->terminateRequest(req);
-                mCancelledReqIds.erase(reqId);
+                // Parent and child requests share the same request id.
+                // Mark it terminated first and remove from the set later.
+                terminatedReqIds.insert(reqId);
             }
+        }
+
+        for (auto& reqId : terminatedReqIds)
+        {
+            mCancelledReqIds.erase(reqId);
         }
     }
 }
@@ -1877,7 +1875,7 @@ void Executor::Impl::executionLoop()
             }
         }
 
-        if (!activeRequests.empty())
+        if (!activeRequests.empty() || !inTransmissionRequests.empty())
         {
             forwardAsync(activeRequests);
             updateIterationStats(activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS,
@@ -1928,15 +1926,19 @@ void Executor::Impl::enqueueTerminateRequest()
 
 void Executor::Impl::enqueueNewResponses(std::vector<Response>&& newResponses)
 {
-    if (mCommMode == CommunicationMode::kLEADER)
+    // Only leader should store responses
+    if (mIsLeader)
     {
-        appendNewResponses(std::move(newResponses));
-    }
-    else if (mCommMode == CommunicationMode::kORCHESTRATOR && mIsLeader)
-    {
-        MpiMessage message(MpiId::RESPONSE);
-        message.data = ResponseData{std::move(newResponses)};
-        mSendQueue.push(std::move(message));
+        if (mCommMode == CommunicationMode::kLEADER)
+        {
+            appendNewResponses(std::move(newResponses));
+        }
+        else if (mCommMode == CommunicationMode::kORCHESTRATOR)
+        {
+            MpiMessage message(MpiId::RESPONSE);
+            message.data = ResponseData{std::move(newResponses)};
+            mSendQueue.push(std::move(message));
+        }
     }
 }
 
@@ -2215,6 +2217,21 @@ void Executor::Impl::addTerminatedReqId(std::vector<Response> const& responses, 
                 mChildReqIdsMap.erase(reqId);
             }
         }
+    }
+}
+
+void Executor::Impl::checkParallelApiUsage(std::string const& methodName) const
+{
+    // If leader mode, and not leader, throw error
+    if (mCommMode == CommunicationMode::kLEADER && !mIsLeader)
+    {
+        // Non-leader are not expected to call cancelRequest
+        TLLM_THROW("With LEADER communication mode, only leader rank is expected to call %s", methodName.c_str());
+    }
+    if (mCommMode == CommunicationMode::kORCHESTRATOR && !mIsOrchestrator)
+    {
+        TLLM_THROW(
+            "With ORCHESTRATOR communication mode, only orchestrator rank is expected to call %s", methodName.c_str());
     }
 }
 

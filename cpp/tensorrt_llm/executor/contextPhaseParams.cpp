@@ -10,7 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 
 #include <optional>
@@ -18,14 +18,16 @@
 namespace tensorrt_llm::executor
 {
 
-ContextPhaseParams::ContextPhaseParams(VecTokens firstGenTokens, void* state)
-    : mFirstGenTokens{std::move(firstGenTokens)}
+ContextPhaseParams::ContextPhaseParams(VecTokens firstGenTokens, RequestIdType reqId, void* state)
+    : mReqId{reqId}
+    , mFirstGenTokens{std::move(firstGenTokens)}
     , mState{StatePtr{state, deleter}}
 {
 }
 
-ContextPhaseParams::ContextPhaseParams(VecTokens firstGenTokens)
-    : mFirstGenTokens{std::move(firstGenTokens)}
+ContextPhaseParams::ContextPhaseParams(VecTokens firstGenTokens, RequestIdType reqId)
+    : mReqId{reqId}
+    , mFirstGenTokens{std::move(firstGenTokens)}
 {
 }
 
@@ -33,11 +35,12 @@ ContextPhaseParams::ContextPhaseParams(ContextPhaseParams const& other)
 {
     // Since the internal header files implement the destructor while using the declaration of this
     // type, a `unique_ptr` with a custom destructor member is used here.
+    mReqId = other.mReqId;
     mFirstGenTokens = other.mFirstGenTokens;
     if (other.mState)
     {
-        auto* otherState = static_cast<ContextPhaseState*>(other.mState.get());
-        mState = StatePtr{std::make_unique<ContextPhaseState>(*otherState).release(), deleter};
+        auto* otherState = static_cast<DataTransceiverState*>(other.mState.get());
+        mState = StatePtr{std::make_unique<DataTransceiverState>(*otherState).release(), deleter};
     }
 }
 
@@ -61,6 +64,11 @@ VecTokens ContextPhaseParams::popFirstGenTokens() && noexcept
     return std::move(mFirstGenTokens);
 }
 
+ContextPhaseParams::RequestIdType ContextPhaseParams::getReqId() const noexcept
+{
+    return mReqId;
+}
+
 void const* ContextPhaseParams::getState() const noexcept
 {
     return mState.get();
@@ -78,19 +86,20 @@ void* ContextPhaseParams::releaseState() noexcept
 
 void ContextPhaseParams::deleter(void const* data)
 {
-    using StateT = ContextPhaseState const;
+    using StateT = DataTransceiverState const;
     std::default_delete<StateT>()(static_cast<StateT*>(data));
 }
 
 bool ContextPhaseParams::operator==(ContextPhaseParams const& other) const noexcept
 {
-    if (mFirstGenTokens != other.mFirstGenTokens || static_cast<bool>(mState) != static_cast<bool>(other.mState))
+    if (mFirstGenTokens != other.mFirstGenTokens || mReqId != other.mReqId
+        || static_cast<bool>(mState) != static_cast<bool>(other.mState))
     {
         return false;
     }
     return !mState
-        || *static_cast<ContextPhaseState const*>(mState.get())
-        == *static_cast<ContextPhaseState const*>(other.mState.get());
+        || *static_cast<DataTransceiverState const*>(mState.get())
+        == *static_cast<DataTransceiverState const*>(other.mState.get());
 }
 
 } // namespace tensorrt_llm::executor

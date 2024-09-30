@@ -1,6 +1,7 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-License-Identifier: NVIDIA TensorRT
+ * Source Code License Agreement
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
  * property and proprietary rights in and to this material, related
@@ -12,11 +13,13 @@
 
 #pragma once
 
+#include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 #include <variant>
+#include <vector>
 
 namespace tensorrt_llm::executor
 {
@@ -26,22 +29,31 @@ class Serialization;
 namespace kv_cache
 {
 
-// Describe the data structure for cache layout, which can be used to infer cache layouts and location
-// associations between different processes, in order to determine suitable senders and receivers.
+// Describe the data structure for cache layout, which can be used to infer
+// cache layouts and location associations between different processes, in order
+// to determine suitable senders and receivers.
 class CacheState final
 {
 public:
     CacheState(runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
-        : mModelConfig{modelConfig.getNbAttentionLayers(1), modelConfig.getNbKvHeads(), modelConfig.getSizePerHead(),
+        : mModelConfig{std::vector(modelConfig.getNumKvHeadsPerLayer()), modelConfig.getSizePerHead(),
             modelConfig.getTokensPerBlock()}
         , mParallelConfig{worldConfig.getTensorParallelism(), worldConfig.getPipelineParallelism()}
         , mDataType{modelConfig.getKvDataType()}
     {
     }
 
+    CacheState(std::vector<SizeType32> nbKvHeadPerLayer, SizeType32 sizePerHead, SizeType32 tokensPerBlock,
+        SizeType32 tensorParallelism, SizeType32 pipelineParallelism, nvinfer1::DataType dataType)
+        : mModelConfig{std::move(nbKvHeadPerLayer), sizePerHead, tokensPerBlock}
+        , mParallelConfig{tensorParallelism, pipelineParallelism}
+        , mDataType{dataType}
+    {
+    }
+
     CacheState(SizeType32 nbAttentionLayers, SizeType32 nbKvHeads, SizeType32 sizePerHead, SizeType32 tokensPerBlock,
         SizeType32 tensorParallelism, SizeType32 pipelineParallelism, nvinfer1::DataType dataType)
-        : mModelConfig{nbAttentionLayers, nbKvHeads, sizePerHead, tokensPerBlock}
+        : mModelConfig{std::vector(nbAttentionLayers, nbKvHeads), sizePerHead, tokensPerBlock}
         , mParallelConfig{tensorParallelism, pipelineParallelism}
         , mDataType{dataType}
     {
@@ -58,15 +70,14 @@ private:
 
     struct ModelConfig
     {
-        SizeType32 mNbAttentionLayers;
-        SizeType32 mNbKvHeads;
+        std::vector<SizeType32> mNbKvHeadsPerLayer;
         SizeType32 mSizePerHead;
         SizeType32 mTokensPerBlock;
 
         [[nodiscard]] bool operator==(ModelConfig const& other) const noexcept
         {
-            return mNbAttentionLayers == other.mNbAttentionLayers && mNbKvHeads == other.mNbKvHeads
-                && mSizePerHead == other.mSizePerHead && mTokensPerBlock == other.mTokensPerBlock;
+            return mNbKvHeadsPerLayer == other.mNbKvHeadsPerLayer && mSizePerHead == other.mSizePerHead
+                && mTokensPerBlock == other.mTokensPerBlock;
         }
     };
 
@@ -112,18 +123,21 @@ class CommState final
 public:
     CommState() = default;
 
-    explicit CommState(std::vector<SizeType32> ranks)
+    explicit CommState(std::vector<SizeType32> ranks, int selfIdx = -1)
         : mState{MpiState{std::move(ranks)}}
+        , mSelfIdx{selfIdx}
     {
     }
 
-    explicit CommState(std::vector<SocketState> socketState)
+    explicit CommState(std::vector<SocketState> socketState, int selfIdx = -1)
         : mState{std::move(socketState)}
+        , mSelfIdx{selfIdx}
     {
     }
 
     CommState(std::uint16_t port, std::string ip)
         : mState{std::vector<SocketState>{SocketState{port, std::move(ip)}}}
+        , mSelfIdx{0}
     {
     }
 
@@ -149,6 +163,11 @@ public:
         return std::get<std::vector<SocketState>>(mState);
     }
 
+    [[nodiscard]] int getSelfIdx() const noexcept
+    {
+        return mSelfIdx;
+    }
+
     [[nodiscard]] bool operator==(CommState const& other) const noexcept
     {
         return mState == other.mState;
@@ -157,25 +176,20 @@ public:
 private:
     friend class tensorrt_llm::executor::Serialization;
     std::variant<std::monostate, MpiState, std::vector<SocketState>> mState;
+    int mSelfIdx{-1};
 };
 
 } // namespace kv_cache
 
-class ContextPhaseState final
+class DataTransceiverState final
 {
 public:
-    using RequestIdType = std::uint64_t;
+    DataTransceiverState() = default;
 
-    ContextPhaseState() = default;
-
-    explicit ContextPhaseState(RequestIdType ReqId)
-        : mReqId{ReqId}
+    DataTransceiverState(kv_cache::CacheState cacheState, kv_cache::CommState commState)
+        : mCacheState{std::move(cacheState)}
+        , mCommState{std::move(commState)}
     {
-    }
-
-    [[nodiscard]] RequestIdType getReqId() const noexcept
-    {
-        return mReqId;
     }
 
     void setCacheState(kv_cache::CacheState state)
@@ -198,14 +212,13 @@ public:
         return mCommState;
     }
 
-    [[nodiscard]] bool operator==(ContextPhaseState const& other) const noexcept
+    [[nodiscard]] bool operator==(DataTransceiverState const& other) const noexcept
     {
-        return mReqId == other.mReqId && mCacheState == other.mCacheState && mCommState == other.mCommState;
+        return mCacheState == other.mCacheState && mCommState == other.mCommState;
     }
 
 private:
     friend class Serialization;
-    RequestIdType mReqId{0};
     std::optional<kv_cache::CacheState> mCacheState;
     std::optional<kv_cache::CommState> mCommState;
 };

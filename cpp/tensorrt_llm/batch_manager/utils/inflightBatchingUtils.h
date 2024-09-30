@@ -43,4 +43,58 @@ void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, 
 void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
     kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr);
 
+class CudaGraphExecutor
+{
+public:
+    CudaGraphExecutor() = default;
+
+    ~CudaGraphExecutor()
+    {
+        try
+        {
+            clear();
+        }
+        catch (std::exception& e)
+        {
+            TLLM_LOG_EXCEPTION(e);
+        }
+    }
+
+    bool hasInstance() const
+    {
+        return mInstance != nullptr;
+    }
+
+    void clear();
+    void prepareNextGraph(std::shared_ptr<runtime::TllmRuntime>& runtime, SizeType32 nextContextId);
+    void launch(runtime::CudaStream const& stream);
+
+private:
+    void create(cudaGraph_t const& graph);
+    bool update(cudaGraph_t const& graph);
+    void uploadToStream(runtime::CudaStream const& stream);
+
+    cudaGraphExec_t mInstance;
+};
+
+class CudaGraphExecutorCache
+{
+    /// @brief LRU cache to store cuda graph instances.
+public:
+    explicit CudaGraphExecutorCache(runtime::SizeType32 capacity)
+        : mCapacity(capacity)
+    {
+    }
+
+    std::optional<std::shared_ptr<CudaGraphExecutor>> get(BatchState const& state);
+
+    void put(BatchState const& state, std::shared_ptr<CudaGraphExecutor> const& value);
+
+private:
+    using BatchStateGraphExecutorPair = std::pair<BatchState, std::shared_ptr<CudaGraphExecutor>>;
+    using GraphExecutorLruCache = std::list<BatchStateGraphExecutorPair>;
+    SizeType32 mCapacity;
+    GraphExecutorLruCache mCache;
+    std::unordered_map<BatchState, GraphExecutorLruCache::iterator, BatchStateHash> mMap;
+};
 } // namespace tensorrt_llm::batch_manager::utils

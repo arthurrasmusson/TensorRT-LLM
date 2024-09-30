@@ -15,7 +15,10 @@
 #include "dataTransceiver.h"
 
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/batch_manager/peftCacheManagerConfig.h"
+#include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/runtime/common.h"
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -43,8 +46,8 @@ public:
     virtual void sendBuffer(runtime::IBuffer const& buf) const;
     virtual void recvBuffer(runtime::IBuffer& buf) const;
 
-    virtual LlmRequest::RequestIdType recvRequestId() const;
-    virtual void sendRequestId(LlmRequest::RequestIdType id) const;
+    virtual RequestInfo recvRequestInfo() const;
+    virtual void sendRequestInfo(RequestInfo const& info) const;
 
 private:
     static constexpr ucxx::Tag kID_TAG{1};
@@ -75,10 +78,15 @@ class UcxDataSender final : public DataSender
 public:
     using TFormatter = std::unique_ptr<IOFormatter<UcxComm, TDataConfig>>;
 
-    UcxDataSender(std::unique_ptr<UcxCommFactory>&& factory, TFormatter formatter, uint16_t listenerPort = 0)
+    UcxDataSender(std::unique_ptr<UcxCommFactory>&& factory, executor::kv_cache::CacheState selfCacheState,
+        SizeType32 selfIndex, TFormatter formatter, uint16_t listenerPort = 0)
         : mFactory{std::move(factory)}
+        , mSelfCacheState{std::move(selfCacheState)}
         , mFormatter{std::move(formatter)}
     {
+        mSelfState.setCommState(
+            executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
+        mSelfState.setCacheState(std::move(selfCacheState));
         mContext = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
         mWorker = mContext->createWorker();
         // Ensure the progress thread has CUDA context initialized
@@ -88,7 +96,7 @@ public:
         startListener(listenerPort);
     }
 
-    [[nodiscard]] LlmRequest::RequestIdType recvRequestId() override
+    [[nodiscard]] RequestInfo recvRequestInfo() override
     {
         // Below can be initiated asynchronously when an endpoint is created..
         std::unique_ptr<UcxComm> comm;
@@ -98,10 +106,10 @@ public:
             comm = std::move(mIncomingRequests.front());
             mIncomingRequests.pop_front();
         }
-        auto requestId = comm->recvRequestId();
+        auto info = comm->recvRequestInfo();
         std::lock_guard<std::mutex> lk(mMtx);
-        mRequestToComm.emplace(requestId, std::move(comm));
-        return requestId;
+        mRequestToComm.emplace(info.getRequestId(), std::move(comm));
+        return info;
     }
 
     void sendSync(LlmRequest const& llmRequest) override
@@ -111,7 +119,7 @@ public:
             std::lock_guard<std::mutex> lk(mMtx);
             auto it = mRequestToComm.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
-                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestId().");
+                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
             comm = it->second.get();
         }
         (*mFormatter)(llmRequest, {comm});
@@ -124,7 +132,12 @@ public:
 
     [[nodiscard]] executor::kv_cache::CommState const& getCommState() const override
     {
-        return mCommState;
+        return mSelfState.getCommState().value();
+    }
+
+    void setCommState(executor::kv_cache::CommState const& commState) override
+    {
+        mSelfState.setCommState(commState);
     }
 
 private:
@@ -139,7 +152,7 @@ private:
     void startListener(uint16_t listenerPort)
     {
         mListener = mWorker->createListener(listenerPort, listenerCallback, this);
-        mCommState = executor::kv_cache::CommState{mListener->getPort(), mListener->getIp()};
+        mSelfState.setCommState(executor::kv_cache::CommState{mListener->getPort(), mListener->getIp()});
     }
 
     void addIncomingRequests(std::unique_ptr<UcxComm>&& incomingRequest)
@@ -152,6 +165,7 @@ private:
     }
 
     std::unique_ptr<UcxCommFactory> mFactory;
+    executor::kv_cache::CacheState mSelfCacheState;
     TFormatter mFormatter;
 
     std::shared_ptr<ucxx::Context> mContext;
@@ -162,7 +176,7 @@ private:
     std::condition_variable mRequestCv;
     std::deque<std::unique_ptr<UcxComm>> mIncomingRequests;
     std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
-    executor::kv_cache::CommState mCommState;
+    executor::DataTransceiverState mSelfState;
 };
 
 template <typename TDataConfig>
@@ -171,10 +185,14 @@ class UcxDataReceiver final : public DataReceiver
 public:
     using TFormatter = std::unique_ptr<IOFormatter<UcxComm, TDataConfig>>;
 
-    UcxDataReceiver(std::unique_ptr<UcxCommFactory>&& factory, TFormatter formatter)
+    UcxDataReceiver(std::unique_ptr<UcxCommFactory>&& factory, executor::kv_cache::CacheState selfCacheState,
+        SizeType32 selfIndex, TFormatter formatter)
         : mFactory{std::move(factory)}
         , mFormatter{std::move(formatter)}
     {
+        mSelfState.setCommState(
+            executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
+        mSelfState.setCacheState(std::move(selfCacheState));
         mContext = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
         mWorker = mContext->createWorker();
         // Ensure the progress thread has CUDA context initialized
@@ -182,12 +200,27 @@ public:
         mWorker->startProgressThread();
     }
 
-    void sendRequestId(LlmRequest const& llmRequest) override
+    void sendRequestInfo(LlmRequest const& llmRequest) override
     {
-        auto requestId = llmRequest.getContextPhaseState().getReqId();
-        auto& socketComm = llmRequest.getContextPhaseState().getCommState().value().getSocketState().at(0);
+        // TODO: support hetergenous mapping
+        auto requestId = llmRequest.getContextPhaseParams().value().getReqId();
+        auto const& contextState = llmRequest.getDataTransceiverState();
+        auto const& socketState = contextState.getCommState().value().getSocketState();
+        std::vector<SizeType32> targetRanks{};
+        if (contextState.getCacheState().has_value())
+        {
+            auto const& destCacheState = contextState.getCacheState().value();
+            targetRanks = mFormatter->getCounterparts(
+                mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState);
+        }
+        else
+        {
+            targetRanks.push_back(0);
+        }
+        auto& socketComm = socketState.at(targetRanks[0]);
         auto comm = mFactory->create(mWorker->createEndpointFromHostname(socketComm.mIp, socketComm.mPort));
-        comm->sendRequestId(requestId);
+        RequestInfo info{requestId, mSelfState};
+        comm->sendRequestInfo(std::move(info));
         std::lock_guard<std::mutex> lk(mMtx);
         mRequestToComm.emplace(llmRequest.mRequestId, std::move(comm));
     }
@@ -199,7 +232,7 @@ public:
             std::lock_guard<std::mutex> lk(mMtx);
             auto it = mRequestToComm.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
-                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestId().");
+                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
             comm = it->second.get();
         }
         (*mFormatter)(llmRequest, {comm});
@@ -212,6 +245,7 @@ public:
 
 private:
     std::unique_ptr<UcxCommFactory> mFactory;
+    executor::DataTransceiverState mSelfState;
     TFormatter mFormatter;
 
     std::shared_ptr<ucxx::Context> mContext;
@@ -221,8 +255,10 @@ private:
     std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
 };
 
-std::unique_ptr<DataResponder> makeUcxCacheResponder(kv_cache_manager::KVCacheManager* cacheManager);
+std::unique_ptr<DataResponder> makeUcxCacheResponder(executor::kv_cache::CacheState selfCacheState,
+    SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
 
-std::unique_ptr<DataRequester> makeUcxCacheRequester(kv_cache_manager::KVCacheManager* cacheManager);
+std::unique_ptr<DataRequester> makeUcxCacheRequester(executor::kv_cache::CacheState selfCacheState,
+    SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
 
 } // namespace tensorrt_llm::batch_manager

@@ -21,6 +21,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
+#include "tensorrt_llm/runtime/cudaStream.h"
 #include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -58,6 +59,11 @@ class LlmRequest;
 class RuntimeBuffers;
 class BasePeftCacheManager;
 
+namespace utils
+{
+class CudaGraphExecutorCache;
+} // namespace utils
+
 class TrtGptModelInflightBatching : public TrtGptModel
 {
     using KVCacheManager = kv_cache_manager::KVCacheManager;
@@ -90,7 +96,7 @@ public:
     using PeftTable = PeftCacheManager::PeftTable;
     using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
     using TensorPtr = runtime::ITensor::SharedPtr;
-    using TokenPtr = std::unique_ptr<runtime::decoder_batch::Token const>;
+    using DecoderFinishedEventPtr = std::unique_ptr<runtime::decoder_batch::DecoderFinishedEvent const>;
 
     TrtGptModelInflightBatching(std::shared_ptr<nvinfer1::ILogger> logger, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, runtime::RawEngine const& rawEngine, bool ctxGenFusion,
@@ -161,6 +167,11 @@ private:
         return mMicroBatchId;
     }
 
+    [[nodiscard]] SizeType32 getNextMicroBatchId(SizeType32 bufferId) const
+    {
+        return (bufferId + 1) % mNumMicroBatches;
+    }
+
     //! @brief Store full kv cache blocks contributed by req.
     //! These blocks become reusable from next step.
     void storeContextBlocks(std::shared_ptr<LlmRequest> const& req);
@@ -171,7 +182,16 @@ private:
     //! @brief Print profile information per layer.
     std::string getLayerProfileInfo() const override;
 
-    void executeContext(SizeType32 runtimeContextId);
+    std::tuple<SizeType32, TensorMap const&, TensorMap&> prepareBuffers(
+        RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
+
+    //! @brief Capture graph of current batch state during engine execution.
+    //! This is based on the assumptions that
+    //! a) We can hide CPU graph capture behind the GPU engine execution.
+    //! b) Batch size in the next iterations won't change and we can reuse the graph multiple times.
+    void prepareGraph(SizeType32 bufferId, SizeType32 optProfileId);
+
+    void executeContext(SizeType32 runtimeContextId, SizeType32 bufferId);
     void executeBatch(ScheduledRequests const& scheduledRequests);
     void executeStep(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
@@ -212,9 +232,9 @@ private:
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
     void setupDecoderStep(RequestVector const& contextRequests);
-    TokenPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
+    DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
-        ScheduledRequests const& scheduledRequests, TokenPtr const& decoderToken);
+        ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr const& decoderFinishEvent);
     /// @brief It gathers the logits if they need to be returned, calls getDecoderSlotHostOutputs,
     /// and overwrites the llmRequest tokens buffer.
     /// Called either on request finishing, or at every step when doing beam search and streaming.
@@ -314,7 +334,7 @@ private:
     // Decoder that generates new tokens from the logits.
     std::shared_ptr<runtime::IGptDecoderBatched> mDecoder;
     // Synchronization handles for decoder
-    std::vector<TokenPtr> mDecoderWaitEvents;
+    std::vector<DecoderFinishedEventPtr> mDecoderFinishedEvents;
 
     // Manager that maps requests to slots
     std::shared_ptr<SequenceSlotManager> mSeqSlotManager;
@@ -391,6 +411,8 @@ private:
     executor::IterationType mIterCounter{0};
     // Debug tensors of last itreation
     TensorMap mLastIterationDebugTensors;
+    // Cuda graph instances for each microbatch.
+    std::vector<utils::CudaGraphExecutorCache> mCudaGraphExecutorCaches;
 
     /******************** Cache transceiver ********************/
     std::unique_ptr<CacheTransceiver> mCacheTransceiver;

@@ -52,7 +52,7 @@ class TrtGptModelTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-t
 {
 protected:
     TrtGptModelTest(std::filesystem::path const& modelPath)
-        : mModelConfig(1, 1, 0, 1, 1, nvinfer1::DataType::kFLOAT)
+        : mModelConfig(1, 1, 1, 0, 1, 1, nvinfer1::DataType::kFLOAT)
         , mModelPath(modelPath)
     {
     }

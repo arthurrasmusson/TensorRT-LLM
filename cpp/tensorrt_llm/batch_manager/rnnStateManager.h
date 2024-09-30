@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include "tensorrt_llm/batch_manager/rnnStateBuffers.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
@@ -27,8 +26,9 @@ public:
     using TensorPtr = runtime::ITensor::SharedPtr;
     using SizeType32 = tensorrt_llm::runtime::SizeType32;
     using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
-    RnnStateManager(tensorrt_llm::runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
-        tensorrt_llm::runtime::BufferManager::CudaStreamPtr stream, SizeType32 maxNumSequences);
+
+    RnnStateManager(SizeType32 maxNumSequences, tensorrt_llm::runtime::ModelConfig const& modelConfig,
+        runtime::WorldConfig const& worldConfig, tensorrt_llm::runtime::BufferManager const& bufferManager);
 
     void getPtrBuffers(TensorMap& inputBuffers, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig) const;
@@ -48,24 +48,9 @@ private:
     std::vector<TensorPtr> rnnStatePtr;  // [1]
     std::vector<TensorPtr> convStatePtr; // [1]
 
-    // Rnn config
-    SizeType32 mConvKernel = 0;
-    SizeType32 mStateSize = 0;
-    SizeType32 mRnnHiddenSize = 0;
-    SizeType32 mRnnHeadSize = 0;
-    SizeType32 mRnnConvDimSize = 0;
-
-    SizeType32 mLocalNbLayers = 0;
-
-    nvinfer1::DataType mDataType = nvinfer1::DataType::kHALF;
-
-    tensorrt_llm::runtime::BufferManager mBufferManager;
-
     SizeType32 mMaxNumSequences = 0;
     SizeType32 mMaxBeamWidth = 0;
     SizeType32 mBeamSlotsPerSequence = 0;
-
-    runtime::ModelConfig::ModelVariant mModelVariant;
 };
 
 } // namespace tensorrt_llm::batch_manager::rnn_state_manager

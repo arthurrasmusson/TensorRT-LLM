@@ -211,6 +211,9 @@ private:
 
     void addTerminatedReqId(std::vector<Response> const& responses, IdType const& reqId);
 
+    // Check that the current process is the leader or orchestrator
+    void checkParallelApiUsage(std::string const& methodName) const;
+
     // The model to execute
     std::shared_ptr<Model> mModel = nullptr;
     std::shared_ptr<Model> mEncoderModel = nullptr;

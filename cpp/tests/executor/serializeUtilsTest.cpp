@@ -11,7 +11,8 @@
  */
 
 #include "tensorrt_llm/executor/serializeUtils.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include <gtest/gtest.h>
@@ -305,7 +306,8 @@ TEST(SerializeUtilsTest, ResultResponse)
 {
     texec::Result res = texec::Result{false, {{1, 2, 3}}, texec::VecLogProbs{1.0, 2.0},
         std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
-        std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}, texec::ContextPhaseParams({9, 37}), 3, 2, true};
+        std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}, texec::ContextPhaseParams({9, 37}, 0), 3, 2,
+        true};
     {
         testSerializeDeserialize(res);
     }
@@ -524,24 +526,24 @@ TEST(SerializeUtilsTest, IterationStats)
 TEST(SerializeUtilsTest, ContextPhaseParams)
 {
     {
-        auto stats = texec::ContextPhaseParams({1});
+        auto stats = texec::ContextPhaseParams({1}, 0);
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
 
     {
-        auto state = std::make_unique<texec::ContextPhaseState>(1);
+        auto state = std::make_unique<texec::DataTransceiverState>();
         state->setCommState(texec::kv_cache::CommState{{10, 20}});
-        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
+        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, 1, state.release());
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
 
     {
-        auto state = std::make_unique<texec::ContextPhaseState>(1);
+        auto state = std::make_unique<texec::DataTransceiverState>();
         state->setCommState(texec::kv_cache::CommState{12, "127.0.0.1"});
         state->setCacheState(texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT});
-        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, state.release());
+        auto stats = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, 0, state.release());
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }

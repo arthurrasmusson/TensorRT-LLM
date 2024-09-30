@@ -22,6 +22,7 @@ std::ostream& operator<<(std::ostream& os, CapacitySchedulerPolicy policy)
     {
     case CapacitySchedulerPolicy::kMAX_UTILIZATION: os << "MAX_UTILIZATION"; break;
     case CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT: os << "GUARANTEED_NO_EVICT"; break;
+    case CapacitySchedulerPolicy::kSTATIC_BATCH: os << "STATIC_BATCH"; break;
     }
     return os;
 }

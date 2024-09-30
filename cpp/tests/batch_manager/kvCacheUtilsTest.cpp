@@ -77,8 +77,8 @@ TEST_F(BlockIteratorTest, CacheManagerTest)
     auto const stream = std::make_shared<tr::CudaStream>();
     auto constexpr onboardBlocks = true;
 
-    BlockManager blockManager(numLayers, numKvHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
-        blocksInSecondaryPool, stream, onboardBlocks);
+    BlockManager blockManager(std::vector<BlockManager::SizeType32>(numLayers, numKvHeads), sizePerHead, tokensPerBlock,
+        blocksInPrimaryPool, blocksInSecondaryPool, stream, onboardBlocks);
     blockManager.allocatePools(dataType, false);
 
     EXPECT_EQ(blockManager.getTokensPerBlock(), tokensPerBlock);
@@ -106,7 +106,7 @@ TEST_F(BlockIteratorTest, CacheManagerTest)
     auto const blockIds = seq0.getCacheBlockIds().at(beamIdx);
     EXPECT_THAT(blockIds, ::testing::ElementsAreArray({0, 1, 2}));
 
-    auto const pool = blockManager.getPrimaryPool();
+    auto const pool = blockManager.getPrimaryPool(0);
     TLLM_CHECK(pool);
     auto begin = BlockIterator{pool, blockIds, 0};
     auto end = BlockIterator{pool, blockIds, blockIds.size()};

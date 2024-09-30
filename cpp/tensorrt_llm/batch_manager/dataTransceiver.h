@@ -14,7 +14,8 @@
 #include <future>
 
 #include "tensorrt_llm/batch_manager/llmRequest.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -50,13 +51,57 @@ public:
     virtual ~IOFormatter() = default;
 };
 
+// Used to store the information that needs to be sent to the context executor to ensure the generation
+// executor smoothly receives the data.
+class RequestInfo
+{
+public:
+    /// @brief Constructor.
+    /// @param requestId The ID used in the context phase of the current request.
+    /// @param transState The state of the data transceiver.
+    RequestInfo(LlmRequest::RequestIdType requestId, executor::DataTransceiverState transState);
+
+    /// @brief Equality comparison operator.
+    /// @param rhs The right operand of the operator.
+    [[nodiscard]] bool operator==(RequestInfo const& rhs) const;
+
+    /// @brief Return the ID used in the context phase of the current request.
+    /// @return The request ID.
+    [[nodiscard]] LlmRequest::RequestIdType getRequestId() const noexcept;
+
+    /// @brief Return the state of the data transceiver.
+    /// @return The state of the data transceiver.
+    [[nodiscard]] executor::DataTransceiverState const& getTransState() const noexcept;
+
+    /// @brief Serialization.
+    /// @param requestInfo Request information to be serialized.
+    /// @param os The output stream to which the serialization result points.
+    static void serialize(RequestInfo const& requestInfo, std::ostream& os);
+
+    /// @brief Deserialization.
+    /// @return The request information obtained from deserialization.
+    [[nodiscard]] static RequestInfo deserialize(std::istream& is);
+
+    /// @brief The number of bytes occupied by the serialized data structure.
+    /// @param requestInfo Request information to be serialized.
+    /// @return The number of bytes.
+    [[nodiscard]] static std::size_t serializedSize(RequestInfo const& requestInfo);
+
+private:
+    // The ID used in the context phase of the current request.
+    LlmRequest::RequestIdType mRequestId;
+
+    // The state of the data transceiver.
+    executor::DataTransceiverState mTransState;
+};
+
 // Operators required for data transmission in specific communication protocols.
 class DataSender
 {
 public:
-    /// @brief Receive the request id.
-    /// @return The request id.
-    [[nodiscard]] virtual LlmRequest::RequestIdType recvRequestId() = 0;
+    /// @brief Receive the request information.
+    /// @return The request information.
+    [[nodiscard]] virtual RequestInfo recvRequestInfo() = 0;
 
     /// @brief Synchronously send data.
     /// @param llmRequest The request object to which the data belongs.
@@ -66,6 +111,8 @@ public:
     /// @return The communicator status.
     [[nodiscard]] virtual executor::kv_cache::CommState const& getCommState() const = 0;
 
+    virtual void setCommState(executor::kv_cache::CommState const& commState) = 0;
+
     /// @brief Destructor.
     virtual ~DataSender() = default;
 };
@@ -74,9 +121,9 @@ public:
 class DataReceiver
 {
 public:
-    /// @brief Send the request id.
-    /// @param llmRequest The request object to which the id belongs.
-    virtual void sendRequestId(LlmRequest const& llmRequest) = 0;
+    /// @brief Send the request information.
+    /// @param llmRequest The request object to which the information belongs.
+    virtual void sendRequestInfo(LlmRequest const& llmRequest) = 0;
 
     /// @brief Synchronously receive data.
     /// @param llmRequest The request object to which the data belongs.
@@ -102,7 +149,7 @@ public:
     /// @brief Return the internal communicator status.
     /// @return The communicator status.
     [[nodiscard]] executor::kv_cache::CommState const& getCommState() const;
-
+    void setCommState(executor::kv_cache::CommState const& commState);
     /// @brief Destructor.
     ~DataResponder();
 

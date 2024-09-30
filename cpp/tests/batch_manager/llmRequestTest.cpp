@@ -224,7 +224,7 @@ TEST_F(LlmRequestTest, invalidExecRequest)
             execReq.setPromptTuningConfig(config);
             tb::LlmRequest llmReq(requestId, execReq);
         };
-        lambdaErrMsgs.emplace_back(lambda, "inputTokenExtraIds vector size must be the same");
+        lambdaErrMsgs.emplace_back(lambda, "must be the same as input token vector size");
     }
 
     // Extra ids not provided when enabling kv cache reuse with prompt table

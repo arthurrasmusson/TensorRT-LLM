@@ -137,6 +137,11 @@ std::unique_ptr<CapacityScheduler> makeCapacityScheduler(SizeType32 maxNumReques
         return std::make_unique<GuaranteedNoEvictScheduler>(maxNumRequests, std::move(kvCacheManager),
             std::move(crossKvCacheManager), std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState);
     }
+    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kSTATIC_BATCH)
+    {
+        return std::make_unique<StaticBatchScheduler>(maxNumRequests, std::move(kvCacheManager),
+            std::move(crossKvCacheManager), std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState);
+    }
     else
     {
         throw std::runtime_error("Unsupported capacity scheduler policy");
@@ -181,6 +186,16 @@ GuaranteedNoEvictScheduler::GuaranteedNoEvictScheduler(SizeType32 maxNumRequests
 {
 }
 
+StaticBatchScheduler::StaticBatchScheduler(SizeType32 maxNumRequests,
+    std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+    std::shared_ptr<BasePeftCacheManager> peftCacheManager, LlmRequestState noScheduleUntilState,
+    LlmRequestState noScheduleAfterState)
+    : GuaranteedNoEvictScheduler(maxNumRequests, std::move(kvCacheManager), std::move(crossKvCacheManager),
+        std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState)
+{
+}
+
 std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::scheduleRequests(RequestList const& activeRequests) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
@@ -220,22 +235,25 @@ std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::scheduleRequests(
     return {std::move(scheduledRequests), RequestVector{}};
 }
 
-std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleRequests(
-    RequestList const& activeRequests) const
+std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleRequestsImpl(
+    RequestList const& activeRequests, bool staticBatchScheduling) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
     RequestVector scheduledRequests;
 
     // Now check if we can add pending requests
-    auto const maxBlocks = mKvCacheManager->getMaxNumBlocks();
-    auto const maxCrossBlocks = mCrossKvCacheManager ? mCrossKvCacheManager->getMaxNumBlocks() : 0;
+    auto const numFreeBlocks = mKvCacheManager->getNumFreeBlocks();
+    auto const numFreeCrossBlocks = mCrossKvCacheManager ? mCrossKvCacheManager->getNumFreeBlocks() : 0;
     auto const maxPeftCachePages = mPeftCacheManager->getMaxDevicePages();
 
     // Keep track of blocks contributed by requests in context phase
     std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedContextBlocks;
     std::unordered_set<BlockKey, BlockKeyHasher> newlyContributedCrossContextBlocks;
-    prefillWithChunkedContextsAlreadyExecuting(activeRequests, mKvCacheManager, mCrossKvCacheManager,
-        newlyContributedContextBlocks, newlyContributedCrossContextBlocks);
+    if (!staticBatchScheduling)
+    {
+        prefillWithChunkedContextsAlreadyExecuting(activeRequests, mKvCacheManager, mCrossKvCacheManager,
+            newlyContributedContextBlocks, newlyContributedCrossContextBlocks);
+    }
 
     // If a request is already in progress, include it
     // If it's been allocated, it had resource to run to completion
@@ -254,15 +272,14 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
             continue;
         }
 
-        if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests) || reservedBlocks == maxBlocks
-            || (mCrossKvCacheManager && reservedCrossBlocks == maxCrossBlocks))
+        if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests))
         {
             break;
         }
         else if (req->isGenerationInProgressState())
         {
             scheduledRequests.emplace_back(req);
-            reservedBlocks += mKvCacheManager->getNeededBlocksToCompletion(*req);
+            reservedBlocks += mKvCacheManager->getRemainingBlocksToCompletion(*req);
 
             bool const reqHasLora = req->getLoraTaskId().has_value();
             bool const isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
@@ -271,7 +288,8 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
                 claimedPeftPages += mPeftCacheManager->determineNumPages(req);
                 uniqTaskIds.insert(req->getLoraTaskId().value());
             }
-            reservedCrossBlocks += mCrossKvCacheManager ? mCrossKvCacheManager->getNeededBlocksToCompletion(*req) : 0;
+            reservedCrossBlocks
+                += mCrossKvCacheManager ? mCrossKvCacheManager->getRemainingBlocksToCompletion(*req) : 0;
         }
         else
         {
@@ -279,51 +297,65 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
         }
     }
 
-    // Now check if we can add pending requests
-    auto availableBlocks = maxBlocks - reservedBlocks;
-    auto availableCrossBlocks = maxCrossBlocks - reservedCrossBlocks;
-    auto availablePeftPages = maxPeftCachePages - claimedPeftPages;
-    for (auto const& req : pendingRequests)
+    // If staticBatchScheduling == true check if we can add pending requests only when no requests are active.
+    // Otherwise, add just check that we can add pending requests.
+    if (!staticBatchScheduling || scheduledRequests.size() == 0)
     {
-        // if context request can reuse blocks contributed by another context request, skip
-        if (beneficialToSkip(req, mKvCacheManager, mCrossKvCacheManager, newlyContributedContextBlocks,
-                newlyContributedCrossContextBlocks))
+        // Now check if we can add pending requests
+        auto availableBlocks = numFreeBlocks - reservedBlocks;
+        auto availableCrossBlocks = numFreeCrossBlocks - reservedCrossBlocks;
+        auto availablePeftPages = maxPeftCachePages - claimedPeftPages;
+        for (auto const& req : pendingRequests)
         {
-            continue;
-        }
-
-        if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests))
-        {
-            break;
-        }
-        else if (req->isContextInitState())
-        {
-            auto neededBlocks = mKvCacheManager->getNeededBlocksToCompletion(*req);
-            auto neededCrossBlocks = mCrossKvCacheManager ? mCrossKvCacheManager->getNeededBlocksToCompletion(*req) : 0;
-            bool reqHasLora = req->getLoraTaskId().has_value();
-            bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
-            auto neededPeftPages = isNewTask ? mPeftCacheManager->determineNumPages(req) : 0;
-
-            if (neededBlocks <= availableBlocks && neededCrossBlocks <= availableCrossBlocks
-                && neededPeftPages <= availablePeftPages)
+            // if context request can reuse blocks contributed by another context request, skip
+            if (!staticBatchScheduling
+                && beneficialToSkip(req, mKvCacheManager, mCrossKvCacheManager, newlyContributedContextBlocks,
+                    newlyContributedCrossContextBlocks))
             {
-                scheduledRequests.emplace_back(req);
-                availableBlocks -= neededBlocks;
-                availableCrossBlocks -= neededCrossBlocks;
-                availablePeftPages -= neededPeftPages;
-                if (isNewTask)
-                {
-                    uniqTaskIds.insert(req->getLoraTaskId().value());
-                }
+                continue;
             }
-            else if (neededBlocks > availableBlocks || neededCrossBlocks > availableCrossBlocks)
+
+            if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests))
             {
-                // If one requests fails to be scheduled, break
                 break;
+            }
+            else if (req->isContextInitState())
+            {
+                auto neededBlocks = mKvCacheManager->getRemainingBlocksToCompletion(*req);
+                auto neededCrossBlocks
+                    = mCrossKvCacheManager ? mCrossKvCacheManager->getRemainingBlocksToCompletion(*req) : 0;
+                bool reqHasLora = req->getLoraTaskId().has_value();
+                bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
+                auto neededPeftPages = isNewTask ? mPeftCacheManager->determineNumPages(req) : 0;
+
+                if (neededBlocks <= availableBlocks && neededCrossBlocks <= availableCrossBlocks
+                    && neededPeftPages <= availablePeftPages)
+                {
+                    scheduledRequests.emplace_back(req);
+                    availableBlocks -= neededBlocks;
+                    availableCrossBlocks -= neededCrossBlocks;
+                    availablePeftPages -= neededPeftPages;
+                    if (isNewTask)
+                    {
+                        uniqTaskIds.insert(req->getLoraTaskId().value());
+                    }
+                }
+                else if (neededBlocks > availableBlocks || neededCrossBlocks > availableCrossBlocks)
+                {
+                    // If one requests fails to be scheduled, break
+                    break;
+                }
             }
         }
     }
     return {std::move(scheduledRequests), RequestVector{}};
+}
+
+std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleRequests(
+    RequestList const& activeRequests) const
+{
+    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
+    return scheduleRequestsImpl(activeRequests, /* staticBatchScheduling */ false);
 }
 
 std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::scheduleRequests(
@@ -447,6 +479,12 @@ std::pair<bool, bool> MaxUtilizationScheduler::trySchedulingRequestMaxUtilizatio
     {
         return std::make_pair(false, false);
     }
+}
+
+std::tuple<RequestVector, RequestVector> StaticBatchScheduler::scheduleRequests(RequestList const& activeRequests) const
+{
+    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
+    return this->scheduleRequestsImpl(activeRequests, /* staticBatchScheduling */ true);
 }
 
 } // namespace tensorrt_llm::batch_manager::batch_scheduler

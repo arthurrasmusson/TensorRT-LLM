@@ -249,6 +249,12 @@ public:
         return *this;
     }
 
+    ModelSpec& capacitySchedulerPolicy(tensorrt_llm::executor::CapacitySchedulerPolicy policy)
+    {
+        mCapacitySchedulerPolicy = policy;
+        return *this;
+    }
+
     friend std::ostream& operator<<(std::ostream& os, ModelSpec const& modelSpec)
     {
         return os << modelSpec.getModelPath();
@@ -278,6 +284,8 @@ public:
     [[nodiscard]] std::string getKVCacheTypeString() const;
 
     [[nodiscard]] std::string getSpeculativeDecodingModeString() const;
+
+    [[nodiscard]] std::string getCapacitySchedulerString() const;
 
     std::string mInputFile;
     nvinfer1::DataType mDataType;
@@ -312,6 +320,8 @@ public:
 
     SpeculativeDecodingMode mSpecDecodingMode{SpeculativeDecodingMode::None()};
     std::vector<SizeType32> mBatchSizes{1, 2, 8};
+
+    std::optional<tensorrt_llm::executor::CapacitySchedulerPolicy> mCapacitySchedulerPolicy{std::nullopt};
 
     // Sometimes, we need to compare with another model spec for golden results.
     std::shared_ptr<ModelSpec> mOtherModelSpecToCompare{nullptr};

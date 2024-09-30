@@ -11,11 +11,57 @@
  */
 
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
+#include "tensorrt_llm/batch_manager/utils/staticThreadPool.h"
 #include "tensorrt_llm/common/utils.h"
 #include <map>
 
 namespace tensorrt_llm::batch_manager
 {
+
+RequestInfo::RequestInfo(LlmRequest::RequestIdType requestId, executor::DataTransceiverState transState)
+    : mRequestId{requestId}
+    , mTransState{std::move(transState)}
+{
+}
+
+bool RequestInfo::operator==(RequestInfo const& rhs) const
+{
+    return mRequestId == rhs.mRequestId && mTransState == rhs.mTransState;
+}
+
+LlmRequest::RequestIdType RequestInfo::getRequestId() const noexcept
+{
+    return mRequestId;
+}
+
+executor::DataTransceiverState const& RequestInfo::getTransState() const noexcept
+{
+    return mTransState;
+}
+
+void RequestInfo::serialize(RequestInfo const& requestInfo, std::ostream& os)
+{
+    namespace su = executor::serialize_utils;
+    su::serialize(requestInfo.mRequestId, os);
+    su::serialize(requestInfo.mTransState, os);
+}
+
+RequestInfo RequestInfo::deserialize(std::istream& is)
+{
+    namespace su = executor::serialize_utils;
+    auto requestId = su::deserialize<decltype(mRequestId)>(is);
+    auto transState = su::deserialize<decltype(mTransState)>(is);
+    return RequestInfo{requestId, std::move(transState)};
+}
+
+std::size_t RequestInfo::serializedSize(RequestInfo const& requestInfo)
+{
+    namespace su = executor::serialize_utils;
+    std::size_t totalSize = 0;
+    totalSize += su::serializedSize(requestInfo.mRequestId);
+    totalSize += su::serializedSize(requestInfo.mTransState);
+    return totalSize;
+}
 
 class DataResponder::Impl
 {
@@ -52,6 +98,11 @@ public:
         return mSender->getCommState();
     }
 
+    void setCommState(executor::kv_cache::CommState const& commState)
+    {
+        mSender->setCommState(commState);
+    }
+
     ~Impl()
     {
         terminate();
@@ -83,7 +134,7 @@ private:
                 }
                 if (!isSending() && !mReadyResponses.empty())
                 {
-                    mCurrentRequest = mSender->recvRequestId();
+                    mCurrentRequest = mSender->recvRequestInfo().getRequestId();
                 }
                 auto it = getCurrentResponse();
                 if (it != mReadyResponses.end())
@@ -172,19 +223,19 @@ public:
 
     [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest)
     {
-        // TODO: Modify the implementation here to avoid frequent thread creation.
-        return std::async(std::launch::async, &DataRequester::Impl::requestSync, this, std::cref(llmRequest));
+        return mThreadPool.execute(&DataRequester::Impl::requestSync, this, std::cref(llmRequest));
     }
 
 private:
     void requestSync(LlmRequest const& llmRequest)
     {
         TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
-        mReceiver->sendRequestId(llmRequest);
+        mReceiver->sendRequestInfo(llmRequest);
         mReceiver->receiveSync(llmRequest);
     }
 
     std::unique_ptr<DataReceiver> mReceiver;
+    utils::StaticThreadPool mThreadPool{10};
     int mDeviceId{-1};
 };
 
@@ -201,6 +252,11 @@ std::future<void> DataResponder::respondAndSendAsync(LlmRequest const& llmReques
 executor::kv_cache::CommState const& DataResponder::getCommState() const
 {
     return mImpl->getCommState();
+}
+
+void DataResponder::setCommState(executor::kv_cache::CommState const& commState)
+{
+    mImpl->setCommState(commState);
 }
 
 DataResponder::~DataResponder() = default;

@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <utility>
 
 namespace tc = tensorrt_llm::common;
@@ -254,15 +255,17 @@ bool KVCacheBlock::isFull() const
     return mIsFull;
 }
 
-BlockManager::BlockManager(SizeType32 numLayers, SizeType32 numKvHeads, SizeType32 sizePerHead,
+BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, SizeType32 sizePerHead,
     SizeType32 tokensPerBlock, SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool,
     std::shared_ptr<runtime::CudaStream> stream, bool onboardBlocks, CacheType cacheType)
     : mNumPrimaryBlocks{blocksInPrimaryPool}
     , mNumSecondaryBlocks{blocksInSecondaryPool}
+    , mFreePrimaryBlocksSize{0}
+    , mFreeSecondaryBlocksSize{0}
     , mOnboardBlocks(onboardBlocks)
     , mBufferManager{stream}
-    , mNumLayers{numLayers}
-    , mBlockSize{numKvHeads * sizePerHead * tokensPerBlock}
+    , mSizePerHead{sizePerHead}
+    , mNumLayers{static_cast<SizeType32>(numKvHeadsPerLayer.size())}
     , mSchedulingNumFreeBlocks{0}
     , mTokensPerBlock{tokensPerBlock}
     , mCachedBlocksRoot{std::make_shared<KVCacheBlock>(-1, tk::KVCacheIndex{0})}
@@ -271,6 +274,31 @@ BlockManager::BlockManager(SizeType32 numLayers, SizeType32 numKvHeads, SizeType
     , mReusedBlocks{0}
     , mCacheType{cacheType}
 {
+    std::map<SizeType32, SizeType32> numLayersPerPool;
+
+    // count how many layers should go in each pool
+    for (auto const numKvHeads : numKvHeadsPerLayer)
+    {
+        auto search = numLayersPerPool.find(numKvHeads);
+        numLayersPerPool[numKvHeads] = search == numLayersPerPool.end() ? 1 : search->second + 1;
+    }
+
+    // create a pool for each unique numKvHeads with the proper size (without allocating space yet)
+    for (auto const [numKvHeads, numLayers] : numLayersPerPool)
+    {
+        mPools.emplace_back(numKvHeads, numLayers, numKvHeads * sizePerHead * tokensPerBlock);
+    }
+
+    // assign each layer to its pool
+    mLayerToPool.reserve(mNumLayers);
+    for (SizeType32 layerIdx = 0; layerIdx < mNumLayers; layerIdx++)
+    {
+        auto poolPos = std::find_if(mPools.cbegin(), mPools.cend(),
+            [numKvHeads = numKvHeadsPerLayer[layerIdx]](KVCacheBlockPool const& pool)
+            { return numKvHeads == pool.numKvHeads; });
+        mLayerToPool.emplace_back(poolPos - mPools.cbegin());
+    }
+
     // Create free blocks
     mAllBlocksById.reserve(blocksInPrimaryPool + blocksInSecondaryPool);
     for (KVCacheBlock::IdType blockId = 0; blockId < blocksInPrimaryPool; ++blockId)
@@ -297,22 +325,34 @@ BlockManager::~BlockManager()
 
 void BlockManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
 {
-    // Allocate memory pool backing the blocks
-    auto const cacheShape = ITensor::makeShape({mNumPrimaryBlocks, mNumLayers, 2, mBlockSize});
-    if (useUvm)
-        mPrimaryPool = BufferManager::managed(cacheShape, dtype);
-    else
-        mPrimaryPool = BufferManager::gpuSync(cacheShape, dtype);
-    if (mNumSecondaryBlocks > 0)
+    // Allocate a memory pool backing the blocks for each numKvHeads
+    // TODO(oargov): allocate pools in a single buffer and split it, to avoid fragmentation
+    for (auto& pool : mPools)
     {
-        auto const cacheShapeOffload = ITensor::makeShape({mNumSecondaryBlocks, mNumLayers, 2, mBlockSize});
-        mSecondaryPool = BufferManager::pinned(cacheShapeOffload, dtype);
+        auto const blockSize = pool.numKvHeads * mSizePerHead * mTokensPerBlock;
+        nvinfer1::Dims const cacheShape = ITensor::makeShape({mNumPrimaryBlocks, pool.numLayers, 2, blockSize});
+
+        TLLM_LOG_DEBUG("[BlockManager] Allocating primary pool with %d blocks for %d layers with %d kv heads",
+            mNumPrimaryBlocks, pool.numLayers, pool.numKvHeads);
+        if (useUvm)
+            pool.primaryPtr = BufferManager::managed(cacheShape, dtype);
+        else
+            pool.primaryPtr = BufferManager::gpuSync(cacheShape, dtype);
+
+        if (mNumSecondaryBlocks > 0)
+        {
+            nvinfer1::Dims const cacheShapeOffload
+                = ITensor::makeShape({mNumSecondaryBlocks, pool.numLayers, 2, blockSize});
+            TLLM_LOG_DEBUG("[BlockManager] Allocating secondary pool with %d blocks for %d layers with %d kv heads",
+                mNumSecondaryBlocks, pool.numLayers, pool.numKvHeads);
+            pool.secondaryPtr = BufferManager::pinned(cacheShapeOffload, dtype);
+        }
     }
 }
 
 void BlockManager::startScheduling()
 {
-    mSchedulingNumFreeBlocks = mFreePrimaryBlocks.size();
+    mSchedulingNumFreeBlocks = mFreePrimaryBlocksSize;
     for (auto& slotAllocatedBlocks : mAllocatedBlocksPerSeq)
     {
         for (auto& allocatedBlock : slotAllocatedBlocks)
@@ -331,11 +371,13 @@ void BlockManager::claimBlock(KVCacheBlock& block)
         {
             mFreePrimaryBlocks.erase(*freeBlockIterator);
             block.resetFreeBlockIterator();
+            --mFreePrimaryBlocksSize;
         }
         else
         {
             mFreeSecondaryBlocks.erase(*freeBlockIterator);
             block.resetFreeBlockIterator();
+            --mFreeSecondaryBlocksSize;
         }
     }
 }
@@ -386,11 +428,15 @@ BlockPtr BlockManager::getFreeBlock()
     return block;
 }
 
-tk::KVCacheIndex BlockManager::getKOrVBlockIndex(KVCacheBlock::IdType blockId, SizeType32 fieldIdx) const
+tk::KVCacheIndex BlockManager::getKOrVBlockIndex(
+    KVCacheBlock::IdType blockId, SizeType32 fieldIdx, SizeType32 poolIdx) const
 {
+    TLLM_CHECK_WITH_INFO(poolIdx < getNumPools(), "Pool index %d is out of bounds", poolIdx);
     auto const& block = mAllBlocksById[blockId];
+    auto const& pool = mPools.at(poolIdx);
     auto constexpr layerIdx = 0;
-    return tk::KVCacheIndex{common::flat_index3(block->getMemoryPoolBlockIndex(), layerIdx, fieldIdx, mNumLayers, 2)};
+    return tk::KVCacheIndex{
+        common::flat_index3(block->getMemoryPoolBlockIndex(), layerIdx, fieldIdx, pool.numLayers, 2)};
 }
 
 void KVCacheManager::setOffsets(tk::KVCacheIndex* offsetsPtr, nvinfer1::Dims const& offsetsShape, SizeType32 seqSlotIdx,
@@ -399,19 +445,26 @@ void KVCacheManager::setOffsets(tk::KVCacheIndex* offsetsPtr, nvinfer1::Dims con
     auto constexpr kIdx = 0;
     auto constexpr vIdx = 1;
 
-    for (auto xIdx : {kIdx, vIdx})
+    auto const numPools = mBlockManager.getNumPools();
+
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
     {
-        auto const offsetIndex
-            = tensorrt_llm::common::flat_index(offsetsShape.d, seqSlotIdx * mMaxBeamWidth + beamIdx, xIdx, blockIdx);
-        offsetsPtr[offsetIndex] = mBlockManager.getKOrVBlockIndex(blockId, xIdx);
+        for (auto xIdx : {kIdx, vIdx})
+        {
+            auto const offsetIndex = tensorrt_llm::common::flat_index(
+                offsetsShape.d, poolIdx, seqSlotIdx * mMaxBeamWidth + beamIdx, xIdx, blockIdx);
+            offsetsPtr[offsetIndex] = mBlockManager.getKOrVBlockIndex(blockId, xIdx, poolIdx);
+        }
     }
 }
 
-ITensor::SharedPtr BlockManager::computeBlockPointer(std::shared_ptr<KVCacheBlock> block) const
+ITensor::SharedPtr BlockManager::computeBlockPointer(std::shared_ptr<KVCacheBlock> block, SizeType32 poolIdx) const
 {
-    auto pool = block->isPrimary() ? mPrimaryPool : mSecondaryPool;
+    TLLM_CHECK_WITH_INFO(poolIdx < getNumPools(), "Pool index %d is out of bounds", poolIdx);
+    auto const& pool = mPools.at(poolIdx);
+    auto ptr = block->isPrimary() ? pool.primaryPtr : pool.secondaryPtr;
     auto const blockOffset = block->getMemoryPoolBlockIndex();
-    ITensor::SharedPtr blockTensor{ITensor::slice(pool, blockOffset, 1)};
+    ITensor::SharedPtr blockTensor{ITensor::slice(ptr, blockOffset, 1)};
     return blockTensor;
 }
 
@@ -419,9 +472,14 @@ ITensor::SharedPtr BlockManager::computeBlockPointer(std::shared_ptr<KVCacheBloc
 void BlockManager::copyBlock(BlockPtr src, BlockPtr dst)
 {
     // TODO: Replace computeBlockPointer with getKOrVBlockPointer calls
-    auto const srcPtr = computeBlockPointer(src);
-    auto dstPtr = computeBlockPointer(dst);
-    mBufferManager.copy(*srcPtr, *dstPtr);
+    // block spans multiple pool - copy in each pool
+    auto const numPools = getNumPools();
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+    {
+        auto const srcPtr = computeBlockPointer(src, poolIdx);
+        auto dstPtr = computeBlockPointer(dst, poolIdx);
+        mBufferManager.copy(*srcPtr, *dstPtr);
+    }
 }
 
 void BlockManager::onboardBlock(BlockPtr offloadBlock)
@@ -534,7 +592,7 @@ void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLeng
     auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
 
     auto const prepopulatedPromptLen = loadOrAllocateBlocks(blockKeys, numContextBlocks, sequence);
-    llmRequest->setPrepopulatedPromptLen(prepopulatedPromptLen);
+    llmRequest->setPrepopulatedPromptLen(prepopulatedPromptLen, getTokensPerBlock());
     TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest->mRequestId,
         inputLength, prepopulatedPromptLen);
 }
@@ -556,10 +614,12 @@ void BlockManager::releaseBlock(std::shared_ptr<KVCacheBlock> block, bool toFron
         if (toFront)
         {
             block->setFreeBlockIterator(mFreePrimaryBlocks.insert(mFreePrimaryBlocks.begin(), block));
+            ++mFreePrimaryBlocksSize;
         }
         else
         {
             block->setFreeBlockIterator(mFreePrimaryBlocks.insert(mFreePrimaryBlocks.end(), block));
+            ++mFreePrimaryBlocksSize;
         }
     }
     else
@@ -567,10 +627,12 @@ void BlockManager::releaseBlock(std::shared_ptr<KVCacheBlock> block, bool toFron
         if (toFront)
         {
             block->setFreeBlockIterator(mFreeSecondaryBlocks.insert(mFreeSecondaryBlocks.begin(), block));
+            ++mFreeSecondaryBlocksSize;
         }
         else
         {
             block->setFreeBlockIterator(mFreeSecondaryBlocks.insert(mFreeSecondaryBlocks.end(), block));
+            ++mFreeSecondaryBlocksSize;
         }
     }
 }
@@ -728,14 +790,17 @@ void BlockManager::releaseBlocks(GenerationRequest& sequence, std::shared_ptr<Ll
 
     if (llmRequest)
     {
-        // TODO only store blocks for context in case of beamWidth > 1
-        auto const& cacheBlockIds = sequence.getCacheBlockIds();
-        auto constexpr beamIdx = 0;
-        auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
-        auto blockedUniqueTokens
-            = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, mTokensPerBlock, true);
-        auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
-        storeBlocks(std::move(blockKeys), cacheBlockIds[beamIdx]);
+        auto const beamWidth = sequence.getBeamWidth();
+        if (beamWidth == 1)
+        {
+            auto const& cacheBlockIds = sequence.getCacheBlockIds();
+            auto constexpr beamIdx = 0;
+            auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
+            auto blockedUniqueTokens
+                = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, mTokensPerBlock, true);
+            auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+            storeBlocks(std::move(blockKeys), cacheBlockIds[beamIdx]);
+        }
     }
 
     auto& allocatedBlocks = mAllocatedBlocksPerSeq.at(seqSlotIdx);
@@ -772,18 +837,17 @@ void BlockManager::schedulingReleaseBlocks(GenerationRequest& sequence)
     }
 }
 
-KVCacheManager::KVCacheManager(SizeType32 numLayers, SizeType32 numKvHeads, SizeType32 sizePerHead,
+KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer, SizeType32 sizePerHead,
     SizeType32 tokensPerBlock, SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool,
     SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLength,
     bool useOneMoreBlock, CudaStreamPtr stream, bool enableBlockReuse, bool onboardBlocks, CacheType cacheType)
     : mMaxNumSequences(maxNumSequences)
     , mMaxBeamWidth(maxBeamWidth)
     , mMaxAttentionWindow(maxAttentionWindow)
-    , mBlockManager(numLayers, numKvHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool, blocksInSecondaryPool,
+    , mBlockManager(numKvHeadsPerLayer, sizePerHead, tokensPerBlock, blocksInPrimaryPool, blocksInSecondaryPool,
           std::move(stream), onboardBlocks, cacheType)
     , mSequences(maxNumSequences)
     , mEnableBlockReuse{enableBlockReuse}
-    , mCacheType{cacheType}
 {
     TLLM_CHECK_WITH_INFO(
         mMaxBeamWidth == 1 || !mEnableBlockReuse, "Block reuse is currently not supported with beam width > 1.");
@@ -814,9 +878,20 @@ KVCacheManager::KVCacheManager(SizeType32 numLayers, SizeType32 numKvHeads, Size
         "(i.e. must be larger than beam_width (%d) * tokensPerBlock (%d) * maxBlocksPerSeq (%d))",
         maxNumTokens, mMaxBeamWidth, tokensPerBlock, mMaxBlocksPerSeq);
 
-    mSequenceBlockIndices
-        = BufferManager::cpu(ITensor::makeShape({maxNumSequences * mMaxBeamWidth, 2, mMaxBlocksPerSeq}),
-            TRTDataType<tk::KVCacheIndex>::value);
+    // each pool has its own block offsets since they have different strides
+    mSequenceBlockIndices = BufferManager::cpu(
+        ITensor::makeShape({mBlockManager.getNumPools(), mMaxNumSequences * mMaxBeamWidth, 2, mMaxBlocksPerSeq}),
+        TRTDataType<tk::KVCacheIndex>::value);
+}
+
+KVCacheManager::KVCacheManager(SizeType32 numLayers, SizeType32 numKvHeads, SizeType32 sizePerHead,
+    SizeType32 tokensPerBlock, SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool,
+    SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLength,
+    bool useOneMoreBlock, CudaStreamPtr stream, bool enableBlockReuse, bool onboardBlocks, CacheType cacheType)
+    : KVCacheManager(std::vector<SizeType32>(numLayers, numKvHeads), sizePerHead, tokensPerBlock, blocksInPrimaryPool,
+        blocksInSecondaryPool, maxNumSequences, maxBeamWidth, maxAttentionWindow, sinkTokenLength, useOneMoreBlock,
+        std::move(stream), enableBlockReuse, onboardBlocks, cacheType)
+{
 }
 
 void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
@@ -825,13 +900,16 @@ void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
 
     if (tc::Logger::getLogger()->getLevel() == tc::Logger::INFO)
     {
-        auto const cacheShape = mBlockManager.getPrimaryPool()->getShape();
-        auto const cacheVolume = ITensor::volume(cacheShape);
-        auto const blocksInPrimaryPool = cacheShape.d[0];
-        auto const tokensPerBlock = mBlockManager.getTokensPerBlock();
-        auto const maxNumTokens = blocksInPrimaryPool * tokensPerBlock;
-        auto const cacheSizeBytes = cacheVolume * BufferDataType(dtype).getSize();
-        TLLM_LOG_INFO("Number of tokens per block: %d.", tokensPerBlock);
+        uint64_t cacheSizeBytes = 0;
+        auto const numPools = mBlockManager.getNumPools();
+        for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+        {
+            auto const cacheShape = mBlockManager.getPrimaryPool(poolIdx)->getShape();
+            auto const cacheVolume = ITensor::volume(cacheShape);
+            cacheSizeBytes += cacheVolume * BufferDataType(dtype).getSize();
+        }
+        TLLM_LOG_INFO("Number of tokens per block: %d.", mBlockManager.getTokensPerBlock());
+        auto const maxNumTokens = mBlockManager.getNumPrimaryBlocks() * mBlockManager.getTokensPerBlock();
         TLLM_LOG_INFO("[MemUsageChange] Allocated %0.2f GiB for max tokens in paged KV cache (%d).",
             cacheSizeBytes / static_cast<double>(1 << 30), maxNumTokens);
     }
@@ -887,7 +965,7 @@ SizeType32 KVCacheManager::getNeededBlocksOneStep(LlmRequest const& req, bool tw
     return numRequiredBlocks;
 }
 
-SizeType32 KVCacheManager::getNeededBlocksToCompletion(LlmRequest const& req) const
+SizeType32 KVCacheManager::getRemainingBlocksToCompletion(LlmRequest const& req) const
 {
     if (isCrossKv())
     {
@@ -895,21 +973,39 @@ SizeType32 KVCacheManager::getNeededBlocksToCompletion(LlmRequest const& req) co
     }
     SizeType32 numContextBlocks
         = (std::min(req.mPromptLen, mMaxAttentionWindow) + mSinkBubbleLength) / getTokensPerBlock();
-    SizeType32 remainingTokens = std::min(req.mPromptLen + req.mMaxNewTokens, mMaxAttentionWindow) + mSinkBubbleLength
-        - numContextBlocks * getTokensPerBlock();
-    auto neededBlocks
-        = numContextBlocks + tc::ceilDiv(remainingTokens, getTokensPerBlock()) * req.mSamplingConfig.beamWidth;
-    return neededBlocks;
+    SizeType32 numTotalBlocksPerBeam = tc::ceilDiv(
+        std::min(req.mPromptLen + req.mMaxNewTokens, mMaxAttentionWindow) + mSinkBubbleLength, getTokensPerBlock());
+    SizeType32 numGenBlocksPerBeam = numTotalBlocksPerBeam - numContextBlocks;
+
+    SizeType32 numAllocBlocksPerBeam = 0;
+    if (req.mSeqSlot.has_value())
+    {
+        auto seq = mSequences.at(req.mSeqSlot.value());
+        numAllocBlocksPerBeam = seq->getCacheBlockIds().at(0).size();
+    }
+
+    if (numAllocBlocksPerBeam < numContextBlocks)
+    {
+        return numContextBlocks - numAllocBlocksPerBeam + numGenBlocksPerBeam * req.mSamplingConfig.beamWidth;
+    }
+    else
+    {
+        return (numTotalBlocksPerBeam - numAllocBlocksPerBeam) * req.mSamplingConfig.beamWidth;
+    }
 }
 
 void KVCacheManager::resetBlockOffsets(SizeType32 seqSlotIdx, SizeType32 beamWidth)
 {
     auto* offsetsPtr = bufferCast<tk::KVCacheIndex>(*mSequenceBlockIndices);
     auto const& offsetsShape = mSequenceBlockIndices->getShape();
-    auto const begin = tc::flat_index(offsetsShape.d, seqSlotIdx * mMaxBeamWidth, 0, 0);
-    auto const end = begin + beamWidth * offsetsShape.d[1] * offsetsShape.d[2];
-    std::fill(offsetsPtr + begin, offsetsPtr + end,
-        tk::KVCacheIndex{std::numeric_limits<tk::KVCacheIndex::UnderlyingType>::max()});
+    auto const numPools = mBlockManager.getNumPools();
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+    {
+        auto const begin = tc::flat_index(offsetsShape.d, poolIdx, seqSlotIdx * mMaxBeamWidth, 0, 0);
+        auto const end = begin + beamWidth * offsetsShape.d[2] * offsetsShape.d[3];
+        std::fill(offsetsPtr + begin, offsetsPtr + end,
+            tk::KVCacheIndex{std::numeric_limits<tk::KVCacheIndex::UnderlyingType>::max()});
+    }
 }
 
 void KVCacheManager::cacheBlockOffsets(GenerationRequest const& seq, SizeType32 seqSlotIdx)
@@ -1141,12 +1237,28 @@ void KVCacheManager::schedulingRemoveSequence(SizeType32 seqSlotIdx)
 
 ITensor::UniquePtr KVCacheManager::getBlockPoolPointers() const
 {
-    auto poolPtrs = BufferManager::cpu(ITensor::makeShape({2}), TRTDataType<void*>::value);
+    auto const numPools = mBlockManager.getNumPools();
+    auto poolPtrs = BufferManager::cpu(ITensor::makeShape({numPools, 2}), TRTDataType<void*>::value);
     auto poolPtrsRange = BufferRange<void*>(*poolPtrs);
-    poolPtrsRange[0] = mBlockManager.getPrimaryPool()->data();
-    auto secondaryPool = mBlockManager.getSecondaryPool();
-    poolPtrsRange[1] = secondaryPool ? secondaryPool->data() : nullptr;
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+    {
+        poolPtrsRange[poolIdx * 2] = mBlockManager.getPrimaryPool(poolIdx)->data();
+        auto secondaryPool = mBlockManager.getSecondaryPool(poolIdx);
+        poolPtrsRange[poolIdx * 2 + 1] = secondaryPool ? secondaryPool->data() : nullptr;
+    }
     return poolPtrs;
+}
+
+ITensor::UniquePtr KVCacheManager::getLayerToPoolMapping() const
+{
+    auto const numLayers = mBlockManager.getNumLayers();
+    auto poolMapping = BufferManager::cpu(ITensor::makeShape({numLayers}), TRTDataType<SizeType32>::value);
+    auto poolMappingRange = BufferRange<SizeType32>(*poolMapping);
+    for (SizeType32 layerIdx = 0; layerIdx < numLayers; layerIdx++)
+    {
+        poolMappingRange[layerIdx] = mBlockManager.getLayerPoolIdx(layerIdx);
+    }
+    return poolMapping;
 }
 
 SizeType32 KVCacheManager::copyBlockOffsets(
@@ -1163,18 +1275,23 @@ SizeType32 KVCacheManager::copyBlockOffsets(
     auto const& sequence = mSequences[seqSlotIdx];
     SizeType32 maxBlockCount{0};
     // Get page table for each KV cache pool
-    for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
-    {
-        auto const beamBlockCount = sequence->getCacheBlockIds()[beamIdx].size();
-        auto const copyChunkSize = beamBlockCount * sizeof(tk::KVCacheIndex);
+    auto const numPools = mBlockManager.getNumPools();
 
-        for (auto xIdx : {kIdx, vIdx})
+    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
+    {
+        for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
         {
-            auto const srcIndex = tc::flat_index(srcShape.d, seqSlotIdx * mMaxBeamWidth + beamIdx, xIdx, 0);
-            auto const dstIndex = tc::flat_index(dstShape.d, outputSlotOffset + beamIdx, xIdx, 0);
-            std::memcpy(dstPtr + dstIndex, srcPtr + srcIndex, copyChunkSize);
+            auto const beamBlockCount = sequence->getCacheBlockIds()[beamIdx].size();
+            auto const copyChunkSize = beamBlockCount * sizeof(tk::KVCacheIndex);
+            for (auto xIdx : {kIdx, vIdx})
+            {
+                auto const srcIndex
+                    = tc::flat_index(srcShape.d, poolIdx, seqSlotIdx * mMaxBeamWidth + beamIdx, xIdx, 0);
+                auto const dstIndex = tc::flat_index(dstShape.d, poolIdx, outputSlotOffset + beamIdx, xIdx, 0);
+                std::memcpy(dstPtr + dstIndex, srcPtr + srcIndex, copyChunkSize);
+            }
+            maxBlockCount = std::max<SizeType32>(maxBlockCount, static_cast<SizeType32>(beamBlockCount));
         }
-        maxBlockCount = std::max<SizeType32>(maxBlockCount, static_cast<SizeType32>(beamBlockCount));
     }
     return maxBlockCount;
 }
@@ -1193,7 +1310,6 @@ std::tuple<SizeType32, SizeType32> const KVCacheManager::calculateMaxNumBlocks(K
     nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     runtime::BufferManager const& bufferManager)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const freeMemFraction = config.freeGpuMemoryFraction.value_or(KvCacheConfig::kDefaultGpuMemFraction);
     TLLM_CHECK_WITH_INFO(freeMemFraction < 1.0f,
         "Invalid freeMemFraction, freeMemFraction (%f) must be smaller than 1.0f", freeMemFraction);
@@ -1245,7 +1361,6 @@ std::tuple<SizeType32, SizeType32> const KVCacheManager::calculateMaxNumBlocks(K
     TLLM_LOG_INFO("Number of blocks in KV cache secondary pool: %d, onboard blocks to primary memory before reuse: %s",
         blocksInSecondaryPool, config.onboardBlocks ? "true" : "false");
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     return std::make_tuple(blocksInPrimaryPool, blocksInSecondaryPool);
 }
 

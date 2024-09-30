@@ -70,6 +70,11 @@ public:
         return numContextTokens;
     };
 
+    [[nodiscard]] BatchState getBatchState() const noexcept
+    {
+        return BatchState(numContextRequests, numGenRequests, getNumTokens(), maxKvCacheLengthRounded);
+    };
+
 private:
     [[nodiscard]] SizeType32 constexpr getNumRequests() const noexcept
     {
@@ -88,6 +93,7 @@ private:
     SizeType32 numContextTokens{};
     SizeType32 numGenTokens{};
     SizeType32 numLogits{};
+    SizeType32 maxKvCacheLengthRounded{};
 
     // general
     TensorPtr inputsIds;
@@ -144,7 +150,7 @@ public:
 
     // decoder
     TensorPtr decoderInputsIds;
-    TensorPtr decoderInputLengthsHost; // This is really the current input lengths, not context lengths
+    TensorPtr decoderInputLengthsHost;
 
     TensorPtr cacheIndirDecoderIOBatchedCopySrcOffsets;
     TensorPtr cacheIndirDecoderIOBatchedCopyDstOffsets;
@@ -177,6 +183,9 @@ public:
         mCacheIndirDecoderIOBatchedCopyCopySizesDevice; // [mMaxNumRequests], device: explicitly device-copied slice
                                                         // sizes to reduce warp stalls in copy batch kernel invocation.
 private:
+    // Re-capture cuda graph when max kv cache len of the batch has changed on kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE.
+    static SizeType32 constexpr kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE{256};
+
     TensorPtr cacheGenerationLogits;           // Buffer for logits between steps to prevent from being overwritten.
     SizeType32 cacheGenerationLogitsOffset{0}; // Record the usage offset of the cacheGenerationLogits buffer.
 
@@ -198,6 +207,8 @@ public:
         kv_cache_manager::KVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
         PeftTable const& peftTable, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
+
+    void prepareBuffersForCudaGraph();
 
     void prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);

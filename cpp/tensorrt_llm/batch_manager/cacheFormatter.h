@@ -14,7 +14,7 @@
 
 #include "dataTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include <iterator>
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager
@@ -38,10 +38,15 @@ public:
         auto const& src = srcs.front();
         TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
         constexpr SizeType32 beam{0};
-        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
-        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
+        auto const numPools = mCacheManager->getBlockManager().getNumPools();
+        // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
+        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
         {
-            src->recvBuffer(*it);
+            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
+            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
+            {
+                src->recvBuffer(*it);
+            }
         }
     }
 
@@ -79,10 +84,15 @@ public:
         auto const& dst = dsts.front();
         TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
         constexpr SizeType32 beam{0};
-        auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam);
-        for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam); it != endIt; ++it)
+        auto const numPools = mCacheManager->getBlockManager().getNumPools();
+        // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
+        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
         {
-            dst->sendBuffer(*it);
+            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
+            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
+            {
+                dst->sendBuffer(*it);
+            }
         }
     }
 

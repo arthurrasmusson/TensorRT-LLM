@@ -348,38 +348,6 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
                     {
                         // We need to perform initialization work for the first context chunk.
                         kvCacheManager->addSequence(seqSlot, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
-
-                        // Advance chunked context position if we have prepoluated tokens
-                        auto const prepopulatedPromptLen = llmReq->getPrepopulatedPromptLen();
-                        TLLM_CHECK(prepopulatedPromptLen < promptLen);
-
-                        if (prepopulatedPromptLen > 0)
-                        {
-                            // Currently, the runtime process is to apply for cache first and then determine
-                            // prepopulation. Use the prepopulated length to advance the context position and decrease
-                            // chunk size if necessary.
-                            auto chunkSize = llmReq->getContextChunkSize();
-                            if (prepopulatedPromptLen + chunkSize < promptLen)
-                            {
-                                // make sure to end at block boundary after current chunk
-                                auto const flooredEndPosition = (prepopulatedPromptLen + chunkSize)
-                                    / kvCacheManager->getTokensPerBlock() * kvCacheManager->getTokensPerBlock();
-                                chunkSize = flooredEndPosition - prepopulatedPromptLen;
-                                TLLM_CHECK(chunkSize <= llmReq->getContextChunkSize());
-                            }
-                            llmReq->setContextCurrentPosition(prepopulatedPromptLen);
-                            llmReq->setContextChunkSize(chunkSize);
-                            if (!llmReq->isLastContextChunk())
-                            {
-                                TLLM_CHECK_WITH_INFO(
-                                    (llmReq->getContextCurrentPosition() + llmReq->getContextChunkSize())
-                                            % kvCacheManager->getTokensPerBlock()
-                                        == 0,
-                                    "To prevent cache fragmentation, the context position after current chunk should "
-                                    "be divisible "
-                                    "by the number of tokens per block, except for the last chunk.");
-                            }
-                        }
                     }
                     auto preContextLength = llmReq->getContextChunkSize();
                     // Values returned by isFirstContextChunk and isLastContextChunk will change after this call.
@@ -462,8 +430,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFit)
     SizeType32 maxNumRequests = 2;
     SizeType32 maxInputLen = 1000;
 
-    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
-        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT,
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kSTATIC_BATCH};
     auto sinkTokenLens = std::vector<SizeType32>{0, 4};
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
     {
@@ -563,8 +531,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraFitsDuplicateTask)
     SizeType32 maxNumRequests = 4;
     SizeType32 maxInputLen = 1000;
 
-    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
-        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT,
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kSTATIC_BATCH};
     auto sinkTokenLens = std::vector<SizeType32>{0, 4};
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
     {
@@ -609,8 +577,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
     SizeType32 maxNumRequests = 4;
     SizeType32 maxInputLen = 1000;
 
-    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
-        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT,
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kSTATIC_BATCH};
     auto sinkTokenLens = std::vector<SizeType32>{0, 4};
 
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
@@ -627,6 +595,13 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
         else if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
         {
             // NO_EVICT can guarantee no eviction with requests 0 and 2, so it will allocate them concurrently
+            expectedStates.emplace_back(ExpectedState{0, 50, {0, 1, 2}, {{0, 50, 10, 0}, {2, 50, 10, 0}}});
+            expectedStates.emplace_back(ExpectedState{50, 100, {1}, {{1, 50, 10, 0}}});
+            expectedIterations = 100;
+        }
+        else if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
+        {
+            // STATIC_BATCH can guarantee no eviction with requests 0 and 2, so it will allocate them concurrently
             expectedStates.emplace_back(ExpectedState{0, 50, {0, 1, 2}, {{0, 50, 10, 0}, {2, 50, 10, 0}}});
             expectedStates.emplace_back(ExpectedState{50, 100, {1}, {{1, 50, 10, 0}}});
             expectedIterations = 100;
@@ -670,8 +645,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFitInChunk)
     SizeType32 maxNumRequests = 2;
     SizeType32 maxInputLen = 1000;
 
-    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
-        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kMAX_UTILIZATION};
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT,
+        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kSTATIC_BATCH};
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
     {
         auto kvCacheManager
@@ -1619,8 +1594,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
     SizeType32 maxInputLen = 1000;
     bool enableReuse = true;
 
-    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{
-        CapacitySchedulerPolicy::kMAX_UTILIZATION, CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT};
+    auto capacitySchedulerPolicies = std::vector<CapacitySchedulerPolicy>{CapacitySchedulerPolicy::kMAX_UTILIZATION,
+        CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, CapacitySchedulerPolicy::kSTATIC_BATCH};
     auto sinkTokenLens = std::vector<SizeType32>{0}; // sinkTokenLen > 0 is not supported with KV cache reuse
     for (auto capacitySchedulerPolicy : capacitySchedulerPolicies)
     {
@@ -1646,10 +1621,18 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
             activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 1, 1234));
 
             std::vector<ExpectedState> expectedStates;
-            expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 80, promptLen, 0}}});
-            expectedStates.push_back(
-                ExpectedState{1, 80, {0, 1}, {{0, 80, promptLen, 1, promptLen}, {1, 80, promptLen, 0}}});
-            expectedStates.push_back(ExpectedState{80, 81, {1}, {{1, 80, promptLen, 79, promptLen}}});
+            // No delay in static batching.
+            if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
+            {
+                expectedStates.push_back(ExpectedState{0, 80, {0, 1}, {{0, 80, promptLen, 0}, {1, 80, promptLen, 0}}});
+            }
+            else
+            {
+                expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 80, promptLen, 0}}});
+                expectedStates.push_back(
+                    ExpectedState{1, 80, {0, 1}, {{0, 80, promptLen, 1, promptLen}, {1, 80, promptLen, 0}}});
+                expectedStates.push_back(ExpectedState{80, 81, {1}, {{1, 80, promptLen, 79, promptLen}}});
+            }
 
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
@@ -1657,7 +1640,14 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
             int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
                 expectedStates, addNewRequestsCb, maxInputLen);
 
-            EXPECT_EQ(numIterations, 81);
+            if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
+            {
+                EXPECT_EQ(numIterations, 80);
+            }
+            else
+            {
+                EXPECT_EQ(numIterations, 81);
+            }
             EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 1);
         }
     }
@@ -1701,24 +1691,40 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequestChunked)
         activeRequests.push_back(std::move(request1));
 
         std::vector<ExpectedState> expectedStates;
-        expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 40, 50, 0, 0}}});
-        expectedStates.push_back(ExpectedState{1, 2, {0, 1}, {{0, 40, 50, 0, 20}}});
-        expectedStates.push_back(ExpectedState{2, 3, {0, 1}, {{0, 40, 50, 0, 40}}});
-        expectedStates.push_back(ExpectedState{3, 4, {0, 1}, {{0, 40, 50, 1, 50}, {1, 40, 50, 0, 0}}});
-        expectedStates.push_back(ExpectedState{4, 42, {0, 1}, {{0, 40, 50, 2, 50}, {1, 40, 50, 1, 50}}});
-        expectedStates.push_back(ExpectedState{42, 43,
-            {
-                1,
-            },
-            {{1, 40, 50, 39, 50}}});
+        // No delay in static batching.
+        if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
+        {
+            expectedStates.push_back(ExpectedState{0, 41, {0, 1}, {{0, 40, 50, 0, 0}, {1, 40, 50, 0, 0}}});
+        }
+        else
+        {
+            expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 40, 50, 0, 0}}});
+            expectedStates.push_back(ExpectedState{1, 2, {0, 1}, {{0, 40, 50, 0, 20}}});
+            expectedStates.push_back(ExpectedState{2, 3, {0, 1}, {{0, 40, 50, 0, 40}}});
+            expectedStates.push_back(ExpectedState{3, 4, {0, 1}, {{0, 40, 50, 1, 50}, {1, 40, 50, 0, 0}}});
+            expectedStates.push_back(ExpectedState{4, 42, {0, 1}, {{0, 40, 50, 2, 50}, {1, 40, 50, 1, 50}}});
+            expectedStates.push_back(ExpectedState{42, 43,
+                {
+                    1,
+                },
+                {{1, 40, 50, 39, 50}}});
+        }
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
         int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
             addNewRequestsCb, maxInputLen);
 
-        EXPECT_EQ(numIterations, 43);
-        EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 4);
+        if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
+        {
+            EXPECT_EQ(numIterations, 41);
+            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 0);
+        }
+        else
+        {
+            EXPECT_EQ(numIterations, 43);
+            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 4);
+        }
     }
 }
 
@@ -1797,5 +1803,50 @@ TEST_F(CapacitySchedulerTest, DelayFiveRequestsComplicated)
             EXPECT_EQ(numIterations, 82);
             EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 3);
         }
+    }
+}
+
+TEST_F(CapacitySchedulerTest, SimpleFitsStaticBatch)
+{
+    SizeType32 kvCacheMaxNumTokens = 200;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+
+    auto sinkTokenLens = std::vector<SizeType32>{0, 4};
+    for (auto sinkTokenLen : sinkTokenLens)
+    {
+        auto kvCacheManager = getKvCacheManager(
+            maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
+        auto peftCacheManager = getPeftCacheManager();
+        CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kSTATIC_BATCH;
+        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
+        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+
+        // Create two requests that will fit in kvCache for entire duration
+        int32_t maxNewTokens = 80;
+        int32_t promptLen = 10;
+
+        RequestList activeRequests;
+        activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0));
+        activeRequests.push_back(createRequest(promptLen, maxNewTokens / 2, 1)); // This request finishes earlier.
+        activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2));
+
+        std::vector<ExpectedState> expectedStates;
+        // Two requests are scheduled together. When both of them finish, the 3rd one is scheduled.
+        expectedStates.push_back(ExpectedState{0, 40, {0, 1, 2}, {{0, 80, 10, 0}, {1, 40, 10, 0}}});
+        expectedStates.push_back(ExpectedState{41, 79, {0, 2}, {{0, 80, 10, 41, 10}}});
+        expectedStates.push_back(ExpectedState{80, 160, {2}, {{2, 80, 10, 0}}});
+
+        // Callback to call at each iteration, to have option to add new active Requests
+        auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
+            addNewRequestsCb, maxInputLen);
+
+        EXPECT_EQ(numIterations, 160);
     }
 }

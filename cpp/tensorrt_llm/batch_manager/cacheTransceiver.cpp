@@ -11,6 +11,15 @@
  */
 
 #include "cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
+#include <cstddef>
+#include <numeric>
+#include <unordered_set>
 #if ENABLE_UCX
 #include "ucxDataTransceiver.h"
 #endif
@@ -24,6 +33,18 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
 {
     using namespace tensorrt_llm::batch_manager::kv_cache_manager;
     mMpiGroupComm = std::addressof(tensorrt_llm::mpi::MpiComm::session());
+
+    if (worldConfig.isPipelineParallel())
+    {
+
+        mMpiGroupPipeParaComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(
+            mMpiGroupComm->split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
+    }
+    if (worldConfig.isTensorParallel())
+    {
+        mMpiGroupTensorParaComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(
+            mMpiGroupComm->split(worldConfig.getPipelineParallelRank(), worldConfig.getTensorParallelRank()));
+    }
     mCacheState = std::make_unique<executor::kv_cache::CacheState>(modelConfig, worldConfig);
     if (mCommType == CommType::MPI)
     {
@@ -37,9 +58,52 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
     }
     else if (mCommType == CommType::UCX)
     {
+
 #if ENABLE_UCX
-        mDataResponder = makeUcxCacheResponder(cacheManager);
-        mDataRequester = makeUcxCacheRequester(cacheManager);
+        namespace su = tensorrt_llm::executor::serialize_utils;
+
+        mDataResponder = makeUcxCacheResponder(*mCacheState, worldConfig.getRank(), cacheManager);
+        mDataRequester = makeUcxCacheRequester(*mCacheState, worldConfig.getRank(), cacheManager);
+        if (mMpiGroupComm->getSize() > 1)
+        {
+            // updata
+            mMpiGroupComm->barrier();
+            executor::kv_cache::CommState commState = mDataResponder->getCommState();
+            std::ostringstream oStream;
+            su::serialize(commState, oStream);
+            auto str = oStream.str();
+            std::vector<char> buffer(str.begin(), str.end());
+            std::vector<SizeType32> sizeofBuffer(mMpiGroupComm->getSize());
+            SizeType32 bufferSize = buffer.size();
+            mMpiGroupComm->allgather(&bufferSize, sizeofBuffer.data(), 1, mpi::MpiType::kINT32);
+            SizeType32 recvBufferSize = std::accumulate(sizeofBuffer.begin(), sizeofBuffer.end(), 0);
+            std::vector<char> recvBuffer(recvBufferSize);
+            std::vector<int> displs(mMpiGroupComm->getSize());
+            for (int r = 0; r < mMpiGroupComm->getSize(); r++)
+            {
+                displs[r] = (r == 0) ? 0 : (displs[r - 1] + sizeofBuffer[r - 1]);
+            }
+            mMpiGroupComm->allgatherv(buffer.data(), bufferSize, mpi::MpiType::kCHAR, recvBuffer.data(), sizeofBuffer,
+                displs, mpi::MpiType::kCHAR);
+
+            // deserialize
+            std::vector<executor::kv_cache::CommState> commSessionCommState(mMpiGroupComm->getSize());
+            std::vector<executor::kv_cache::SocketState> socketStates;
+            for (int i = 0; i < mMpiGroupComm->getSize(); i++)
+            {
+                std::vector<char> serBuffer(
+                    recvBuffer.begin() + displs[i], recvBuffer.begin() + (displs[i] + sizeofBuffer[i]));
+                su::VectorWrapBuf<char> strbuf(serBuffer);
+                std::istream is(&strbuf);
+                commSessionCommState[i] = su::deserialize<executor::kv_cache::CommState>(is);
+                TLLM_CHECK_WITH_INFO(
+                    commSessionCommState[i].getSocketState().size() == 1, "getSocketState size should be 1");
+                socketStates.push_back(commSessionCommState[i].getSocketState()[0]);
+            }
+            executor::kv_cache::CommState allCommState{socketStates, worldConfig.getRank()};
+            mDataResponder->setCommState(std::move(allCommState));
+        }
+
 #else
         TLLM_THROW("To use UCX, the ENABLE_UCX option must be enabled during code building.");
 #endif
@@ -59,10 +123,10 @@ void CacheTransceiver::initializeCommState()
 void CacheTransceiver::setContextState(LlmRequest* llmRequest)
 {
     TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
-    auto contextState = std::make_unique<executor::ContextPhaseState>(llmRequest->mRequestId);
+    auto contextState = std::make_unique<executor::DataTransceiverState>();
     contextState->setCommState(*mCommState);
     contextState->setCacheState(*mCacheState);
-    llmRequest->setContextPhaseParams(executor::ContextPhaseParams{{}, contextState.release()});
+    llmRequest->setContextPhaseParams(executor::ContextPhaseParams{{}, llmRequest->mRequestId, contextState.release()});
 }
 
 void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
@@ -92,18 +156,53 @@ void CacheTransceiver::requestAndReceiveSync(LlmRequest* llmRequest)
 
 void CacheTransceiver::checkTranferStatus(bool blocking)
 {
-    for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
+    // mMpiCommTensorPara
+    std::vector<LlmRequest::RequestIdType> contextCompleteRequestIds;
+
+    if ((!mMpiGroupTensorParaComm) || (mMpiGroupTensorParaComm->getRank() == 0))
     {
-        if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
+        for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
         {
-            it->second.get();
-            it->first->mState = LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
-            it = mResponderFutures.erase(it);
+            if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
+            {
+
+                it->second.get();
+
+                it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
+                contextCompleteRequestIds.push_back(it->first->mRequestId);
+                it = mResponderFutures.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
-        else
+    }
+
+    if (mMpiGroupTensorParaComm && (mMpiGroupTensorParaComm->getSize() > 1))
+    {
+        mMpiGroupTensorParaComm->bcast(contextCompleteRequestIds, 0);
+        if (!(contextCompleteRequestIds.empty()) && (mMpiGroupTensorParaComm->getRank() > 0))
         {
-            ++it;
+            std::unordered_set<LlmRequest::RequestIdType> toCompleteIdSet{
+                contextCompleteRequestIds.begin(), contextCompleteRequestIds.end()};
+            for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
+            {
+                if (toCompleteIdSet.find(it->first->mRequestId) != toCompleteIdSet.end())
+                {
+                    it->second.get();
+                    it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
+                    ;
+                    it = mResponderFutures.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
         }
+
+        mMpiGroupTensorParaComm->barrier();
     }
 }
 

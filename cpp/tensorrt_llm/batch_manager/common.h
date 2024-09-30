@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "tensorrt_llm/runtime/common.h"
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -61,6 +62,54 @@ public:
     [[nodiscard]] std::size_t size() const
     {
         return contextRequests.size() + generationRequests.size();
+    }
+};
+
+class BatchState
+{
+public:
+    BatchState() = default;
+
+    BatchState(runtime::SizeType32 numCtxRequests, runtime::SizeType32 numGenRequests, runtime::SizeType32 numTokens,
+        runtime::SizeType32 maxKvCacheLength)
+        : mNumCtxRequests{numCtxRequests}
+        , mNumGenRequests{numGenRequests}
+        , mNumTokens{numTokens}
+        , mMaxKvCacheLength{maxKvCacheLength}
+    {
+    }
+
+    bool isAnyContext() const
+    {
+        return mNumCtxRequests > 0;
+    }
+
+    bool operator==(BatchState const& other) const
+    {
+        return mNumCtxRequests == other.mNumCtxRequests && mNumGenRequests == other.mNumGenRequests
+            && mNumTokens == other.mNumTokens && mMaxKvCacheLength == other.mMaxKvCacheLength;
+    }
+
+    size_t hash() const
+    {
+        size_t h1 = std::hash<runtime::SizeType32>{}(mNumCtxRequests);
+        size_t h2 = std::hash<runtime::SizeType32>{}(mNumGenRequests);
+        size_t h3 = std::hash<runtime::SizeType32>{}(mNumTokens);
+        size_t h4 = std::hash<runtime::SizeType32>{}(mMaxKvCacheLength);
+        return h1 ^ h2 ^ h3 ^ h4;
+    }
+
+    runtime::SizeType32 mNumCtxRequests;
+    runtime::SizeType32 mNumGenRequests;
+    runtime::SizeType32 mNumTokens;
+    runtime::SizeType32 mMaxKvCacheLength;
+};
+
+struct BatchStateHash
+{
+    size_t operator()(BatchState const& bs) const
+    {
+        return bs.hash();
     }
 };
 

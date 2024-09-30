@@ -13,7 +13,7 @@
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
 #include <gmock/gmock.h>
@@ -28,6 +28,40 @@ namespace texec = tensorrt_llm::executor;
 
 using testing::Return;
 using testing::ReturnRef;
+
+// ---------------------------------------
+//            RequestInfoTest
+// ---------------------------------------
+
+template <typename T>
+T serializeDeserialize(T val)
+{
+    auto size = T::serializedSize(val);
+    std::ostringstream oss;
+    T::serialize(val, oss);
+    EXPECT_EQ(oss.str().size(), size);
+
+    std::istringstream iss(oss.str());
+    return T::deserialize(iss);
+}
+
+class RequestInfoTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+{
+public:
+    void SetUp() override {}
+
+    void TearDown() override {}
+};
+
+TEST_F(RequestInfoTest, Basic)
+{
+    auto state = std::make_unique<texec::DataTransceiverState>();
+    state->setCommState(texec::kv_cache::CommState{12, "127.0.0.1"});
+    state->setCacheState(texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT});
+    RequestInfo info{1, *state};
+    auto info2 = serializeDeserialize(info);
+    EXPECT_EQ(info, info2);
+}
 
 // ---------------------------------------
 //            CacheConfigTest
@@ -54,7 +88,8 @@ TEST_F(CacheConfigTest, EqualTo)
     constexpr SizeType32 pipelineParallelism{2};
     constexpr SizeType32 sizePerHead{hiddenSize / nbHeads};
 
-    tr::ModelConfig modelConfig{vocabSize, nbAttentionLayers, nbRnnLayers, nbHeads, hiddenSize, dtype};
+    tr::ModelConfig modelConfig{
+        vocabSize, nbAttentionLayers + nbRnnLayers, nbAttentionLayers, nbRnnLayers, nbHeads, hiddenSize, dtype};
     modelConfig.setTokensPerBlock(tokensPerBlock);
     tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism};
 
@@ -74,12 +109,17 @@ public:
     MockDataSender()
     {
         ON_CALL(*this, getCommState).WillByDefault(ReturnRef(mState));
-        ON_CALL(*this, recvRequestId).WillByDefault(Return(0));
+        ON_CALL(*this, recvRequestInfo)
+            .WillByDefault(Return(RequestInfo{0,
+                texec::DataTransceiverState{
+                    texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
+                    texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
     }
 
-    MOCK_METHOD(LlmRequest::RequestIdType, recvRequestId, (), (override));
+    MOCK_METHOD(RequestInfo, recvRequestInfo, (), (override));
     MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
     MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const override));
+    MOCK_METHOD(void, setCommState, (texec::kv_cache::CommState const&), (override));
 
 private:
     static texec::kv_cache::CommState mState;
@@ -90,7 +130,7 @@ texec::kv_cache::CommState MockDataSender::mState;
 class MockDataReceiver : public DataReceiver
 {
 public:
-    MOCK_METHOD(void, sendRequestId, (LlmRequest const&), (override));
+    MOCK_METHOD(void, sendRequestInfo, (LlmRequest const&), (override));
     MOCK_METHOD(void, receiveSync, (LlmRequest const&), (override));
 };
 
@@ -105,8 +145,8 @@ public:
         LlmRequest::RequestIdType requestId = 0, SizeType32 maxNewTokens = 1, VecTokens inputTokens = {-1})
     {
         texec::Request request{std::move(inputTokens), maxNewTokens};
-        auto state = std::make_unique<texec::ContextPhaseState>(requestId);
-        auto stats = texec::ContextPhaseParams({}, state.release());
+        auto state = std::make_unique<texec::DataTransceiverState>();
+        auto stats = texec::ContextPhaseParams({}, requestId, state.release());
         request.setContextPhaseParams(std::move(stats));
         return std::make_unique<LlmRequest>(requestId, std::move(request));
     }
@@ -115,7 +155,10 @@ public:
 TEST_F(MockTransceiverTest, MpiResponderBasic)
 {
     auto sender = std::make_unique<MockDataSender>();
-    EXPECT_CALL(*sender, recvRequestId).WillOnce(Return(0));
+    EXPECT_CALL(*sender, recvRequestInfo)
+        .WillOnce(Return(RequestInfo{0,
+            texec::DataTransceiverState{texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
+                texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
     EXPECT_CALL(*sender, sendSync).WillOnce(Return());
 
     DataResponder responder{std::move(sender)};
@@ -127,7 +170,7 @@ TEST_F(MockTransceiverTest, MpiResponderBasic)
 TEST_F(MockTransceiverTest, MpiRequesterBasic)
 {
     auto receiver = std::make_unique<MockDataReceiver>();
-    EXPECT_CALL(*receiver, sendRequestId).WillOnce(Return());
+    EXPECT_CALL(*receiver, sendRequestInfo).WillOnce(Return());
     EXPECT_CALL(*receiver, receiveSync).WillOnce(Return());
 
     DataRequester requester{std::move(receiver)};
@@ -215,10 +258,10 @@ protected:
     {
         constexpr SizeType32 maxNewTokens{1};
         texec::Request request{VecTokens(length), maxNewTokens};
-        auto state = std::make_unique<texec::ContextPhaseState>(mRequestId);
+        auto state = std::make_unique<texec::DataTransceiverState>();
         state->setCommState(texec::kv_cache::CommState{std::vector<int>{0}});
         state->setCacheState(*mCacheState);
-        auto stats = texec::ContextPhaseParams({}, state.release());
+        auto stats = texec::ContextPhaseParams({}, mRequestId, state.release());
         request.setContextPhaseParams(std::move(stats));
         return std::make_unique<LlmRequest>(mRequestId++, std::move(request));
     }
@@ -232,8 +275,8 @@ protected:
         mManager->addSequence(llmRequest->mSeqSlot.value(), llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
         if (isSender)
         {
-            auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx);
-            for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx); it != blockEndIt; ++it)
+            auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
+            for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
             {
                 TLLM_CUDA_CHECK(cudaMemsetAsync(it->data(), llmRequest->mRequestId, it->getSizeInBytes()));
             }
@@ -244,8 +287,8 @@ protected:
         {
             auto future = mRequester->requestAndReceiveAsync(*llmRequest);
             future.get();
-            auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx);
-            for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx); it != blockEndIt; ++it)
+            auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
+            for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
             {
                 std::vector<char> bytes(it->getSizeInBytes());
                 TLLM_CUDA_CHECK(cudaMemcpy(bytes.data(), it->data(), it->getSizeInBytes(), cudaMemcpyDeviceToHost));

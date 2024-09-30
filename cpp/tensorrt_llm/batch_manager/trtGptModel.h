@@ -53,6 +53,7 @@ public:
         , mVocabSizePadded{modelConfig.getVocabSizePadded(worldConfig.getSize())}
         , mNormalizeLogProbs{optionalParams.normalizeLogProbs}
         , mEnableTrtOverlap{optionalParams.enableTrtOverlap}
+        , mCudaGraphMode{optionalParams.extendedRuntimePerfKnobConfig.getCudaGraphMode()}
     {
         TLLM_CHECK_WITH_INFO(mMaxBeamWidth <= modelConfig.getMaxBeamWidth(),
             "Runtime configured max beam width (%d) must not exceed engine max beam width (%d)", mMaxBeamWidth,
@@ -249,6 +250,11 @@ protected:
         return mEnableTrtOverlap;
     }
 
+    [[nodiscard]] bool isCudaGraphMode() const
+    {
+        return mCudaGraphMode;
+    }
+
     void setMaxAttentionWindow(SizeType32 maxAttentionWindow)
     {
         mMaxAttentionWindow = maxAttentionWindow;
@@ -286,6 +292,7 @@ private:
 
     bool mNormalizeLogProbs;
     bool mEnableTrtOverlap;
+    bool mCudaGraphMode;
 };
 
 } // namespace tensorrt_llm::batch_manager

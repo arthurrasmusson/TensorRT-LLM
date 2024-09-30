@@ -92,6 +92,31 @@ std::string ModelSpec::getSpeculativeDecodingModeString() const
     return "";
 }
 
+std::string ModelSpec::getCapacitySchedulerString() const
+{
+    if (mCapacitySchedulerPolicy)
+    {
+        if (mCapacitySchedulerPolicy.value() == tensorrt_llm::executor::CapacitySchedulerPolicy::kMAX_UTILIZATION)
+        {
+            return "MaxUtilization";
+        }
+        else if (mCapacitySchedulerPolicy.value()
+            == tensorrt_llm::executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+        {
+            return "GuaranteedNoEvict";
+        }
+        else if (mCapacitySchedulerPolicy.value() == tensorrt_llm::executor::CapacitySchedulerPolicy::kSTATIC_BATCH)
+        {
+            return "StaticBatch";
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported capacity scheduler");
+        }
+    }
+    return "";
+}
+
 std::string ModelSpec::getInputFile() const
 {
     return mInputFile;

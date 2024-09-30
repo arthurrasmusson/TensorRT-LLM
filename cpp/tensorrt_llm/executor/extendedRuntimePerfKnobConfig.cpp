@@ -15,9 +15,12 @@
 namespace tensorrt_llm::executor
 {
 
-ExtendedRuntimePerfKnobConfig::ExtendedRuntimePerfKnobConfig(bool multiBlockMode, bool enableContextFMHAFP32Acc)
+ExtendedRuntimePerfKnobConfig::ExtendedRuntimePerfKnobConfig(
+    bool multiBlockMode, bool enableContextFMHAFP32Acc, bool cudaGraphMode, SizeType32 cudaGraphCacheSize)
     : mMultiBlockMode(multiBlockMode)
     , mEnableContextFMHAFP32Acc(enableContextFMHAFP32Acc)
+    , mCudaGraphMode(cudaGraphMode)
+    , mCudaGraphCacheSize(cudaGraphCacheSize)
 {
 }
 
@@ -31,6 +34,16 @@ bool ExtendedRuntimePerfKnobConfig::getEnableContextFMHAFP32Acc() const
     return mEnableContextFMHAFP32Acc;
 }
 
+bool ExtendedRuntimePerfKnobConfig::getCudaGraphMode() const
+{
+    return mCudaGraphMode;
+}
+
+SizeType32 ExtendedRuntimePerfKnobConfig::getCudaGraphCacheSize() const
+{
+    return mCudaGraphCacheSize;
+}
+
 void ExtendedRuntimePerfKnobConfig::setMultiBlockMode(bool multiBlockMode)
 {
     mMultiBlockMode = multiBlockMode;
@@ -39,6 +52,16 @@ void ExtendedRuntimePerfKnobConfig::setMultiBlockMode(bool multiBlockMode)
 void ExtendedRuntimePerfKnobConfig::setEnableContextFMHAFP32Acc(bool enableContextFMHAFP32Acc)
 {
     mEnableContextFMHAFP32Acc = enableContextFMHAFP32Acc;
+}
+
+void ExtendedRuntimePerfKnobConfig::setCudaGraphMode(bool cudaGraphMode)
+{
+    mCudaGraphMode = cudaGraphMode;
+}
+
+void ExtendedRuntimePerfKnobConfig::setCudaGraphCacheSize(SizeType32 cudaGraphCacheSize)
+{
+    mCudaGraphCacheSize = cudaGraphCacheSize;
 }
 
 } // namespace tensorrt_llm::executor

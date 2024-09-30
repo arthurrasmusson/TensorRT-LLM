@@ -22,19 +22,22 @@ using CacheState = tensorrt_llm::executor::kv_cache::CacheState;
 template class UcxDataSender<CacheState>;
 template class UcxDataReceiver<CacheState>;
 
-std::unique_ptr<DataResponder> makeUcxCacheResponder(kv_cache_manager::KVCacheManager* cacheManager)
+std::unique_ptr<DataResponder> makeUcxCacheResponder(
+    executor::kv_cache::CacheState selfCacheState, SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager)
 {
     using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-    auto sender = std::make_unique<UcxDataSender<CacheState>>(
-        std::make_unique<UcxCommFactory>(), std::make_unique<CacheOutputFormatter<UcxComm>>(cacheManager));
+    auto sender = std::make_unique<UcxDataSender<CacheState>>(std::make_unique<UcxCommFactory>(),
+        std::move(selfCacheState), selfIndex, std::make_unique<CacheOutputFormatter<UcxComm>>(cacheManager));
     return std::make_unique<DataResponder>(std::move(sender));
 }
 
-std::unique_ptr<DataRequester> makeUcxCacheRequester(kv_cache_manager::KVCacheManager* cacheManager)
+std::unique_ptr<DataRequester> makeUcxCacheRequester(
+    executor::kv_cache::CacheState selfCacheState, SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager)
 {
     using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-    return std::make_unique<DataRequester>(std::make_unique<UcxDataReceiver<CacheState>>(
-        std::make_unique<UcxCommFactory>(), std::make_unique<CacheInputFormatter<UcxComm>>(cacheManager)));
+    return std::make_unique<DataRequester>(
+        std::make_unique<UcxDataReceiver<CacheState>>(std::make_unique<UcxCommFactory>(), std::move(selfCacheState),
+            selfIndex, std::make_unique<CacheInputFormatter<UcxComm>>(cacheManager)));
 }
 
 void UcxComm::sendBuffer(runtime::IBuffer const& buf) const
@@ -65,33 +68,63 @@ void UcxComm::recvBuffer(runtime::IBuffer& buf) const
     req->checkError();
 }
 
-LlmRequest::RequestIdType UcxComm::recvRequestId() const
+RequestInfo UcxComm::recvRequestInfo() const
 {
-    LlmRequest::RequestIdType id;
+    std::string serializedInfo;
+    std::size_t infoSize{0};
     // Guard to ensure CUDA context is initialized for UCX ops
     TLLM_CUDA_CHECK(cudaFree(0));
-    TLLM_CHECK_WITH_INFO((mEndpoint), "recvRequestId called without established communicator channel.");
+    TLLM_CHECK_WITH_INFO((mEndpoint), "recvRequestInfo called without established communicator channel.");
     auto completionCallback = [this](ucs_status_t, ucxx::RequestCallbackUserData) -> void { mCv.notify_all(); };
-    auto req = mEndpoint->tagRecv(
-        &id, sizeof(LlmRequest::RequestIdType), kID_TAG, ucxx::TagMaskFull, false, completionCallback);
-    std::unique_lock<std::mutex> lk(mMtx);
-    mCv.wait(lk, [&req]() { return req->isCompleted(); });
-    // throw if there is error
-    req->checkError();
-    return id;
+    {
+        auto req
+            = mEndpoint->tagRecv(&infoSize, sizeof(infoSize), kID_TAG, ucxx::TagMaskFull, false, completionCallback);
+        std::unique_lock<std::mutex> lk(mMtx);
+        mCv.wait(lk, [&req]() { return req->isCompleted(); });
+        // throw if there is error
+        req->checkError();
+        serializedInfo.resize(infoSize);
+    }
+    {
+        auto req = mEndpoint->tagRecv(
+            serializedInfo.data(), infoSize, kID_TAG, ucxx::TagMaskFull, false, completionCallback);
+        std::unique_lock<std::mutex> lk(mMtx);
+        mCv.wait(lk, [&req]() { return req->isCompleted(); });
+        // throw if there is error
+        req->checkError();
+    }
+    std::istringstream iss(serializedInfo);
+    RequestInfo info{RequestInfo::deserialize(iss)};
+    return info;
 }
 
-void UcxComm::sendRequestId(LlmRequest::RequestIdType id) const
+void UcxComm::sendRequestInfo(RequestInfo const& info) const
 {
     // Guard to ensure CUDA context is initialized for UCX ops
     TLLM_CUDA_CHECK(cudaFree(0));
-    TLLM_CHECK_WITH_INFO((mEndpoint), "sendRequestId called without established communicator channel.");
+
+    std::ostringstream oss;
+    RequestInfo::serialize(info, oss);
+    auto const& serializedInfo = oss.str();
+    std::size_t infoSize = serializedInfo.size();
+
+    TLLM_CHECK_WITH_INFO((mEndpoint), "sendRequestInfo called without established communicator channel.");
     auto completionCallback = [this](ucs_status_t, ucxx::RequestCallbackUserData) -> void { mCv.notify_all(); };
-    auto req = mEndpoint->tagSend(&id, sizeof(LlmRequest::RequestIdType), kID_TAG, false, completionCallback);
-    std::unique_lock<std::mutex> lk(mMtx);
-    mCv.wait(lk, [&req]() { return req->isCompleted(); });
-    // throw if there is error
-    req->checkError();
+    {
+        auto req = mEndpoint->tagSend(&infoSize, sizeof(infoSize), kID_TAG, false, completionCallback);
+        std::unique_lock<std::mutex> lk(mMtx);
+        mCv.wait(lk, [&req]() { return req->isCompleted(); });
+        // throw if there is error
+        req->checkError();
+    }
+    {
+        auto req = mEndpoint->tagSend(
+            const_cast<char*>(serializedInfo.data()), infoSize, kID_TAG, false, completionCallback);
+        std::unique_lock<std::mutex> lk(mMtx);
+        mCv.wait(lk, [&req]() { return req->isCompleted(); });
+        // throw if there is error
+        req->checkError();
+    }
 }
 
 } // namespace tensorrt_llm::batch_manager

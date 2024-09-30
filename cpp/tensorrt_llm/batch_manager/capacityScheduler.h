@@ -131,11 +131,29 @@ public:
     [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
         RequestList const& activeRequests) const override;
 
-private:
+protected:
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequestsImpl(
+        RequestList const& activeRequests, bool staticBatchScheduling) const;
+
+protected:
     SizeType32 mMaxNumRequests;
     std::shared_ptr<kv_cache_manager::KVCacheManager> mKvCacheManager{nullptr};
     std::shared_ptr<kv_cache_manager::KVCacheManager> mCrossKvCacheManager{nullptr};
     std::shared_ptr<BasePeftCacheManager> mPeftCacheManager{nullptr};
+};
+
+/// @brief Schedule requests using the STATIC_BATCH policy
+class StaticBatchScheduler : public GuaranteedNoEvictScheduler
+{
+public:
+    StaticBatchScheduler(SizeType32 maxNumRequests, std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+        std::shared_ptr<BasePeftCacheManager> peftCacheManager,
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
+
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
+        RequestList const& activeRequests) const override;
 };
 
 std::unique_ptr<CapacityScheduler> makeCapacityScheduler(tensorrt_llm::runtime::SizeType32 maxNumRequests,

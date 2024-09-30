@@ -68,7 +68,7 @@ protected:
 
     void SetUp() override
     {
-        mModelConfig = std::make_unique<ModelConfig>(0, 2, 0, 1, 16, nvinfer1::DataType::kFLOAT);
+        mModelConfig = std::make_unique<ModelConfig>(0, 2, 2, 0, 1, 16, nvinfer1::DataType::kFLOAT);
         mModelConfig->setMlpHiddenSize(32);
         mWorldConfig = std::make_unique<WorldConfig>(2, 1, 0);
         std::vector<LoraModule> modules{

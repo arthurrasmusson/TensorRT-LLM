@@ -12,7 +12,7 @@
 
 #include "mpiDataTransceiver.h"
 #include "tensorrt_llm/batch_manager/cacheFormatter.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 
 namespace tensorrt_llm::batch_manager
 {

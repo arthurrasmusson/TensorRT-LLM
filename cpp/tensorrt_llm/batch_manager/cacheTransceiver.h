@@ -18,6 +18,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include <future>
 #include <map>
+#include <memory>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -51,6 +52,7 @@ private:
     std::unique_ptr<DataRequester> mDataRequester;
     std::map<LlmRequest*, std::future<void>> mResponderFutures;
     mpi::MpiComm const *mMpiGroupComm{}, *mMpiWorldComm{};
+    std::shared_ptr<mpi::MpiComm> mMpiGroupTensorParaComm, mMpiGroupPipeParaComm;
     executor::kv_cache::CommState const* mCommState;
     std::unique_ptr<executor::kv_cache::CacheState> mCacheState;
 };

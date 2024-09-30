@@ -42,7 +42,8 @@ set(SRCS
     trtGptModelInflightBatching.cpp
     trtGptModelV1.cpp
     utils/debugUtils.cpp
-    utils/inflightBatchingUtils.cpp)
+    utils/inflightBatchingUtils.cpp
+    utils/staticThreadPool.cpp)
 
 if(ENABLE_UCX)
   set(SRCS ${SRCS} ucxDataTransceiver.cpp)

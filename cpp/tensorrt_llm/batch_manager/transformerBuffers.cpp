@@ -37,8 +37,11 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
     positionIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
-    auto const localNbLayers = modelConfig.getNbAttentionLayers(worldConfig.getPipelineParallelism());
-    auto const firstLayerId = worldConfig.getPipelineParallelRank() * localNbLayers;
+    auto const localNbAttnLayers
+        = modelConfig.getNbAttentionLayers(worldConfig.getPipelineParallelism(), worldConfig.getPipelineParallelRank());
+    // find the index of the first attention layer in the current rank
+    auto const firstLayerId = modelConfig.countLowerRankLayers(runtime::ModelConfig::LayerType::kATTENTION,
+        worldConfig.getPipelineParallelism(), worldConfig.getPipelineParallelRank());
 
     cacheIndirection
         = manager.gpu(ITensor::makeShape({maxBatchSize, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
@@ -69,10 +72,10 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
-    maxAttentionWindows = BufferManager::cpu(ITensor::makeShape({localNbLayers}), nvinfer1::DataType::kINT32);
+    maxAttentionWindows = BufferManager::cpu(ITensor::makeShape({localNbAttnLayers}), nvinfer1::DataType::kINT32);
     auto maxAttentionWindowsPtr = bufferCast<SizeType32>(*maxAttentionWindows);
     auto const attentionWindowLength = maxAttentionWindowVec.size();
-    for (SizeType32 i = 0; i < localNbLayers; ++i)
+    for (SizeType32 i = 0; i < localNbAttnLayers; ++i)
     {
         maxAttentionWindowsPtr[i] = maxAttentionWindowVec[(firstLayerId + i) % attentionWindowLength];
     }
@@ -99,7 +102,7 @@ void TransformerBuffers::reshape(SizeType32 numSequences)
         auto cacheBlockOffsetsShape = kvCacheBlockOffsetsHost->getShape();
         if (cacheBlockOffsetsShape.nbDims > 0)
         {
-            cacheBlockOffsetsShape.d[0] = numSequences;
+            cacheBlockOffsetsShape.d[1] = numSequences;
             kvCacheBlockOffsetsHost->reshape(cacheBlockOffsetsShape);
             kvCacheBlockOffsetsDevice->reshape(cacheBlockOffsetsShape);
         }
@@ -116,7 +119,7 @@ void TransformerBuffers::reshape(SizeType32 numSequences)
         auto crossCacheBlockOffsetsShape = crossKvCacheBlockOffsetsHost->getShape();
         if (crossCacheBlockOffsetsShape.nbDims > 0)
         {
-            crossCacheBlockOffsetsShape.d[0] = numSequences;
+            crossCacheBlockOffsetsShape.d[1] = numSequences;
             crossKvCacheBlockOffsetsHost->reshape(crossCacheBlockOffsetsShape);
             crossKvCacheBlockOffsetsDevice->reshape(crossCacheBlockOffsetsShape);
         }
@@ -128,14 +131,18 @@ void TransformerBuffers::reshape(SizeType32 numSequences)
 }
 
 void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
-    runtime::TllmRuntime const& runtime, KvCacheType kvCacheType)
+    runtime::TllmRuntime const& runtime, kv_cache_manager::KVCacheManager const& kvCacheManager)
 {
     auto const& manager = runtime.getBufferManager();
+    auto const& blockManager = kvCacheManager.getBlockManager();
+    auto const kvCacheType = blockManager.getCacheType();
+    auto const numPools = blockManager.getNumPools();
 
     // allocate with max shape during init
     if (kvCacheType == KvCacheType::kSELF)
     {
-        auto const cacheBlockOffsetsShape = ITensor::makeShape({maxBatchSize * maxBeamWidth, 2, maxBlocksPerSeq});
+        auto const cacheBlockOffsetsShape
+            = ITensor::makeShape({numPools, maxBatchSize * maxBeamWidth, 2, maxBlocksPerSeq});
 
         kvCacheBlockOffsetsHost->reshape(cacheBlockOffsetsShape);
         manager.setZero(*kvCacheBlockOffsetsHost);
@@ -145,7 +152,8 @@ void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 ma
     }
     else if (kvCacheType == KvCacheType::kCROSS)
     {
-        auto const crossCacheBlockOffsetsShape = ITensor::makeShape({maxBatchSize * maxBeamWidth, 2, maxBlocksPerSeq});
+        auto const crossCacheBlockOffsetsShape
+            = ITensor::makeShape({numPools, maxBatchSize * maxBeamWidth, 2, maxBlocksPerSeq});
 
         crossKvCacheBlockOffsetsHost->reshape(crossCacheBlockOffsetsShape);
         manager.setZero(*crossKvCacheBlockOffsetsHost);
@@ -167,6 +175,18 @@ void TransformerBuffers::setKvPoolPointers(kv_cache_manager::KVCacheManager& kvC
     }
 }
 
+void TransformerBuffers::setKvPoolMapping(kv_cache_manager::KVCacheManager& kvCacheManager)
+{
+    if (kvCacheManager.isCrossKv())
+    {
+        crossKvCacheBlockPoolMapping = kvCacheManager.getLayerToPoolMapping();
+    }
+    else
+    {
+        kvCacheBlockPoolMapping = kvCacheManager.getLayerToPoolMapping();
+    }
+}
+
 void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -181,6 +201,7 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     inputBuffers.insert_or_assign("kv_cache_block_offsets", kvCacheBlockOffsetsDevice);
     inputBuffers.insert_or_assign("host_kv_cache_block_offsets", kvCacheBlockOffsetsHost);
     inputBuffers.insert_or_assign("host_kv_cache_pool_pointers", kvCacheBlockPoolPointers);
+    inputBuffers.insert_or_assign("host_kv_cache_pool_mapping", kvCacheBlockPoolMapping);
     inputBuffers.insert_or_assign("host_runtime_perf_knobs", runtimePerfKnobsHost);
 
     if (crossKvCacheBlockPoolPointers)
@@ -188,15 +209,14 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
         inputBuffers.insert_or_assign("cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsDevice);
         inputBuffers.insert_or_assign("host_cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsHost);
         inputBuffers.insert_or_assign("host_cross_kv_cache_pool_pointers", crossKvCacheBlockPoolPointers);
+        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", crossKvCacheBlockPoolMapping);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TransformerBuffers::copyPositionIds(
-    runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost, bool isChatGlm)
+void TransformerBuffers::reshapePositionIds(std::vector<SizeType32> const& positionIdsHost, bool isChatGlm)
 {
-    auto const& manager = runtime.getBufferManager();
     if (isChatGlm)
     {
         positionIds->reshape(ITensor::makeShape({2, static_cast<int>(positionIdsHost.size()) / 2}));
@@ -205,6 +225,12 @@ void TransformerBuffers::copyPositionIds(
     {
         positionIds->reshape(ITensor::makeShape({static_cast<int>(positionIdsHost.size())}));
     }
+}
+
+void TransformerBuffers::copyPositionIds(
+    runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost, bool isChatGlm)
+{
+    auto const& manager = runtime.getBufferManager();
     manager.copy(positionIdsHost.data(), *positionIds);
 }
 
@@ -299,10 +325,10 @@ void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests
     {
         // shape should be [totalNumSequences, 2, maxBlocksPerSeq]
         auto const& offsetsShape = offsetsHost->getShape();
-        auto const maxBlocksPerSeq = offsetsShape.d[2];
+        auto const maxBlocksPerSeq = offsetsShape.d[3];
         auto const offsetsTypeSize = tensorrt_llm::common::getDTypeSize(offsetsHost->getDataType());
         auto const copyPitch = maxBlocksPerSeq * offsetsTypeSize;
-        auto const copyHeight = offsetsShape.d[0] * offsetsShape.d[1];
+        auto const copyHeight = offsetsShape.d[0] * offsetsShape.d[1] * offsetsShape.d[2];
         auto const copyWidth = maxBlockCount * offsetsTypeSize;
         auto* srcPtr = bufferCast<tk::KVCacheIndex>(*offsetsHost);
         auto* dstPtr = bufferCast<tk::KVCacheIndex>(*offsetsDevice);

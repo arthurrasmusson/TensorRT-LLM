@@ -15,19 +15,21 @@
 namespace tensorrt_llm::batch_manager::kv_cache_manager
 {
 
-BlockIterator getBlockBeginIt(KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam)
+BlockIterator getBlockBeginIt(
+    KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
 {
     auto const& req = cacheManager.getSequence(request.mSeqSlot.value());
     auto blockIds = req.getCacheBlockIds().at(beam);
-    return BlockIterator{cacheManager.getBlockManager().getPrimaryPool(), std::move(blockIds), 0};
+    return BlockIterator{cacheManager.getBlockManager().getPrimaryPool(poolIdx), std::move(blockIds), 0};
 }
 
-BlockIterator getBlockEndIt(KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam)
+BlockIterator getBlockEndIt(
+    KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
 {
     auto const& req = cacheManager.getSequence(request.mSeqSlot.value());
     auto blockIds = req.getCacheBlockIds().at(beam);
     auto const backIdsSize = blockIds.size();
-    return BlockIterator{cacheManager.getBlockManager().getPrimaryPool(), std::move(blockIds), backIdsSize};
+    return BlockIterator{cacheManager.getBlockManager().getPrimaryPool(poolIdx), std::move(blockIds), backIdsSize};
 }
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

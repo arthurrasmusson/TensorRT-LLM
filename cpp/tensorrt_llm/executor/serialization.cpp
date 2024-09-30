@@ -11,7 +11,7 @@
  */
 
 #include "tensorrt_llm/executor/serialization.h"
-#include "tensorrt_llm/executor/contextPhaseState.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestImpl.h"
 #include "tensorrt_llm/executor/responseImpl.h"
@@ -225,26 +225,28 @@ size_t Serialization::serializedSize(kv_cache::SocketState const& state)
 kv_cache::CommState Serialization::deserializeCommState(std::istream& is)
 {
     using namespace kv_cache;
-    auto index = su::deserialize<std::size_t>(is);
+    auto selfIdx = su::deserialize<decltype(kv_cache::CommState::mSelfIdx)>(is);
+    auto variantIdx = su::deserialize<std::size_t>(is);
     constexpr std::size_t mpiIdx{1}, socketIdx{2};
     static_assert(std::is_same_v<MpiState, std::variant_alternative_t<mpiIdx, decltype(CommState::mState)>>);
     static_assert(
         std::is_same_v<std::vector<SocketState>, std::variant_alternative_t<socketIdx, decltype(CommState::mState)>>);
-    if (index == mpiIdx)
+    if (variantIdx == mpiIdx)
     {
         auto ranks = su::deserialize<decltype(MpiState::mRanks)>(is);
-        return CommState{std::move(ranks)};
+        return CommState{std::move(ranks), selfIdx};
     }
-    else if (index == socketIdx)
+    else if (variantIdx == socketIdx)
     {
         auto state = su::deserialize<std::vector<SocketState>>(is);
-        return CommState{std::move(state)};
+        return CommState{std::move(state), selfIdx};
     }
     return {};
 }
 
 void Serialization::serialize(kv_cache::CommState const& state, std::ostream& os)
 {
+    su::serialize(state.mSelfIdx, os);
     su::serialize(state.mState.index(), os);
     if (state.isMpiState())
     {
@@ -263,6 +265,7 @@ void Serialization::serialize(kv_cache::CommState const& state, std::ostream& os
 size_t Serialization::serializedSize(kv_cache::CommState const& state)
 {
     size_t totalSize = 0;
+    totalSize += su::serializedSize(state.mSelfIdx);
     totalSize += su::serializedSize(state.mState.index());
     if (state.isMpiState())
     {
@@ -283,22 +286,19 @@ size_t Serialization::serializedSize(kv_cache::CommState const& state)
 kv_cache::CacheState Serialization::deserializeCacheState(std::istream& is)
 {
     using CacheState = kv_cache::CacheState;
-    auto nbAttentionLayers = su::deserialize<decltype(CacheState::ModelConfig::mNbAttentionLayers)>(is);
-    auto nbKvHeads = su::deserialize<decltype(CacheState::ModelConfig::mNbKvHeads)>(is);
+    auto nbKvHeadsPerLayer = su::deserialize<decltype(CacheState::ModelConfig::mNbKvHeadsPerLayer)>(is);
     auto sizePerHead = su::deserialize<decltype(CacheState::ModelConfig::mSizePerHead)>(is);
     auto tokensPerBlock = su::deserialize<decltype(CacheState::ModelConfig::mTokensPerBlock)>(is);
     auto tensorParallelism = su::deserialize<decltype(CacheState::ParallelConfig::mTensorParallelism)>(is);
     auto pipelineParallelism = su::deserialize<decltype(CacheState::ParallelConfig::mPipelineParallelism)>(is);
     auto dataType = su::deserialize<decltype(CacheState::mDataType)>(is);
 
-    return CacheState{
-        nbAttentionLayers, nbKvHeads, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dataType};
+    return CacheState{nbKvHeadsPerLayer, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dataType};
 }
 
 void Serialization::serialize(kv_cache::CacheState const& state, std::ostream& os)
 {
-    su::serialize(state.mModelConfig.mNbAttentionLayers, os);
-    su::serialize(state.mModelConfig.mNbKvHeads, os);
+    su::serialize(state.mModelConfig.mNbKvHeadsPerLayer, os);
     su::serialize(state.mModelConfig.mSizePerHead, os);
     su::serialize(state.mModelConfig.mTokensPerBlock, os);
     su::serialize(state.mParallelConfig.mTensorParallelism, os);
@@ -309,8 +309,7 @@ void Serialization::serialize(kv_cache::CacheState const& state, std::ostream& o
 size_t Serialization::serializedSize(kv_cache::CacheState const& state)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(state.mModelConfig.mNbAttentionLayers);
-    totalSize += su::serializedSize(state.mModelConfig.mNbKvHeads);
+    totalSize += su::serializedSize(state.mModelConfig.mNbKvHeadsPerLayer);
     totalSize += su::serializedSize(state.mModelConfig.mSizePerHead);
     totalSize += su::serializedSize(state.mModelConfig.mTokensPerBlock);
     totalSize += su::serializedSize(state.mParallelConfig.mTensorParallelism);
@@ -319,17 +318,16 @@ size_t Serialization::serializedSize(kv_cache::CacheState const& state)
     return totalSize;
 }
 
-// ContextPhaseState
-ContextPhaseState Serialization::deserializeContextPhaseState(std::istream& is)
+// DataTransceiverState
+DataTransceiverState Serialization::deserializeDataTransceiverState(std::istream& is)
 {
-    auto reqId = su::deserialize<decltype(ContextPhaseState::mReqId)>(is);
-    ContextPhaseState state{reqId};
-    auto commState = su::deserialize<decltype(ContextPhaseState::mCommState)>(is);
+    DataTransceiverState state;
+    auto commState = su::deserialize<decltype(DataTransceiverState::mCommState)>(is);
     if (commState)
     {
         state.setCommState(std::move(commState).value());
     }
-    auto cacheState = su::deserialize<decltype(ContextPhaseState::mCacheState)>(is);
+    auto cacheState = su::deserialize<decltype(DataTransceiverState::mCacheState)>(is);
     if (cacheState)
     {
         state.setCacheState(std::move(cacheState).value());
@@ -337,17 +335,15 @@ ContextPhaseState Serialization::deserializeContextPhaseState(std::istream& is)
     return state;
 }
 
-void Serialization::serialize(ContextPhaseState const& state, std::ostream& os)
+void Serialization::serialize(DataTransceiverState const& state, std::ostream& os)
 {
-    su::serialize(state.mReqId, os);
     su::serialize(state.mCommState, os);
     su::serialize(state.mCacheState, os);
 }
 
-size_t Serialization::serializedSize(ContextPhaseState const& state)
+size_t Serialization::serializedSize(DataTransceiverState const& state)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(state.mReqId);
     totalSize += su::serializedSize(state.mCommState);
     totalSize += su::serializedSize(state.mCacheState);
     return totalSize;
@@ -356,35 +352,38 @@ size_t Serialization::serializedSize(ContextPhaseState const& state)
 // ContextPhaseParams
 ContextPhaseParams Serialization::deserializeContextPhaseParams(std::istream& is)
 {
+    auto reqId = su::deserialize<decltype(ContextPhaseParams::mReqId)>(is);
     auto firstGenTokens = su::deserialize<decltype(ContextPhaseParams::mFirstGenTokens)>(is);
     auto hasState = su::deserialize<bool>(is);
     if (hasState)
     {
-        auto state = std::make_unique<ContextPhaseState>();
-        *state = deserializeContextPhaseState(is);
-        return ContextPhaseParams{std::move(firstGenTokens), state.release()};
+        auto state = std::make_unique<DataTransceiverState>();
+        *state = deserializeDataTransceiverState(is);
+        return ContextPhaseParams{std::move(firstGenTokens), reqId, state.release()};
     }
-    return ContextPhaseParams{std::move(firstGenTokens)};
+    return ContextPhaseParams{std::move(firstGenTokens), reqId};
 }
 
 void Serialization::serialize(ContextPhaseParams const& contextPhaseParams, std::ostream& os)
 {
+    su::serialize(contextPhaseParams.mReqId, os);
     su::serialize(contextPhaseParams.mFirstGenTokens, os);
     su::serialize(static_cast<bool>(contextPhaseParams.mState), os);
     if (contextPhaseParams.mState)
     {
-        serialize(*static_cast<ContextPhaseState*>(contextPhaseParams.mState.get()), os);
+        serialize(*static_cast<DataTransceiverState*>(contextPhaseParams.mState.get()), os);
     }
 }
 
 size_t Serialization::serializedSize(ContextPhaseParams const& contextPhaseParams)
 {
     size_t totalSize = 0;
+    totalSize += su::serializedSize(contextPhaseParams.mReqId);
     totalSize += su::serializedSize(contextPhaseParams.mFirstGenTokens);
     totalSize += su::serializedSize(bool{});
     if (contextPhaseParams.mState)
     {
-        totalSize += serializedSize(*static_cast<ContextPhaseState*>(contextPhaseParams.mState.get()));
+        totalSize += serializedSize(*static_cast<DataTransceiverState*>(contextPhaseParams.mState.get()));
     }
     return totalSize;
 }
@@ -852,13 +851,17 @@ ExtendedRuntimePerfKnobConfig Serialization::deserializeExtendedRuntimePerfKnobC
 {
     auto multiBlockMode = su::deserialize<bool>(is);
     auto enableContextFMHAFP32Acc = su::deserialize<bool>(is);
-    return ExtendedRuntimePerfKnobConfig{multiBlockMode, enableContextFMHAFP32Acc};
+    auto cudaGraphMode = su::deserialize<bool>(is);
+    auto cudaGraphCacheSize = su::deserialize<SizeType32>(is);
+    return ExtendedRuntimePerfKnobConfig{multiBlockMode, enableContextFMHAFP32Acc, cudaGraphMode, cudaGraphCacheSize};
 }
 
 void Serialization::serialize(ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::ostream& os)
 {
     su::serialize(extendedRuntimePerfKnobConfig.getMultiBlockMode(), os);
     su::serialize(extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc(), os);
+    su::serialize(extendedRuntimePerfKnobConfig.getCudaGraphMode(), os);
+    su::serialize(extendedRuntimePerfKnobConfig.getCudaGraphCacheSize(), os);
 }
 
 size_t Serialization::serializedSize(ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig)
@@ -866,6 +869,8 @@ size_t Serialization::serializedSize(ExtendedRuntimePerfKnobConfig const& extend
     size_t totalSize = 0;
     totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getMultiBlockMode());
     totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc());
+    totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getCudaGraphMode());
+    totalSize += su::serializedSize(extendedRuntimePerfKnobConfig.getCudaGraphCacheSize());
     return totalSize;
 }
 
