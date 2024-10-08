@@ -93,6 +93,7 @@ static_assert(hasSerializedSize<DataTransceiverState>(size_t()));
 static_assert(hasSerializedSize<ContextPhaseParams>(size_t()));
 static_assert(hasSerializedSize<ExternalDraftTokensConfig>(size_t()));
 static_assert(hasSerializedSize<Tensor>(size_t()));
+static_assert(hasSerializedSize<SpeculativeDecodingFastLogitsInfo>(size_t()));
 static_assert(hasSerializedSize<Result>(size_t()));
 static_assert(hasSerializedSize<Response>(size_t()));
 static_assert(hasSerializedSize<KvCacheConfig>(size_t()));
@@ -175,6 +176,7 @@ static_assert(hasSerialize<PromptTuningConfig>(nullptr));
 static_assert(hasSerialize<LoraConfig>(nullptr));
 static_assert(hasSerialize<ExternalDraftTokensConfig>(nullptr));
 static_assert(hasSerialize<Tensor>(nullptr));
+static_assert(hasSerialize<SpeculativeDecodingFastLogitsInfo>(nullptr));
 static_assert(hasSerialize<Result>(nullptr));
 static_assert(hasSerialize<Response>(nullptr));
 static_assert(hasSerialize<KvCacheConfig>(nullptr));
@@ -330,6 +332,10 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::Tensor>::value)
     {
         return Serialization::deserializeTensor(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::SpeculativeDecodingFastLogitsInfo>::value)
+    {
+        return Serialization::deserializeSpecDecFastLogitsInfo(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::Result>::value)
     {

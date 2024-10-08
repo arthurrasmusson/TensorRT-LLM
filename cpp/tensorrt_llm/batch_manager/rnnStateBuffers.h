@@ -14,8 +14,6 @@
 
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/runtime/iTensor.h"
-#include "tensorrt_llm/runtime/modelConfig.h"
-#include "tensorrt_llm/runtime/worldConfig.h"
 
 namespace tensorrt_llm::runtime
 {
@@ -49,8 +47,7 @@ public:
 
     void copySlotMappingH2D(runtime::TllmRuntime const& runtime);
 
-    void getBuffers(rnn_state_manager::RnnStateManager* rnnStateManager, TensorMap& inputBuffers,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig) const;
+    void getBuffers(TensorMap& inputBuffers) const;
 };
 
 } // namespace tensorrt_llm::batch_manager

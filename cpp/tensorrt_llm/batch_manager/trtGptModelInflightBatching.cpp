@@ -13,13 +13,14 @@
 #include "trtGptModelInflightBatching.h"
 
 #include "runtimeBuffers.h"
+#include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/batch_manager/mpiDataTransceiver.h"
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
-#include "tensorrt_llm/batch_manager/requestScheduler.h"
 #include "tensorrt_llm/batch_manager/rnnStateManager.h"
 #include "tensorrt_llm/batch_manager/utils/debugUtils.h"
 #include "tensorrt_llm/batch_manager/utils/inflightBatchingUtils.h"
@@ -269,9 +270,22 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
         ? maxNumTokens
         : std::make_optional<SizeType32>(mModelConfig.getMaxInputLen());
 
-    mRequestScheduler = std::make_shared<batch_scheduler::RequestScheduler>(getMaxBatchSize(), mNumMicroBatches,
-        mKvCacheManager, mCrossKvCacheManager, mPeftCacheManager, optionalParams.schedulerConfig, maxNumTokens,
-        ctxChunkConfig, maxContextLength);
+    auto maxBatchSize = getMaxBatchSize();
+
+    if (mKvCacheManager && ctxChunkConfig)
+    {
+        TLLM_CHECK_WITH_INFO(ctxChunkConfig.value().chunkUnitSize % mKvCacheManager->getTokensPerBlock() == 0,
+            "To prevent cache fragmentation, the context chunk unit size (%d) should be divisible by the number of "
+            "tokens per kv-cache block (%d).",
+            ctxChunkConfig.value().chunkUnitSize, mKvCacheManager->getTokensPerBlock());
+    }
+
+    mCapacityScheduler
+        = std::make_unique<CapacityScheduler>(maxBatchSize * mNumMicroBatches, mKvCacheManager, mCrossKvCacheManager,
+            mPeftCacheManager, optionalParams.schedulerConfig.getCapacitySchedulerPolicy(), mNumMicroBatches > 1);
+
+    mMicroBatchScheduler
+        = std::make_unique<MicroBatchScheduler>(maxBatchSize, maxNumTokens, ctxChunkConfig, maxContextLength);
 
     if (isCudaGraphMode())
     {
@@ -282,6 +296,16 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
         // buffers.
         mCudaGraphExecutorCaches.resize(mNumBuffers, utils::CudaGraphExecutorCache(cudaGraphCacheSize));
     }
+
+    mSpeculativeDecodingFastLogits = optionalParams.speculativeDecodingConfig.has_value()
+        && optionalParams.speculativeDecodingConfig.value().fastLogits;
+    mIsLeaderInOrchMode = optionalParams.isLeaderInOrchMode;
+    if (mSpeculativeDecodingFastLogits && modelConfig.getSpeculativeDecodingMode().isNone() && mIsLeaderInOrchMode)
+    {
+        mDraftModelSendLogitsThread
+            = std::make_unique<std::thread>(&TrtGptModelInflightBatching::draftModelSendLogitsThread, this);
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -295,6 +319,12 @@ TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
     {
         mMpiWaitThread->join();
         mMpiWaitThread.reset(nullptr);
+    }
+    if (mDraftModelSendLogitsThread)
+    {
+        mDraftModelThreadShouldExit = true;
+        mDraftModelSendLogitsThread->join();
+        mDraftModelSendLogitsThread.reset(nullptr);
     }
 }
 
@@ -336,6 +366,134 @@ void TrtGptModelInflightBatching::reshapeKvTensors(KVCacheManager const& kvCache
         buffers->transformerBuffers->reshapeKvTensors(
             getMaxBatchSize(), mOperatingBeamWidth, maxBlocksPerSeq, *mRuntime, kvCacheManager);
     }
+}
+
+void TrtGptModelInflightBatching::draftModelSendLogitsThread()
+{
+#if ENABLE_MULTI_DEVICE
+    TLLM_CUDA_CHECK(cudaSetDevice(mDevice));
+    auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
+
+    bool msgReady{false};
+    MPI_Message msg;
+    MPI_Status status;
+
+    while (true)
+    {
+        msgReady = worldComm.improbe(MPI_ANY_SOURCE, kMPI_SPEC_DEC_ID_TAG, &msg, &status);
+
+        if (!msgReady)
+        {
+            if (mDraftModelThreadShouldExit)
+            {
+                TLLM_LOG_INFO("Draft model sender thread exiting");
+                break;
+            }
+
+            continue;
+        }
+
+        int const source_rank = status.MPI_SOURCE;
+
+        int32_t count;
+        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+        TLLM_CHECK(count == 1);
+
+        FastLogitsMpiId mpiId;
+        MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status));
+
+        TLLM_CHECK(mpiId == FastLogitsMpiId::ASK_TENSOR);
+
+        worldComm.mprobe(MPI_ANY_SOURCE, kMPI_SPEC_DEC_DATA_TAG, &msg, &status);
+        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+        TLLM_CHECK(count == 1);
+
+        uint64_t draftRequestId;
+        MPICHECK(MPI_Mrecv(&draftRequestId, count, MPI_UINT64_T, &msg, &status));
+
+        auto const findDraftRequest = [this, draftRequestId]() -> std::shared_ptr<LlmRequest>
+        {
+            auto& currRequests = mMicroBatchScheduledRequests.at(mMicroBatchId);
+            for (auto const& requests : {currRequests.contextRequests, currRequests.generationRequests})
+            {
+                for (auto const& llmReq : requests)
+                {
+                    if (llmReq->mState == LlmRequestState::kWAITING_TO_SEND_LOGITS
+                        && llmReq->mRequestId == draftRequestId)
+                    {
+                        return llmReq;
+                    }
+                }
+            }
+            return nullptr;
+        };
+
+        std::shared_ptr<LlmRequest> draftRequest = findDraftRequest();
+        TLLM_CHECK(draftRequest != nullptr);
+
+        auto draftLogits = ITensor::slice(draftRequest->getGenerationLogitsHost(), {0, 0});
+
+        auto const shape = draftLogits->getShape();
+        TLLM_CHECK(shape.nbDims == 2);
+
+        FastLogitsMpiId constexpr id{FastLogitsMpiId::SEND_TENSOR};
+        worldComm.send(&id, 1, mpi::MpiType::kUINT64, source_rank, kMPI_SPEC_DEC_ID_TAG);
+
+        worldComm.send(shape.d, 2, mpi::MpiType::kINT64, source_rank, kMPI_SPEC_DEC_DATA_TAG);
+        worldComm.send(draftLogits->data(), draftLogits->getSizeInBytes(), mpi::MpiType::kUINT8, source_rank,
+            kMPI_SPEC_DEC_DATA_TAG);
+
+        draftRequest->mState = LlmRequestState::kGENERATION_COMPLETE;
+        terminateRequest(draftRequest);
+    }
+#endif // ENABLE_MULTI_DEVICE
+}
+
+std::optional<TrtGptModelInflightBatching::TensorPtr> TrtGptModelInflightBatching::targetModelReceiveLogits(
+    executor::SpeculativeDecodingFastLogitsInfo const& fastLogitsInfo)
+{
+#if ENABLE_MULTI_DEVICE
+    auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
+
+    FastLogitsMpiId mpiId{FastLogitsMpiId::ASK_TENSOR};
+    worldComm.send(&mpiId, 1, mpi::MpiType::kUINT64, fastLogitsInfo.draftParticipantId, kMPI_SPEC_DEC_ID_TAG);
+    worldComm.send(&fastLogitsInfo.draftRequestId, 1, mpi::MpiType::kUINT64, fastLogitsInfo.draftParticipantId,
+        kMPI_SPEC_DEC_DATA_TAG);
+
+    MPI_Message msg;
+    MPI_Status status;
+    worldComm.mprobe(fastLogitsInfo.draftParticipantId, kMPI_SPEC_DEC_ID_TAG, &msg, &status);
+
+    int32_t count;
+    MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+    TLLM_CHECK(count == 1);
+
+    MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status));
+    TLLM_CHECK(mpiId == FastLogitsMpiId::SEND_TENSOR);
+
+    worldComm.mprobe(fastLogitsInfo.draftParticipantId, kMPI_SPEC_DEC_DATA_TAG, &msg, &status);
+
+    MPICHECK(MPI_Get_count(&status, MPI_INT64_T, &count));
+    TLLM_CHECK(count == 2);
+
+    int64_t dims[2];
+    MPICHECK(MPI_Mrecv(&dims, count, MPI_INT64_T, &msg, &status));
+
+    auto& manager = mRuntime->getBufferManager();
+    auto tensor = manager.pinnedPool(ITensor::makeShape({dims[0], dims[1]}), nvinfer1::DataType::kFLOAT);
+
+    worldComm.mprobe(fastLogitsInfo.draftParticipantId, kMPI_SPEC_DEC_DATA_TAG, &msg, &status);
+
+    MPICHECK(MPI_Get_count(&status, MPI_UINT8_T, &count));
+
+    TLLM_CHECK((uint64_t) count == dims[0] * dims[1] * sizeof(nvinfer1::DataType::kFLOAT));
+
+    MPICHECK(MPI_Mrecv(tensor->data(), count, MPI_UINT8_T, &msg, &status));
+
+    return tensor;
+#else
+    return std::nullopt;
+#endif // ENABLE_MULTI_DEVICE
 }
 
 std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::createKvCacheManager(
@@ -415,14 +573,23 @@ std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::c
 
     kvCacheManager->allocatePools(kvDtype, kvCacheConfig.useUvm);
 
-    for (auto& buffers : mBuffers)
+    TensorMap inputBuffers;
+    TensorPtr poolPointers = kvCacheManager->getBlockPoolPointers();
+    TensorPtr poolMapping = kvCacheManager->getLayerToPoolMapping();
+
+    if (kvCacheType == KvCacheType::kSELF)
     {
-        buffers->transformerBuffers->setKvPoolPointers(*kvCacheManager);
-        buffers->transformerBuffers->setKvPoolMapping(*kvCacheManager);
+        inputBuffers.insert_or_assign("host_kv_cache_pool_pointers", std::move(poolPointers));
+        inputBuffers.insert_or_assign("host_kv_cache_pool_mapping", std::move(poolMapping));
     }
+    else
+    {
+        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_pointers", std::move(poolPointers));
+        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", std::move(poolMapping));
+    }
+    mRuntime->setStaticInputTensors(inputBuffers);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-
     return kvCacheManager;
 }
 
@@ -434,6 +601,10 @@ void TrtGptModelInflightBatching::createRnnStateManager()
 
     mRnnStateManager = std::make_shared<RnnStateManager>(
         getMaxNumSequences(), mModelConfig, mWorldConfig, mRuntime->getBufferManager());
+
+    TensorMap inputBuffers;
+    mRnnStateManager->getPtrBuffers(inputBuffers, mModelConfig, mWorldConfig);
+    mRuntime->setStaticInputTensors(inputBuffers);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -457,14 +628,14 @@ void TrtGptModelInflightBatching::terminateRequest(std::shared_ptr<LlmRequest> c
     // If a sequence slot is associated with this request id, free it
     mSeqSlotManager->freeSequenceSlot(llmReq->mRequestId);
     // Remove the sequence from kvCacheManager
-    auto const seqSlot = llmReq->mSeqSlot;
-    if (mKvCacheManager && seqSlot)
+    auto const requestId = llmReq->mRequestId;
+    if (mKvCacheManager)
     {
-        mKvCacheManager->removeSequence(seqSlot.value(), llmReq);
+        mKvCacheManager->removeSequence(requestId, llmReq);
     }
-    if (mCrossKvCacheManager && seqSlot)
+    if (mCrossKvCacheManager)
     {
-        mCrossKvCacheManager->removeSequence(seqSlot.value(), llmReq);
+        mCrossKvCacheManager->removeSequence(requestId, llmReq);
     }
     if (pause && !llmReq->isGenerationCompleteState())
     {
@@ -472,7 +643,7 @@ void TrtGptModelInflightBatching::terminateRequest(std::shared_ptr<LlmRequest> c
     }
     else
     {
-        TLLM_LOG_DEBUG("terminated: request %lu, paused: %d", llmReq->mRequestId, pause);
+        TLLM_LOG_DEBUG("terminated: request %lu, paused: %d", requestId, pause);
     }
 
     mPeftCacheManager->markRequestDone(llmReq, pause);
@@ -621,21 +792,20 @@ void TrtGptModelInflightBatching::forwardSync()
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::storeContextBlocks(std::shared_ptr<LlmRequest> const& req)
+void TrtGptModelInflightBatching::storeContextBlocks(std::shared_ptr<LlmRequest> const& llmReq)
 {
     // TMJ - Note
     // Make context blocks reusable immediately after context phase finishes.
     // For chunked contexts, this occurs in step that processes last context chunk.
     // isLastContextChunk() is always true for non-chunked contexts.
     // This check is made in code that calls storeContextBlocks, so omitted here.
-    auto const seqSlotIdx = req->mSeqSlot.value();
     if (mKvCacheManager)
     {
-        mKvCacheManager->storeContextBlocks(seqSlotIdx, req);
+        mKvCacheManager->storeContextBlocks(llmReq);
     }
     if (mCrossKvCacheManager)
     {
-        mCrossKvCacheManager->storeContextBlocks(seqSlotIdx, req);
+        mCrossKvCacheManager->storeContextBlocks(llmReq);
     }
 }
 
@@ -661,9 +831,10 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
         // The scheduler will not include any requests that are (i) still in encoder state if encoder-decoder models OR
         // (ii) already in flight for decoder models
         TLLM_LOG_DEBUG("Running DECODER request scheduler");
-        RequestVector requestsToPause;
-        std::tie(currRequests.contextRequests, currRequests.generationRequests, requestsToPause)
-            = mRequestScheduler->scheduleRequests(activeRequests, mInflightReqIds);
+
+        auto [fittingRequests, requestsToPause] = (*mCapacityScheduler)(activeRequests);
+        std::tie(currRequests.contextRequests, currRequests.generationRequests)
+            = (*mMicroBatchScheduler)(fittingRequests, mInflightReqIds);
 
         assert(currRequests.size() <= static_cast<size_t>(getMaxBatchSize()));
 
@@ -1020,6 +1191,11 @@ executor::DecodingMode getDecodingMode(SpeculativeDecodingMode specDecodingMode,
             "mode to default.");
         decodingMode = getDefaultDecodingMode(decodingModeOpt);
     }
+    if (specDecodingMode.isDraftTokensExternal())
+    {
+        TLLM_LOG_WARNING("Overwriting decoding mode to external draft token");
+        decodingMode = executor::DecodingMode::ExternalDraftTokens();
+    }
     return decodingMode;
 }
 } // namespace
@@ -1162,12 +1338,13 @@ void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& 
 
     for (auto& newGenReq : newGenReqs)
     {
-        if (newGenReq->mState == LlmRequestState::kDISAGG_GENERATION_INIT)
+        if (newGenReq->isDisaggGenerationInitState())
         {
             auto const reqSeqSlot = mSeqSlotManager->getSequenceSlot(true, newGenReq->mRequestId);
             newGenReq->mSeqSlot = reqSeqSlot;
+            auto const requestId = newGenReq->mRequestId;
             mKvCacheManager->addSequence(
-                newGenReq->mSeqSlot.value(), newGenReq->mPromptLen, newGenReq->mSamplingConfig.beamWidth, newGenReq);
+                requestId, newGenReq->mPromptLen, newGenReq->mSamplingConfig.beamWidth, newGenReq);
             RequestVector contextRequests;
             RequestVector generationRequests;
             contextRequests.push_back(newGenReq);
@@ -1321,6 +1498,45 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(setupDecoderStep);
 
+    auto const retrieveDraftLogits = [&](std::shared_ptr<runtime::ITensor> tensor) -> std::shared_ptr<runtime::ITensor>
+    {
+        auto& manager = mRuntime->getBufferManager();
+
+        if (!mSpeculativeDecodingFastLogits)
+        {
+            return manager.copyFrom(*tensor, MemoryType::kPINNEDPOOL);
+        }
+
+        if (mIsLeaderInOrchMode)
+        {
+            executor::SpeculativeDecodingFastLogitsInfo fastLogitsInfo;
+            std::memcpy(&fastLogitsInfo, tensor->data(), sizeof(fastLogitsInfo));
+            auto logits = targetModelReceiveLogits(fastLogitsInfo).value();
+
+            // Broadcast to other ranks if needed
+            if (mWorldConfig.isTensorParallel())
+            {
+                auto const& commSession = COMM_SESSION;
+                auto shape = logits->getShape();
+                commSession.bcastValue(shape.d[0], 0);
+                commSession.bcastValue(shape.d[1], 0);
+                commSession.bcast(logits->data(), logits->getSizeInBytes(), mpi::MpiType::kUINT8, 0);
+            }
+            return logits;
+        }
+        else
+        {
+            // Get logits from leader rank
+            auto const& commSession = COMM_SESSION;
+            int64_t dims[2];
+            commSession.bcastValue(dims[0], 0);
+            commSession.bcastValue(dims[1], 0);
+            auto logits = manager.pinnedPool(ITensor::makeShape({dims[0], dims[1]}), nvinfer1::DataType::kFLOAT);
+            commSession.bcast(logits->data(), logits->getSizeInBytes(), mpi::MpiType::kUINT8, 0);
+            return logits;
+        }
+    };
+
     if (mWorldConfig.isLastPipelineParallelRank())
     {
         auto const contextBufferId = mCtxGenFusion ? getFusedBufferId() : getContextBufferId();
@@ -1355,7 +1571,7 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
                 auto const& draftLogits = llmReq->getDraftLogits();
                 if (draftLogits.has_value())
                 {
-                    decoderRequest.draftLogits = manager.copyFrom(*draftLogits.value(), MemoryType::kPINNEDPOOL);
+                    decoderRequest.draftLogits = retrieveDraftLogits(draftLogits.value());
                 }
                 decoderRequest.generatedTokensPerEngineStep = draftTokens->size() + 1;
             }
@@ -1628,31 +1844,18 @@ TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching
 
             if (llmReq->getReturnContextLogits())
             {
+                if (llmReq->getPrepopulatedPromptLen() > 0)
+                {
+                    TLLM_LOG_WARNING(
+                        "Because of KV cache reuse, not all context logits could be produced for request %lu.",
+                        llmReq->mRequestId);
+                }
                 TensorPtr contextLogitsDeviceView
                     = ITensor::slice(contextRuntimeBuffers.logits, logitsIndex, numContextLogits);
-                if (llmReq->isFullContextRequest())
-                {
-                    // Output at the back of context logits (skip reused part)
-                    auto const offset = llmReq->mPromptLen - numContextLogits;
-                    if (offset != 0)
-                    {
-                        TLLM_LOG_WARNING(
-                            "Because of KV cache reuse, not all context logits could be produced for request %lu.",
-                            llmReq->mRequestId);
-                    }
-                    TensorPtr contextLogitsHostView
-                        = ITensor::slice(llmReq->getContextLogitsHost(), offset, numContextLogits);
-                    // Copy to host directly
-                    manager.copy(*contextLogitsDeviceView, *contextLogitsHostView);
-                }
-                else
-                {
-                    // For chunked context, output at the position of the chunk
-                    TensorPtr contextLogitsHostView = ITensor::slice(
-                        llmReq->getContextLogitsHost(), llmReq->getContextCurrentPosition(), numContextLogits);
-                    // Copy to host directly
-                    manager.copy(*contextLogitsDeviceView, *contextLogitsHostView);
-                }
+                TensorPtr contextLogitsHostView = ITensor::slice(
+                    llmReq->getContextLogitsHost(), llmReq->getContextCurrentPosition(), numContextLogits);
+                // Copy to host directly
+                manager.copy(*contextLogitsDeviceView, *contextLogitsHostView);
             }
         }
         logitsIndex += numContextLogits + draftLength;
@@ -2182,7 +2385,7 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
 
                     // At this point, KV cache rows are already gathered and moved to the right location.
                     // We can safely rewind (draft - accepted) tokens
-                    mKvCacheManager->rewindKVCache(seqSlot, rewindLength);
+                    mKvCacheManager->rewindKVCache(llmReq->mRequestId, rewindLength);
                 }
             }
 
@@ -2193,8 +2396,15 @@ std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::
 
                 if (!mWorldConfig.isPipelineParallel() || !mWorldConfig.isLastPipelineParallelRank())
                 {
-                    llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
-                    terminateRequest(llmReq);
+                    if (llmReq->getReturnGenerationLogits() && mSpeculativeDecodingFastLogits && mIsLeaderInOrchMode)
+                    {
+                        llmReq->mState = LlmRequestState::kWAITING_TO_SEND_LOGITS;
+                    }
+                    else
+                    {
+                        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
+                        terminateRequest(llmReq);
+                    }
                 }
                 else
                 {
@@ -2254,7 +2464,8 @@ void TrtGptModelInflightBatching::rewindKVCacheBlocks(SizeType32 numSequences)
     auto const sizeInBytesPerKVHead = mModelConfig.getSizePerHead() * elemSize;
     auto const maxBlocksPerSeq = mKvCacheManager->getMaxBlocksPerSeq();
 
-    auto* const* pointerArrayPtr = bufferCast<void*>(*runtimeBuffers.transformerBuffers->kvCacheBlockPoolPointers);
+    auto const poolPointers = mKvCacheManager->getBlockPoolPointers();
+    auto* const* pointerArrayPtr = bufferCast<void*>(*poolPointers);
     auto const* offsetArrayPtr
         = bufferCast<tk::KVCacheIndex>(*runtimeBuffers.transformerBuffers->kvCacheBlockOffsetsDevice);
 
@@ -2299,22 +2510,10 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
     if (mKvCacheManager)
     {
         reshapeKvTensors(*mKvCacheManager);
-
-        for (auto& buffers : mBuffers)
-        {
-            buffers->transformerBuffers->setKvPoolPointers(*mKvCacheManager);
-            buffers->transformerBuffers->setKvPoolMapping(*mKvCacheManager);
-        }
     }
     if (mCrossKvCacheManager)
     {
         reshapeKvTensors(*mCrossKvCacheManager);
-
-        for (auto& buffers : mBuffers)
-        {
-            buffers->transformerBuffers->setKvPoolPointers(*mCrossKvCacheManager);
-            buffers->transformerBuffers->setKvPoolMapping(*mCrossKvCacheManager);
-        }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }

@@ -43,7 +43,8 @@ set(SRCS
     trtGptModelV1.cpp
     utils/debugUtils.cpp
     utils/inflightBatchingUtils.cpp
-    utils/staticThreadPool.cpp)
+    utils/staticThreadPool.cpp
+    evictionPolicy.cpp)
 
 if(ENABLE_UCX)
   set(SRCS ${SRCS} ucxDataTransceiver.cpp)
@@ -62,6 +63,7 @@ else() # Windows
 endif()
 
 add_library(${BATCH_MANAGER_STATIC_TARGET} STATIC ${SRCS})
+
 set_target_properties(
   ${BATCH_MANAGER_STATIC_TARGET}
   PROPERTIES CXX_STANDARD "17" CXX_STANDARD_REQUIRED "YES" CXX_EXTENSIONS "NO"

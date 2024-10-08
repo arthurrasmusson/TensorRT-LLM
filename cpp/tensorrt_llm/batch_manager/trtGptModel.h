@@ -209,6 +209,11 @@ public:
         return mMaxDraftLen;
     }
 
+    [[nodiscard]] virtual bool hasSpeculativeDecodingFastLogits() const noexcept override
+    {
+        return false;
+    }
+
     virtual void setLayerProfiler() = 0;
     [[nodiscard]] virtual std::string getLayerProfileInfo() const = 0;
 

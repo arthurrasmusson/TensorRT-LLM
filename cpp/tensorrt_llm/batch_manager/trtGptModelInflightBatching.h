@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include "requestScheduler.h"
 #include "sequenceSlotManager.h"
 #include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
@@ -59,10 +58,23 @@ class LlmRequest;
 class RuntimeBuffers;
 class BasePeftCacheManager;
 
+// Algorithms
+class CapacityScheduler;
+class MicroBatchScheduler;
+
 namespace utils
 {
 class CudaGraphExecutorCache;
 } // namespace utils
+
+constexpr int32_t kMPI_SPEC_DEC_ID_TAG{129};
+constexpr int32_t kMPI_SPEC_DEC_DATA_TAG{1025};
+
+enum class FastLogitsMpiId : uint64_t
+{
+    ASK_TENSOR = 1,
+    SEND_TENSOR = 2,
+};
 
 class TrtGptModelInflightBatching : public TrtGptModel
 {
@@ -239,7 +251,7 @@ private:
     /// and overwrites the llmRequest tokens buffer.
     /// Called either on request finishing, or at every step when doing beam search and streaming.
     void postProcessRequest(LlmRequest& llmReq, SizeType32 bid, std::vector<SizeType32> const& numDroppedTokens);
-    /// @brief Calls gatherTree (via finalize) and transmits the reveived data across ranks if PP>1
+    /// @brief Calls gatherTree (via finalize) and transmits the received data across ranks if PP>1
     void getDecoderSlotHostOutputs(
         SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig, bool streaming);
     void rewindKVCacheBlocks(SizeType32 numSequences);
@@ -270,6 +282,15 @@ private:
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
 
     void reshapeKvTensors(KVCacheManager const& kvCacheManager);
+
+    void draftModelSendLogitsThread();
+    std::optional<TensorPtr> targetModelReceiveLogits(
+        executor::SpeculativeDecodingFastLogitsInfo const& fastLogitsInfo);
+
+    [[nodiscard]] bool hasSpeculativeDecodingFastLogits() const noexcept override
+    {
+        return mSpeculativeDecodingFastLogits;
+    }
 
 protected:
     std::shared_ptr<KVCacheManager> getKVCacheManager() override
@@ -338,8 +359,6 @@ private:
 
     // Manager that maps requests to slots
     std::shared_ptr<SequenceSlotManager> mSeqSlotManager;
-    // Scheduler that selects which requests to run in each iteration
-    std::shared_ptr<batch_scheduler::RequestScheduler> mRequestScheduler;
     // KV cache manager for attention layers (optional)
     std::shared_ptr<KVCacheManager> mKvCacheManager;
     // KV cache manager for cross attention in enc-dec models (optional)
@@ -416,6 +435,17 @@ private:
 
     /******************** Cache transceiver ********************/
     std::unique_ptr<CacheTransceiver> mCacheTransceiver;
+
+    /******************** Spec dec ***********************/
+    std::unique_ptr<std::thread> mDraftModelSendLogitsThread;
+    bool mSpeculativeDecodingFastLogits;
+    std::atomic<bool> mDraftModelThreadShouldExit{false};
+    bool mIsLeaderInOrchMode{false};
+
+    /******************** Algorithms ********************/
+    // Schedulers that select which requests to run in each iteration
+    std::unique_ptr<tensorrt_llm::batch_manager::CapacityScheduler> mCapacityScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::MicroBatchScheduler> mMicroBatchScheduler;
 };
 
 } // namespace tensorrt_llm::batch_manager

@@ -30,8 +30,10 @@ public:
     /// @brief Perform data transmission with formatting actions.
     /// @param llmRequest The request associated with this data transmission.
     /// @param comm The communicator associated with this data transmission.
-    virtual void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm) = 0;
-
+    virtual void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm,
+        executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
+        executor::kv_cache::CacheState const& destConfig)
+        = 0;
     /// @brief Determine whether the sender is applicable to the source and target.
     /// @param selfconfig Source data arrangement.
     /// @param destConfig Target data arrangement.
@@ -112,6 +114,7 @@ public:
     [[nodiscard]] virtual executor::kv_cache::CommState const& getCommState() const = 0;
 
     virtual void setCommState(executor::kv_cache::CommState const& commState) = 0;
+    [[nodiscard]] virtual bool availableRelease(LlmRequest const& llmRequest) = 0;
 
     /// @brief Destructor.
     virtual ~DataSender() = default;

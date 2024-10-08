@@ -234,7 +234,9 @@ class MockIOFormatter final : public IOFormatter<TComm, tle::kv_cache::CacheStat
 public:
     MockIOFormatter() = default;
 
-    void operator()(LlmRequest const& llmRequest, std::vector<TComm const*> const& comm) override
+    void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm,
+        tensorrt_llm::executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
+        tensorrt_llm::executor::kv_cache::CacheState const& destConfig) override
     {
         mockTransfer(llmRequest, comm);
     }
@@ -274,6 +276,9 @@ public:
         auto request = tle::Request({10}, 1);
         auto dataTransceiverState = std::make_unique<tle::DataTransceiverState>();
         dataTransceiverState->setCommState(tle::kv_cache::CommState{contextPort, contextIp});
+        tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT};
+
+        dataTransceiverState->setCacheState(fakeCacheState);
         request.setContextPhaseParams(tle::ContextPhaseParams({}, contextRequestId, dataTransceiverState.release()));
         return LlmRequest{requestId, request};
     }
@@ -288,7 +293,7 @@ TEST_F(MockTransceiverTest, UcxSenderBasic)
 
     // setup mock formatter
     // [NOTE] Test expects dynamic support inquire is not implemented
-    EXPECT_CALL(*formatter, inquireSupport).Times(0);
+    EXPECT_CALL(*formatter, inquireSupport).WillOnce(Return(true));
     // Make sure correct request are selected and send
     EXPECT_CALL(*formatter, mockTransfer)
         .WillOnce(
@@ -332,8 +337,7 @@ TEST_F(MockTransceiverTest, UcxReceiverBasic)
 {
     auto formatter = std::make_unique<MockIOFormatter<UcxComm>>();
 
-    // [NOTE] Test expects dynamic support inquire is not implemented
-    EXPECT_CALL(*formatter, inquireSupport).Times(0);
+    EXPECT_CALL(*formatter, inquireSupport).WillOnce(Return(true));
     EXPECT_CALL(*formatter, mockTransfer)
         .WillOnce(testing::DoAll(testing::WithArgs<1>(
                                      [](auto comm)
@@ -342,7 +346,7 @@ TEST_F(MockTransceiverTest, UcxReceiverBasic)
                                          comm[0]->recvBuffer(buffer);
                                      }),
             Return()));
-
+    EXPECT_CALL(*formatter, getCounterparts).Times(1).WillOnce(Return(std::vector<SizeType32>{0}));
     // setup mock data communicator
     auto factory = std::make_unique<MockUcxCommFactory>();
     {
@@ -358,7 +362,7 @@ TEST_F(MockTransceiverTest, UcxReceiverBasic)
     // Only need listener so requester can establish an endpoint
     auto listener = mPeerWorker->createListener(
         0, [](ucp_conn_request_h conn_request, void* data) {}, nullptr);
-    tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{0, 0, 0, 0, 0, 0, nvinfer1::DataType::kFLOAT};
+    tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT};
 
     auto receiver
         = UcxDataReceiver<tle::kv_cache::CacheState>(std::move(factory), fakeCacheState, 0, std::move(formatter));
@@ -430,8 +434,7 @@ protected:
             mManager = std::make_unique<KVCacheManager>(numLayers, numHeads, sizePerHead, tokensPerBlock,
                 totalNumBlocks, blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow,
                 sinkTokenLength, useOneMoreBlock, stream, enableBlockReuse, onboardBlocks);
-            mCacheState = std::make_unique<texec::kv_cache::CacheState>(
-                numLayers, numHeads, sizePerHead, tokensPerBlock, 1, 1, dataType);
+
             // UVM seems to be incompatible with MPI, and it is continuing to investigate.
             bool constexpr useUvm = false;
             mManager->allocatePools(nvinfer1::DataType::kFLOAT, useUvm);
@@ -441,6 +444,7 @@ protected:
         {
             auto state = std::make_unique<tle::DataTransceiverState>();
             state->setCommState(tle::kv_cache::CommState{mSocketComm.mPort, mSocketComm.mIp});
+            state->setCacheState(*mCacheState);
             return state;
         }
 
@@ -468,14 +472,11 @@ protected:
             mRank = rank;
         }
 
-        std::future<void> addRequestAndSendCache(std::shared_ptr<LlmRequest> llmRequest)
+        [[nodiscard]] std::future<void> addRequestAndSendCache(std::shared_ptr<LlmRequest> const& llmRequest) const
         {
             auto constexpr beamIdx{0};
             auto constexpr beamWidth{1};
-            TLLM_CHECK(mSeqSlotIdx < mMaxNumSequences);
-            llmRequest->mSeqSlot = mSeqSlotIdx++;
-            mManager->addSequence(
-                llmRequest->mSeqSlot.value(), llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
+            mManager->addSequence(llmRequest->mRequestId, llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
 
             // send
             auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
@@ -486,14 +487,11 @@ protected:
             return mResponder->respondAndSendAsync(*llmRequest);
         }
 
-        void addRequestAndReceiveCache(std::shared_ptr<LlmRequest> llmRequest)
+        void addRequestAndReceiveCache(std::shared_ptr<LlmRequest> const& llmRequest) const
         {
             auto constexpr beamIdx{0};
             auto constexpr beamWidth{1};
-            TLLM_CHECK(mSeqSlotIdx < mMaxNumSequences);
-            llmRequest->mSeqSlot = mSeqSlotIdx++;
-            mManager->addSequence(
-                llmRequest->mSeqSlot.value(), llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
+            mManager->addSequence(llmRequest->mRequestId, llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
 
             // receive
             auto future = mRequester->requestAndReceiveAsync(*llmRequest);
@@ -509,7 +507,6 @@ protected:
         }
 
         tle::kv_cache::SocketState mSocketComm;
-        SizeType32 mSeqSlotIdx{0};
         SizeType32 mMaxNumSequences{};
         std::unique_ptr<KVCacheManager> mManager;
         std::unique_ptr<DataResponder> mResponder;
@@ -526,11 +523,7 @@ protected:
 
 TEST_F(UcxSymmetricalCacheTest, SameProcessTest)
 {
-    auto worldSize = setUpController();
-    if (worldSize > 1)
-    {
-        GTEST_SKIP() << "only one  processes is required to run this test.";
-    }
+
     Node source, destination;
     source.setUpCacheManager();
     source.setUpCacheTransceiver();
@@ -542,7 +535,7 @@ TEST_F(UcxSymmetricalCacheTest, SameProcessTest)
     // to responder.
     for (auto len : {10, 20, 30})
     {
-        auto sourceRequest = source.makeLlmRequest(len);
+        auto sourceRequest = source.makeLlmRequest(len, source.makeDataTransceiverState());
         auto sourceFuture = source.addRequestAndSendCache(sourceRequest);
 
         // pass source data context to destination to start requesting
@@ -581,7 +574,8 @@ TEST_F(UcxSymmetricalCacheTest, MultiProcessTest)
 
         for (auto len : {10, 20, 30})
         {
-            auto request = self.makeLlmRequest(len);
+            auto dataTransceiverState = self.makeDataTransceiverState();
+            auto request = self.makeLlmRequest(len, std::move(dataTransceiverState));
             auto future = self.addRequestAndSendCache(request);
             // Simulate workflow of controller sending context phase param
             // to trigger data transfer.
@@ -605,9 +599,8 @@ TEST_F(UcxSymmetricalCacheTest, MultiProcessTest)
             LlmRequest::RequestIdType contextRequestId;
             mController->recv(std::addressof(contextRequestId), 1, tensorrt_llm::mpi::MpiType::kUINT64, 0, 0);
 
-            auto dataTransceiverState = std::make_unique<tle::DataTransceiverState>();
+            auto dataTransceiverState = self.makeDataTransceiverState();
             dataTransceiverState->setCommState(tle::kv_cache::CommState{sourceSocket.mPort, sourceSocket.mIp});
-
             auto request = self.makeLlmRequest(len, std::move(dataTransceiverState));
             self.addRequestAndReceiveCache(request);
         }

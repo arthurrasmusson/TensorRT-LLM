@@ -14,7 +14,7 @@
 
 #include "promptTuningBuffers.h"
 #include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/requestScheduler.h"
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/stlUtils.h"
@@ -241,8 +241,11 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     // Since micro batches are created in gptSession
     std::optional<SizeType32> maxNumTokens = modelConfig.getMaxNumTokens();
     TLLM_CHECK_WITH_INFO(maxNumTokens, "Max number of tokens is not set.");
-    mRequestScheduler = std::make_shared<batch_scheduler::RequestScheduler>(ppTimesMaxBatchSize, 1,
-        mSession->mKvCacheManager, nullptr, mPeftCacheManager, optionalParams.schedulerConfig, maxNumTokens);
+
+    mCapacityScheduler = tensorrt_llm::batch_manager::CapacityScheduler(ppTimesMaxBatchSize, mSession->mKvCacheManager,
+        nullptr, mPeftCacheManager, optionalParams.schedulerConfig.getCapacitySchedulerPolicy());
+
+    mMicroBatchScheduler = tensorrt_llm::batch_manager::MicroBatchScheduler(ppTimesMaxBatchSize, maxNumTokens);
 }
 
 runtime::ModelConfig const& TrtGptModelV1::getModelConfig() const
@@ -426,7 +429,8 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     auto const device = getWorldConfig().getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
 
-    auto [scheduledRequests, genRequests, pausedRequests] = mRequestScheduler->scheduleRequests(activeRequests, {});
+    auto [fittingRequests, pausedRequests] = mCapacityScheduler(activeRequests);
+    auto [scheduledRequests, genRequests] = mMicroBatchScheduler(fittingRequests, {});
 
     TLLM_CHECK(genRequests.empty());
 

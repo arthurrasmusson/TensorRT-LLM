@@ -101,8 +101,7 @@ void PromptTuningBuffers::fill(RequestVector const& contextRequests, RequestVect
             {
                 SizeType32 numContextTokens = 0;
                 auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
-                auto const contextChunkSize
-                    = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+                auto const contextChunkSize = llmReq->getContextChunkSize();
                 numContextTokens += contextChunkSize + draftLength;
                 reqPromptLengths.push_back(numContextTokens);
             }

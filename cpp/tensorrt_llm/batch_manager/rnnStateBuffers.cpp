@@ -61,14 +61,12 @@ void RnnStateBuffers::copySlotMappingH2D(runtime::TllmRuntime const& runtime)
     manager.copy(*slotMappingHost, *slotMappingDevice);
 }
 
-void RnnStateBuffers::getBuffers(rnn_state_manager::RnnStateManager* rnnStateManager, TensorMap& inputBuffers,
-    ModelConfig const& modelConfig, WorldConfig const& worldConfig) const
+void RnnStateBuffers::getBuffers(TensorMap& inputBuffers) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(rnnStateBuffersGetBuffers);
 
     inputBuffers.insert_or_assign("slot_mapping", slotMappingDevice);
-    rnnStateManager->getPtrBuffers(inputBuffers, modelConfig, worldConfig);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }

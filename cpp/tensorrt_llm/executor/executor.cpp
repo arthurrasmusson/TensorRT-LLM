@@ -117,4 +117,9 @@ bool Executor::canEnqueueRequests() const
     return mImpl->canEnqueueRequests();
 }
 
+bool Executor::isParticipant() const
+{
+    return mImpl->isParticipant();
+}
+
 } // namespace tensorrt_llm::executor

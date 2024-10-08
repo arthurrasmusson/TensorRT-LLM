@@ -114,12 +114,14 @@ public:
                 texec::DataTransceiverState{
                     texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
                     texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
+        ON_CALL(*this, availableRelease).WillByDefault(Return(true));
     }
 
     MOCK_METHOD(RequestInfo, recvRequestInfo, (), (override));
     MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
     MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const override));
     MOCK_METHOD(void, setCommState, (texec::kv_cache::CommState const&), (override));
+    MOCK_METHOD(bool, availableRelease, (LlmRequest const&), (override));
 
 private:
     static texec::kv_cache::CommState mState;
@@ -160,6 +162,7 @@ TEST_F(MockTransceiverTest, MpiResponderBasic)
             texec::DataTransceiverState{texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
                 texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
     EXPECT_CALL(*sender, sendSync).WillOnce(Return());
+    EXPECT_CALL(*sender, availableRelease).WillOnce(Return(true));
 
     DataResponder responder{std::move(sender)};
     auto request = makeLlmRequest(0);
@@ -270,9 +273,7 @@ protected:
     {
         auto constexpr beamIdx{0};
         auto constexpr beamWidth{1};
-        TLLM_CHECK(mSeqSlotIdx < mMaxNumSequences);
-        llmRequest->mSeqSlot = mSeqSlotIdx++;
-        mManager->addSequence(llmRequest->mSeqSlot.value(), llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
+        mManager->addSequence(llmRequest->mRequestId, llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
         if (isSender)
         {
             auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
@@ -300,7 +301,6 @@ protected:
 
     bool isSender{false};
     tensorrt_llm::mpi::MpiComm const* mComm;
-    SizeType32 mSeqSlotIdx{0};
     SizeType32 mWorldSize{0}, mlocalRank{0};
     LlmRequest::RequestIdType mRequestId{0};
     SizeType32 mMaxNumSequences{};

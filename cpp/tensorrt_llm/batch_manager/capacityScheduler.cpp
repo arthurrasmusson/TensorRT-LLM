@@ -11,20 +11,12 @@
  */
 
 #include "tensorrt_llm/batch_manager/capacityScheduler.h"
-
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 
-#include <deque>
-#include <memory>
-#include <stdexcept>
-#include <unordered_set>
-#include <utility>
-
-namespace tensorrt_llm::batch_manager::batch_scheduler
+namespace tensorrt_llm::batch_manager
 {
 using kv_cache_manager::VecUniqueTokens;
 using kv_cache_manager::BlockKey;
@@ -32,7 +24,7 @@ using kv_cache_manager::BlockKeyHasher;
 
 namespace
 {
-void prefillWithChunkedContextsAlreadyExecuting(tensorrt_llm::batch_manager::RequestList const& activeRequests,
+void prefillWithChunkedContextsAlreadyExecuting(RequestList const& activeRequests,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mKvCacheManager,
     std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> const& mCrossKvCacheManager,
     std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedContextBlocks,
@@ -115,44 +107,11 @@ bool beneficialToSkip(std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> c
 }
 } // namespace
 
-std::unique_ptr<CapacityScheduler> makeCapacityScheduler(SizeType32 maxNumRequests,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
-    std::shared_ptr<BasePeftCacheManager> peftCacheManager, executor::CapacitySchedulerPolicy capacitySchedulerPolicy,
-    bool manyMicroBatches, LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
-{
-    if (!kvCacheManager && !peftCacheManager->enabled())
-    {
-        return std::make_unique<MaxRequestsScheduler>(maxNumRequests, std::move(kvCacheManager),
-            std::move(crossKvCacheManager), noScheduleUntilState, noScheduleAfterState);
-    }
-    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kMAX_UTILIZATION)
-    {
-        return std::make_unique<MaxUtilizationScheduler>(maxNumRequests, std::move(kvCacheManager),
-            std::move(crossKvCacheManager), std::move(peftCacheManager), manyMicroBatches, noScheduleUntilState,
-            noScheduleAfterState);
-    }
-    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
-    {
-        return std::make_unique<GuaranteedNoEvictScheduler>(maxNumRequests, std::move(kvCacheManager),
-            std::move(crossKvCacheManager), std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState);
-    }
-    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kSTATIC_BATCH)
-    {
-        return std::make_unique<StaticBatchScheduler>(maxNumRequests, std::move(kvCacheManager),
-            std::move(crossKvCacheManager), std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState);
-    }
-    else
-    {
-        throw std::runtime_error("Unsupported capacity scheduler policy");
-    }
-}
-
 MaxRequestsScheduler::MaxRequestsScheduler(SizeType32 maxNumRequests,
     std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager, LlmRequestState noScheduleUntilState,
     LlmRequestState noScheduleAfterState)
-    : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
+    : BaseCapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
     , mCrossKvCacheManager(std::move(crossKvCacheManager))
@@ -164,7 +123,7 @@ MaxUtilizationScheduler::MaxUtilizationScheduler(SizeType32 maxNumRequests,
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
     std::shared_ptr<BasePeftCacheManager> peftCacheManager, bool manyMicroBatches, LlmRequestState noScheduleUntilState,
     LlmRequestState noScheduleAfterState)
-    : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
+    : BaseCapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
     , mCrossKvCacheManager(std::move(crossKvCacheManager))
@@ -178,7 +137,7 @@ GuaranteedNoEvictScheduler::GuaranteedNoEvictScheduler(SizeType32 maxNumRequests
     std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
     std::shared_ptr<BasePeftCacheManager> peftCacheManager, LlmRequestState noScheduleUntilState,
     LlmRequestState noScheduleAfterState)
-    : CapacityScheduler(noScheduleUntilState, noScheduleAfterState)
+    : BaseCapacityScheduler(noScheduleUntilState, noScheduleAfterState)
     , mMaxNumRequests(maxNumRequests)
     , mKvCacheManager(std::move(kvCacheManager))
     , mCrossKvCacheManager(std::move(crossKvCacheManager))
@@ -196,7 +155,7 @@ StaticBatchScheduler::StaticBatchScheduler(SizeType32 maxNumRequests,
 {
 }
 
-std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::scheduleRequests(RequestList const& activeRequests) const
+std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::operator()(RequestList const& activeRequests) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
 
@@ -235,7 +194,19 @@ std::tuple<RequestVector, RequestVector> MaxRequestsScheduler::scheduleRequests(
     return {std::move(scheduledRequests), RequestVector{}};
 }
 
-std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleRequestsImpl(
+std::tuple<RequestVector, RequestVector> StaticBatchScheduler::operator()(RequestList const& activeRequests) const
+{
+    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
+    return this->forwardImpl(activeRequests, /* staticBatchScheduling */ true);
+}
+
+std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::operator()(RequestList const& activeRequests) const
+{
+    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
+    return forwardImpl(activeRequests, /* staticBatchScheduling */ false);
+}
+
+std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::forwardImpl(
     RequestList const& activeRequests, bool staticBatchScheduling) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
@@ -351,15 +322,7 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleReq
     return {std::move(scheduledRequests), RequestVector{}};
 }
 
-std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::scheduleRequests(
-    RequestList const& activeRequests) const
-{
-    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
-    return scheduleRequestsImpl(activeRequests, /* staticBatchScheduling */ false);
-}
-
-std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::scheduleRequests(
-    RequestList const& activeRequests) const
+std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(RequestList const& activeRequests) const
 {
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
     TLLM_CHECK_WITH_INFO(!mCrossKvCacheManager, "crossKvCacheManager not supported in MaxUtilizationScheduler");
@@ -424,7 +387,7 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::scheduleReques
                 // If we can't allocate a started request, we need to start freeing started requests
                 // from the end of the vector and try again
                 // Here we simulate freeing the kvCache blocks associated with that sequence
-                mKvCacheManager->schedulingRemoveSequence((*lastStartedReqIt)->mSeqSlot.value());
+                mKvCacheManager->schedulingRemoveSequence((*lastStartedReqIt)->mRequestId);
                 pausedRequests.emplace_back(*lastStartedReqIt);
                 TLLM_LOG_DEBUG("MaxUtilizationScheduler: req %lu -> pause", (*lastStartedReqIt)->mRequestId);
                 reqItEnd = std::next(lastStartedReqIt).base();
@@ -481,10 +444,57 @@ std::pair<bool, bool> MaxUtilizationScheduler::trySchedulingRequestMaxUtilizatio
     }
 }
 
-std::tuple<RequestVector, RequestVector> StaticBatchScheduler::scheduleRequests(RequestList const& activeRequests) const
+CapacityScheduler::CapacityScheduler(SizeType32 maxNumRequests,
+    std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+    std::shared_ptr<BasePeftCacheManager> peftCacheManager, executor::CapacitySchedulerPolicy capacitySchedulerPolicy,
+    bool manyMicroBatches, LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
 {
-    NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
-    return this->scheduleRequestsImpl(activeRequests, /* staticBatchScheduling */ true);
+    if (!kvCacheManager && !peftCacheManager->enabled())
+    {
+        mScheduler = MaxRequestsScheduler{maxNumRequests, std::move(kvCacheManager), std::move(crossKvCacheManager),
+            noScheduleUntilState, noScheduleAfterState};
+    }
+    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kMAX_UTILIZATION)
+    {
+        mScheduler = MaxUtilizationScheduler{maxNumRequests, std::move(kvCacheManager), std::move(crossKvCacheManager),
+            std::move(peftCacheManager), manyMicroBatches, noScheduleUntilState, noScheduleAfterState};
+    }
+    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+    {
+        mScheduler = GuaranteedNoEvictScheduler{maxNumRequests, std::move(kvCacheManager),
+            std::move(crossKvCacheManager), std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState};
+    }
+    else if (capacitySchedulerPolicy == executor::CapacitySchedulerPolicy::kSTATIC_BATCH)
+    {
+        mScheduler = StaticBatchScheduler{maxNumRequests, std::move(kvCacheManager), std::move(crossKvCacheManager),
+            std::move(peftCacheManager), noScheduleUntilState, noScheduleAfterState};
+    }
+    else
+    {
+        throw std::runtime_error("Unsupported capacity scheduler policy");
+    }
 }
 
-} // namespace tensorrt_llm::batch_manager::batch_scheduler
+std::tuple<RequestVector, RequestVector> CapacityScheduler::operator()(RequestList const& activeRequests) const
+{
+    return std::visit(
+        [&activeRequests](auto const& scheduler) -> std::tuple<RequestVector, RequestVector>
+        {
+            if constexpr (std::is_same_v<std::decay_t<decltype(scheduler)>, std::monostate>)
+            {
+                throw std::runtime_error("Unsupported capacity scheduler policy");
+                return {};
+            }
+            else
+            {
+                auto [fittingRequests, pausedRequests] = scheduler(activeRequests);
+                TLLM_LOG_DEBUG("[Summary] Capacity scheduler allows %d requests, pauses %d requests",
+                    fittingRequests.size(), pausedRequests.size());
+                return {std::move(fittingRequests), std::move(pausedRequests)};
+            }
+        },
+        mScheduler);
+}
+
+} // namespace tensorrt_llm::batch_manager

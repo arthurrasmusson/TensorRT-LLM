@@ -17,13 +17,13 @@
 namespace tensorrt_llm::executor
 {
 
-Response::Response(IdType requestId, std::string errorMsg)
-    : mImpl(std::make_unique<Impl>(requestId, std::move(errorMsg)))
+Response::Response(IdType requestId, std::string errorMsg, std::optional<IdType> clientId)
+    : mImpl(std::make_unique<Impl>(requestId, std::move(errorMsg), clientId))
 {
 }
 
-Response::Response(IdType requestId, Result Result)
-    : mImpl(std::make_unique<Impl>(requestId, std::move(Result)))
+Response::Response(IdType requestId, Result Result, std::optional<IdType> clientId)
+    : mImpl(std::make_unique<Impl>(requestId, std::move(Result), clientId))
 {
 }
 
@@ -60,6 +60,11 @@ std::string const& Response::getErrorMsg() const
 IdType Response::getRequestId() const
 {
     return mImpl->getRequestId();
+}
+
+std::optional<IdType> Response::getClientId() const
+{
+    return mImpl->getClientId();
 }
 
 Result const& Response::getResult() const

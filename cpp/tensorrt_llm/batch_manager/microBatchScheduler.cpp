@@ -10,21 +10,18 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "microBatchScheduler.h"
-
-#include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/llmRequest.h"
-#include "tensorrt_llm/common/assert.h"
-#include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 
-namespace tensorrt_llm::batch_manager::batch_scheduler
+namespace tle = tensorrt_llm::executor;
+
+namespace tensorrt_llm::batch_manager
 {
 
-using SizeType32 = tensorrt_llm::runtime::SizeType32;
+using SizeType32 = MicroBatchScheduler::SizeType32;
 
 MicroBatchScheduler::MicroBatchScheduler(SizeType32 maxBatchSize, std::optional<SizeType32> maxNumTokens,
-    std::optional<ContextChunkingConfig> ctxChunkConfig, std::optional<SizeType32> maxContextLength,
+    std::optional<batch_scheduler::ContextChunkingConfig> ctxChunkConfig, std::optional<SizeType32> maxContextLength,
     LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
     : mMaxBatchSize{maxBatchSize}
     , mMaxNumTokens(maxNumTokens)
@@ -197,13 +194,13 @@ void MicroBatchScheduler::setCtxRequestsChunkSize(RequestVector const& contextsT
     fitDraftTokens(contextsToBeChunked, ctxTokensCapacity, chunkUnitSize, maxContextLength);
 }
 
-ScheduledRequests MicroBatchScheduler::scheduleRequests(
+std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
     RequestVector const& activeRequests, ReqIdsSet const& inflightReqIds)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(microBatcherScheduleRequests);
 
-    ScheduledRequests scheduledRequests;
+    RequestVector contextRequests, generationRequests;
     SizeType32 batchNumTokens{0};
     SizeType32 scheduledReqSize{0};
 
@@ -239,7 +236,7 @@ ScheduledRequests MicroBatchScheduler::scheduleRequests(
                 break;
             }
             TLLM_LOG_DEBUG("encoder request ID scheduled: %u", llmReq->mRequestId);
-            scheduledRequests.contextRequests.emplace_back(llmReq);
+            contextRequests.emplace_back(llmReq);
             batchNumTokens += reqNumTokens;
         }
         else if (llmReq->isContextInitState())
@@ -256,7 +253,7 @@ ScheduledRequests MicroBatchScheduler::scheduleRequests(
                     break;
                 }
                 TLLM_LOG_DEBUG("context request ID scheduled: %u", llmReq->mRequestId);
-                scheduledRequests.contextRequests.emplace_back(llmReq);
+                contextRequests.emplace_back(llmReq);
                 batchNumTokens += reqNumTokens;
             }
             else
@@ -284,7 +281,7 @@ ScheduledRequests MicroBatchScheduler::scheduleRequests(
                 break;
             }
             TLLM_LOG_DEBUG("generation request ID scheduled: %u", llmReq->mRequestId);
-            scheduledRequests.generationRequests.emplace_back(llmReq);
+            generationRequests.emplace_back(llmReq);
             batchNumTokens += reqNumTokens;
         }
 
@@ -310,21 +307,26 @@ ScheduledRequests MicroBatchScheduler::scheduleRequests(
     }
     for (auto const& llmReq : contextsToBeChunked)
     {
-        if (llmReq->getContextChunkSize())
+        if (llmReq->getContextChunkSize() > 0)
         {
-            scheduledRequests.contextRequests.emplace_back(llmReq);
+            contextRequests.emplace_back(llmReq);
             batchNumTokens += llmReq->getContextChunkSize();
             TLLM_LOG_DEBUG(
                 "context scheduled: id %lu, chunk size %d", llmReq->mRequestId, llmReq->getContextChunkSize());
         }
     }
 
-    TLLM_LOG_DEBUG("batchSize (num ctx/enc requests + num gen requests): %u", scheduledRequests.size());
+    TLLM_LOG_DEBUG(
+        "batchSize (num ctx/enc requests + num gen requests): %u", contextRequests.size() + generationRequests.size());
     TLLM_LOG_DEBUG("batchNumTokens (num ctx/enc input tokens + num gen input tokens) / maxNumTokens: %d / %d",
         batchNumTokens, mMaxNumTokens.value_or(0));
+    TLLM_LOG_DEBUG(
+        "[Summary] Micro Batch scheduler schedules %d context/encoder requests, %d generation requests. "
+        "%d requests inflight with the model already",
+        contextRequests.size(), generationRequests.size(), inflightReqIds.size());
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-    return scheduledRequests;
+    return {std::move(contextRequests), std::move(generationRequests)};
 }
 
-} // namespace tensorrt_llm::batch_manager::batch_scheduler
+} // namespace tensorrt_llm::batch_manager

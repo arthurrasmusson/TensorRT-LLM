@@ -140,8 +140,11 @@ private:
                 if (it != mReadyResponses.end())
                 {
                     mSender->sendSync(*it->second.mRequest);
-                    it->second.mPromise.set_value();
-                    removeResponse(it);
+                    if (mSender->availableRelease(*it->second.mRequest))
+                    {
+                        it->second.mPromise.set_value();
+                        removeResponse(it);
+                    }
                     mCurrentRequest = std::nullopt;
                 }
                 else

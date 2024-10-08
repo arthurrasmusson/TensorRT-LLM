@@ -10,6 +10,9 @@
  * its affiliates is strictly prohibited.
  */
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
 #include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
@@ -19,8 +22,6 @@
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/types.h"
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
 
 #include <NvInferPlugin.h>
 
@@ -31,7 +32,7 @@
 
 using namespace tensorrt_llm::runtime;
 using namespace tensorrt_llm::batch_manager;
-using namespace tensorrt_llm::batch_manager::batch_scheduler;
+using namespace tensorrt_llm::batch_manager;
 using tensorrt_llm::executor::insertRequestInOrder;
 namespace tc = tensorrt_llm::common;
 
@@ -213,17 +214,17 @@ void prepRequestsForEncoderSkip(RequestList& activeRequests)
     }
 }
 
-int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_ptr<SequenceSlotManager> seqSlotManager,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager, RequestList& activeRequests,
-    std::vector<ExpectedState> const& expectedStates, AddNewRequestsCallback addNewRequestsCb, SizeType32 maxInputLen,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager = nullptr)
+int runTest(CapacityScheduler& capacityScheduler,
+    std::shared_ptr<kv_cache_manager::KVCacheManager> const& kvCacheManager, RequestList& activeRequests,
+    std::vector<ExpectedState> const& expectedStates, AddNewRequestsCallback const& addNewRequestsCb,
+    SizeType32 maxInputLen, std::shared_ptr<kv_cache_manager::KVCacheManager> const& crossKvCacheManager = nullptr)
 {
     int itCount = 0;
     while (!activeRequests.empty())
     {
         addNewRequestsCb(activeRequests, itCount);
         prepRequestsForEncoderSkip(activeRequests);
-        auto [scheduledRequestsList, pausedRequests] = capacityScheduler->scheduleRequests(activeRequests);
+        auto [scheduledRequestsList, pausedRequests] = capacityScheduler(activeRequests);
 
         RequestTable scheduledRequests;
         for (auto& req : scheduledRequestsList)
@@ -310,70 +311,56 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
         // pause all requests that haven't been scheduled
         for (auto const& llmReq : pausedRequests)
         {
-            auto const seqSlot = llmReq->mSeqSlot.value();
-            seqSlotManager->freeSequenceSlot(llmReq->mRequestId);
-            kvCacheManager->removeSequence(seqSlot);
+            kvCacheManager->removeSequence(llmReq->mRequestId);
             if (crossKvCacheManager)
             {
-                crossKvCacheManager->removeSequence(seqSlot);
+                crossKvCacheManager->removeSequence(llmReq->mRequestId);
             }
 
             llmReq->pause(maxInputLen);
 
             // All non-scheduled requests should be in state CONTEXT_INIT
             EXPECT_EQ(llmReq->mState, LlmRequestState::kCONTEXT_INIT);
-            EXPECT_FALSE(llmReq->mSeqSlot);
         }
 
         // Append a token for all scheduled requests
         for (auto& [reqId, llmReq] : scheduledRequests)
         {
             auto const isReqNew = llmReq->isContextInitState() && llmReq->isFirstContextChunk();
-            llmReq->mSeqSlot = seqSlotManager->getSequenceSlot(isReqNew, reqId);
 
-            auto const seqSlot = llmReq->mSeqSlot.value();
             auto const promptLen = llmReq->mPromptLen;
             if (llmReq->isContextInitState())
             {
-                if (!llmReq->isFullContextRequest())
+                if (!llmReq->isLastContextChunk())
                 {
-                    if (!llmReq->isLastContextChunk())
-                    {
-                        TLLM_CHECK_WITH_INFO(llmReq->getContextChunkSize() % kvCacheManager->getTokensPerBlock() == 0,
-                            "To prevent cache fragmentation, the context chunk size should be divisible by the number "
-                            "of "
-                            "tokens per block, except for the last chunk.");
-                    }
-                    if (llmReq->isFirstContextChunk())
-                    {
-                        // We need to perform initialization work for the first context chunk.
-                        kvCacheManager->addSequence(seqSlot, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
-                    }
-                    auto preContextLength = llmReq->getContextChunkSize();
-                    // Values returned by isFirstContextChunk and isLastContextChunk will change after this call.
-                    // This call resets context chunk size to zero for some reason, so need to set it again.
-                    llmReq->moveToNextContextChunk();
-                    llmReq->setContextChunkSize(preContextLength);
+                    TLLM_CHECK_WITH_INFO(llmReq->getContextChunkSize() % kvCacheManager->getTokensPerBlock() == 0,
+                        "To prevent cache fragmentation, the context chunk size should be divisible by the number "
+                        "of "
+                        "tokens per block, except for the last chunk.");
                 }
-                else
+                if (llmReq->isFirstContextChunk())
                 {
-
-                    kvCacheManager->addSequence(seqSlot, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
+                    // We need to perform initialization work for the first context chunk.
+                    kvCacheManager->addSequence(
+                        llmReq->mRequestId, promptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
                     if (crossKvCacheManager)
                     {
-                        crossKvCacheManager->addSequence(
-                            seqSlot, llmReq->getEncoderOutputLen(), llmReq->mSamplingConfig.beamWidth, llmReq);
+                        crossKvCacheManager->addSequence(llmReq->mRequestId, llmReq->getEncoderOutputLen(),
+                            llmReq->mSamplingConfig.beamWidth, llmReq);
                     }
-                    llmReq->moveToNextContextChunk();
                 }
+                auto preContextLength = llmReq->getContextChunkSize();
+                // Values returned by isFirstContextChunk and isLastContextChunk will change after this call.
+                // This call resets context chunk size to zero for some reason, so need to set it again.
+                llmReq->moveToNextContextChunk();
+                llmReq->setContextChunkSize(preContextLength);
 
                 if (llmReq->getContextRemainingLength() == 0)
                 {
-
-                    kvCacheManager->storeContextBlocks(reqId, llmReq);
+                    kvCacheManager->storeContextBlocks(llmReq);
                     if (crossKvCacheManager)
                     {
-                        crossKvCacheManager->storeContextBlocks(reqId, llmReq);
+                        crossKvCacheManager->storeContextBlocks(llmReq);
                     }
                     llmReq->addNewTokens({itCount});
                     llmReq->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
@@ -381,24 +368,20 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
             }
             else
             {
-                kvCacheManager->addToken(seqSlot);
+                kvCacheManager->addToken(llmReq->mRequestId);
                 if (crossKvCacheManager)
                 {
-                    crossKvCacheManager->addToken(seqSlot);
+                    crossKvCacheManager->addToken(llmReq->mRequestId);
                 }
                 llmReq->addNewTokens({itCount});
             }
             if (llmReq->getNumTokens(0) == promptLen + llmReq->mMaxNewTokens)
             {
                 llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
-                if (llmReq->mSeqSlot)
+                kvCacheManager->removeSequence(llmReq->mRequestId, llmReq);
+                if (crossKvCacheManager)
                 {
-
-                    kvCacheManager->removeSequence(llmReq->mSeqSlot.value(), llmReq);
-                    if (crossKvCacheManager)
-                    {
-                        crossKvCacheManager->removeSequence(llmReq->mSeqSlot.value(), llmReq);
-                    }
+                    crossKvCacheManager->removeSequence(llmReq->mRequestId, llmReq);
                 }
             }
         }
@@ -409,7 +392,6 @@ int runTest(std::shared_ptr<CapacityScheduler> capacityScheduler, std::shared_pt
             auto const& llmReq = (*it);
             if (llmReq->mState == LlmRequestState::kGENERATION_COMPLETE)
             {
-                seqSlotManager->freeSequenceSlot(llmReq->mRequestId);
                 activeRequests.erase(it++);
             }
             else
@@ -440,10 +422,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFit)
             auto kvCacheManager = getKvCacheManager(
                 maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
             auto peftCacheManager = getPeftCacheManager();
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+            auto capacityScheduler
+                = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 80;
@@ -459,8 +439,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFit)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen);
+            int numIterations = runTest(
+                capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
             EXPECT_EQ(numIterations, 80);
         }
@@ -497,10 +477,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFitWithCrossBlocks)
             auto crossKvCacheManager = getKvCacheManager(maxNumRequests, crossKvCacheTokensPerBlock,
                 crossKvCacheMaxNumTokens, crossKvCacheMaxNumTokensPerSeq, crossKvsinkTokenLen, enableReuse, cacheType);
             auto peftCacheManager = getPeftCacheManager();
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            auto capacityScheduler = CapacityScheduler(
                 maxNumRequests, kvCacheManager, crossKvCacheManager, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 80;
@@ -515,8 +493,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFitWithCrossBlocks)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen, crossKvCacheManager);
+            int numIterations = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates,
+                addNewRequestsCb, maxInputLen, crossKvCacheManager);
 
             EXPECT_EQ(numIterations, 80);
         }
@@ -541,10 +519,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraFitsDuplicateTask)
             auto kvCacheManager = getKvCacheManager(
                 maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
             auto peftCacheManager = std::make_shared<MockPeftCacheManager>(15, 30, 30);
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+            auto capacityScheduler
+                = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 50;
@@ -561,8 +537,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraFitsDuplicateTask)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen);
+            int numIterations = runTest(
+                capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
             EXPECT_EQ(numIterations, 50);
         }
@@ -612,10 +588,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
             auto kvCacheManager = getKvCacheManager(
                 maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
             auto peftCacheManager = std::make_shared<MockPeftCacheManager>(20, 30, 30);
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+            auto capacityScheduler
+                = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
             // Create two requests that should not fit in kvCache for entire duration
             int32_t maxNewTokens = 50;
@@ -629,8 +603,8 @@ TEST_F(CapacitySchedulerTest, SimpleLoraDoesntFitDuplicateTask)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen);
+            int numIterations = runTest(
+                capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
             EXPECT_EQ(numIterations, expectedIterations);
         }
@@ -652,10 +626,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFitInChunk)
         auto kvCacheManager
             = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that should fit in kvCache for entire duration
         int32_t maxNewTokens = 40;
@@ -679,8 +651,8 @@ TEST_F(CapacitySchedulerTest, SimpleShouldFitInChunk)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 42);
     }
@@ -701,10 +673,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilization)
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
         CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kMAX_UTILIZATION;
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -737,8 +707,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilization)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         int expectedNumIters = (sinkTokenLen == 0) ? 119 : 125;
         EXPECT_EQ(numIterations, expectedNumIters);
@@ -787,10 +757,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitPriorities)
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -830,8 +798,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitPriorities)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, expectedNumIters);
     }
@@ -849,10 +817,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationInChunk)
         = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq);
     auto peftCacheManager = getPeftCacheManager();
     CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kMAX_UTILIZATION;
-    std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-        maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-    uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-    auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+    auto capacityScheduler
+        = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
     // Create two requests that will not fit in kvCache for entire duration
     int32_t maxNewTokens = 60;
@@ -876,8 +842,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationInChunk)
     // Callback to call at each iteration, to have option to add new active Requests
     auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-    int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-        addNewRequestsCb, maxInputLen);
+    int numIterations
+        = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
     EXPECT_EQ(numIterations, 100);
 }
@@ -894,10 +860,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationInChunkedCache)
         = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq);
     auto peftCacheManager = getPeftCacheManager();
     CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kMAX_UTILIZATION;
-    std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-        maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-    uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-    auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+    auto capacityScheduler
+        = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
     // Create two requests that will not fit in kvCache for entire duration
     int32_t maxNewTokens = 20;
@@ -923,8 +887,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationInChunkedCache)
     // Callback to call at each iteration, to have option to add new active Requests
     auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-    int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-        addNewRequestsCb, maxInputLen);
+    int numIterations
+        = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
     EXPECT_EQ(numIterations, 42);
 }
@@ -944,10 +908,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationDraftTokens)
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, 0);
         auto peftCacheManager = getPeftCacheManager();
         CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kMAX_UTILIZATION;
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -972,8 +934,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilizationDraftTokens)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         int expectedNumIters = 129;
         EXPECT_EQ(numIterations, expectedNumIters);
@@ -995,10 +957,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitGuaranteedCompletion)
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
         CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT;
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -1016,8 +976,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitGuaranteedCompletion)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 160);
     }
@@ -1055,10 +1015,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitWithCrossBlocks)
             auto crossKvCacheManager = getKvCacheManager(maxNumRequests, crossKvCacheTokensPerBlock,
                 crossKvCacheMaxNumTokens, crossKvCacheMaxNumTokensPerSeq, crossKvsinkTokenLen, enableReuse, cacheType);
             auto peftCacheManager = getPeftCacheManager();
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+            auto capacityScheduler = CapacityScheduler(
                 maxNumRequests, kvCacheManager, crossKvCacheManager, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 80;
@@ -1076,8 +1034,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitWithCrossBlocks)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen, crossKvCacheManager);
+            int numIterations = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates,
+                addNewRequestsCb, maxInputLen, crossKvCacheManager);
 
             EXPECT_EQ(numIterations, 160);
         }
@@ -1096,10 +1054,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitGuaranteedCompletionInChunk)
         = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq);
     auto peftCacheManager = getPeftCacheManager();
     CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT;
-    std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-        maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-    uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-    auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+    auto capacityScheduler
+        = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
     // Create two requests that should fit in kvCache for entire duration
     int32_t maxNewTokens = 60;
@@ -1127,8 +1083,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitGuaranteedCompletionInChunk)
     // Callback to call at each iteration, to have option to add new active Requests
     auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-    int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-        addNewRequestsCb, maxInputLen);
+    int numIterations
+        = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
     EXPECT_EQ(numIterations, 122);
 }
@@ -1147,10 +1103,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilization)
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+        auto capacityScheduler = CapacityScheduler(
             maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kMAX_UTILIZATION);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
         // Initially two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -1261,8 +1215,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilization)
         }
 
         // Callback to call after scheduling requests
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests,
-            expectedStates, addNewRequestsCb, maxInputLen);
+        int numIterations = runTest(
+            capacityScheduler, kvCacheManager, initActiveRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         int expectedNumIters = (sinkTokenLen == 0) ? 227 : 245;
         EXPECT_EQ(numIterations, expectedNumIters);
@@ -1281,10 +1235,8 @@ TEST_F(CapacitySchedulerTest, SimpleSurpassMaxNumRequestsWithPriorities)
     auto kvCacheManager = getKvCacheManager(
         maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
     auto peftCacheManager = getPeftCacheManager();
-    std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+    auto capacityScheduler = CapacityScheduler(
         maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kMAX_UTILIZATION);
-    uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-    auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
     int32_t maxNewTokens = 10;
     int32_t promptLen = 10;
@@ -1316,8 +1268,8 @@ TEST_F(CapacitySchedulerTest, SimpleSurpassMaxNumRequestsWithPriorities)
     expectedStates.push_back(ExpectedState{12, 20, {0, 1}, {{0, 8, 12, 0}, {1, 8, 12, 0}}});
 
     // Callback to call after scheduling requests
-    int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests, expectedStates,
-        addNewRequestsCb, maxInputLen);
+    int numIterations
+        = runTest(capacityScheduler, kvCacheManager, initActiveRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
     EXPECT_EQ(numIterations, 20);
 }
@@ -1336,10 +1288,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilizationPrio
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+        auto capacityScheduler = CapacityScheduler(
             maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kMAX_UTILIZATION);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
         // Initially two requests that will not fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -1463,8 +1413,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsMaxUtilizationPrio
         }
 
         // Callback to call after scheduling requests
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests,
-            expectedStates, addNewRequestsCb, maxInputLen);
+        int numIterations = runTest(
+            capacityScheduler, kvCacheManager, initActiveRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         int expectedNumIters = (sinkTokenLen == 0) ? 227 : 245;
         EXPECT_EQ(numIterations, expectedNumIters);
@@ -1485,10 +1435,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsGuaranteedCompleti
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+        auto capacityScheduler = CapacityScheduler(
             maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
         int32_t maxNewTokens = 80;
         int32_t promptLen = 10;
@@ -1517,8 +1465,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsGuaranteedCompleti
         expectedStates.push_back(ExpectedState{240, 320, {3}, {{3, 80, 10, 0}}});
 
         // Callback to call after scheduling requests
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests,
-            expectedStates, addNewRequestsCb, maxInputLen);
+        int numIterations = runTest(
+            capacityScheduler, kvCacheManager, initActiveRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 320);
     }
@@ -1538,10 +1486,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsGuaranteedCompleti
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
+        auto capacityScheduler = CapacityScheduler(
             maxNumRequests, kvCacheManager, nullptr, peftCacheManager, CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
 
         int32_t maxNewTokens = 60;
         int32_t promptLen = 30;
@@ -1578,8 +1524,8 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitAddingNewRequestsGuaranteedCompleti
         expectedStates.push_back(ExpectedState{183, 244, {3}, {{3, 60, 30, 0}}});
 
         // Callback to call after scheduling requests
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, initActiveRequests,
-            expectedStates, addNewRequestsCb, maxInputLen);
+        int numIterations = runTest(
+            capacityScheduler, kvCacheManager, initActiveRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 244);
     }
@@ -1604,10 +1550,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
             auto kvCacheManager = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens,
                 kvCacheMaxNumTokensPerSeq, sinkTokenLen, enableReuse);
             auto peftCacheManager = getPeftCacheManager();
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+            auto capacityScheduler
+                = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 80;
@@ -1637,8 +1581,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen);
+            int numIterations = runTest(
+                capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
             if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
             {
@@ -1669,10 +1613,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequestChunked)
         auto kvCacheManager = getKvCacheManager(
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, 0, enableReuse);
         auto peftCacheManager = getPeftCacheManager();
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that should fit in kvCache for entire duration
         int32_t maxNewTokens = 40;
@@ -1712,8 +1654,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequestChunked)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
         {
@@ -1747,10 +1689,8 @@ TEST_F(CapacitySchedulerTest, DelayFiveRequestsComplicated)
             auto kvCacheManager = getKvCacheManager(maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens,
                 kvCacheMaxNumTokensPerSeq, sinkTokenLen, enableReuse);
             auto peftCacheManager = getPeftCacheManager();
-            std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-                maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-            uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-            auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+            auto capacityScheduler
+                = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
             // Create two requests that should fit in kvCache for entire duration
             int32_t maxNewTokens = 80;
@@ -1797,8 +1737,8 @@ TEST_F(CapacitySchedulerTest, DelayFiveRequestsComplicated)
             // Callback to call at each iteration, to have option to add new active Requests
             auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-            int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests,
-                expectedStates, addNewRequestsCb, maxInputLen);
+            int numIterations = runTest(
+                capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
             EXPECT_EQ(numIterations, 82);
             EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 3);
@@ -1821,10 +1761,8 @@ TEST_F(CapacitySchedulerTest, SimpleFitsStaticBatch)
             maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
         auto peftCacheManager = getPeftCacheManager();
         CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kSTATIC_BATCH;
-        std::shared_ptr<CapacityScheduler> capacityScheduler = batch_scheduler::makeCapacityScheduler(
-            maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
-        uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
-        auto seqSlotManager = std::make_shared<SequenceSlotManager>(maxNumRequests, maxSeqIdleMicroseconds);
+        auto capacityScheduler
+            = CapacityScheduler(maxNumRequests, kvCacheManager, nullptr, peftCacheManager, capacitySchedulerPolicy);
 
         // Create two requests that will fit in kvCache for entire duration
         int32_t maxNewTokens = 80;
@@ -1844,8 +1782,8 @@ TEST_F(CapacitySchedulerTest, SimpleFitsStaticBatch)
         // Callback to call at each iteration, to have option to add new active Requests
         auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
 
-        int numIterations = runTest(capacityScheduler, seqSlotManager, kvCacheManager, activeRequests, expectedStates,
-            addNewRequestsCb, maxInputLen);
+        int numIterations
+            = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb, maxInputLen);
 
         EXPECT_EQ(numIterations, 160);
     }

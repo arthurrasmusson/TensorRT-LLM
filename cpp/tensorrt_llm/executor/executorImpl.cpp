@@ -380,7 +380,8 @@ std::shared_ptr<Model> Executor::Impl::createModel(runtime::RawEngine const& raw
         }
     }();
 
-    auto optionalParams = batch_manager::TrtGptModelOptionalParams(executorConfig);
+    bool const isLeaderInOrchMode = (mCommMode == CommunicationMode::kORCHESTRATOR) && mIsLeader;
+    auto optionalParams = batch_manager::TrtGptModelOptionalParams(executorConfig, isLeaderInOrchMode);
     return batch_manager::TrtGptModelFactory::create(rawEngine, modelConfig, worldConfig, gptModelType, optionalParams);
 }
 
@@ -397,13 +398,10 @@ std::shared_ptr<Model> Executor::Impl::createEncoderModel(runtime::RawEngine con
 void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelConfig const& parallelConfig)
 {
 #if ENABLE_MULTI_DEVICE
-    auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
-    int32_t const worldRank = worldComm.getRank();
-
     auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
     if (optOrchestratorConfig.value().getIsOrchestrator())
     {
-        TLLM_CHECK_WITH_INFO(worldRank == 0, "Rank 0 must be orchestrator");
+        TLLM_CHECK_WITH_INFO(mWorldRank == 0, "Rank 0 must be orchestrator");
     }
 
     TLLM_CHECK_WITH_INFO(parallelConfig.getParticipantIds(),
@@ -413,8 +411,8 @@ void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelCon
     TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp,
         "When specifying participantIds, participantIds size must be equal to tp*pp");
 
-    bool isLeader = (worldRank == participantIds.front());
-    bool isOrchestrator = (worldRank == 0);
+    bool isLeader = (mWorldRank == participantIds.front());
+    bool isOrchestrator = (mWorldRank == 0);
 
     // OrchLeaderComm rank 0 is orchestrator, rank 1 is leader
     mOrchRank = 0;
@@ -462,6 +460,7 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
     }
 
     tensorrt_llm::mpi::initialize(tensorrt_llm::mpi::MpiThreadSupport::THREAD_MULTIPLE);
+    mWorldRank = tensorrt_llm::mpi::MpiComm::world().getRank();
 
     auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
     validateParallelConfig(parallelConfig, modelType, modelPath);
@@ -575,7 +574,6 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
 {
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
     int32_t const worldSize = worldComm.getSize();
-    int32_t const worldRank = worldComm.getRank();
 
     auto const& orchestratorConfig = parallelConfig.getOrchestratorConfig();
     mIsOrchestrator = mCommMode == CommunicationMode::kORCHESTRATOR && orchestratorConfig.value().getIsOrchestrator();
@@ -589,7 +587,8 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
             "When not spawning processes in orchestrator mode, participant IDs must be provided");
 
         // Check that rank 0 is reserved for the orchestrator
-        for (auto& participantId : parallelConfig.getParticipantIds().value())
+        auto const participantIds = parallelConfig.getParticipantIds().value();
+        for (auto& participantId : participantIds)
         {
             TLLM_CHECK_WITH_INFO(participantId != 0, "Rank 0 is reserved for the orchestrator");
         }
@@ -628,10 +627,10 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     }
 
     // Bool that indicates if current process is worker for this model or not
-    auto participantIt = std::find(participantIds.begin(), participantIds.end(), worldRank);
+    auto participantIt = std::find(participantIds.begin(), participantIds.end(), mWorldRank);
     mIsWorker = participantIt != participantIds.end();
     // Bool that indicates if current ranks is leader for this model
-    mIsLeader = (worldRank == participantIds.front());
+    mIsLeader = (mWorldRank == participantIds.front());
 
 #if ENABLE_MULTI_DEVICE
     if (mIsWorker)
@@ -1062,6 +1061,11 @@ bool Executor::Impl::canEnqueueRequests() const
             || (mCommMode == CommunicationMode::kORCHESTRATOR && mIsOrchestrator));
 }
 
+bool Executor::Impl::isParticipant() const
+{
+    return mIsWorker;
+}
+
 std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
@@ -1272,8 +1276,9 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
                 // this, so disallowing.
                 if (newReq->isStreaming() && !mIsSchedulerGuaranteedNoEvict && !mIsChunkedContext)
                 {
-                    auto maxReqSeqLen = newReq->mPromptLen + newReq->mMaxNewTokens;
-                    TLLM_CHECK_WITH_INFO(maxReqSeqLen <= mModel->getMaxInputLen(),
+                    auto const maxReqSeqLen = newReq->mPromptLen + newReq->mMaxNewTokens;
+                    auto const maxRestartLen = maxReqSeqLen - 1;
+                    TLLM_CHECK_WITH_INFO(maxRestartLen <= mModel->getMaxInputLen(),
                         "Request sequence length is potentially greater than max input length. This cannot be run "
                         "unless streaming is disabled, context chunking is enabled or the GUARANTEED_NO_EVICT "
                         "scheduling policy is used");
@@ -1344,16 +1349,23 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
         }
         catch (runtime::LoraExpectedException const& e)
         {
-            // In case  of an expected LoRA exception (e.g. cache full, cache miss), log a warning and enqueue response
-            TLLM_LOG_WARNING("%s", e.what());
-            enqueueNewResponses({{reqWithId.id, e.what()}});
+            if (mIsLeader)
+            {
+                // In case  of an expected LoRA exception (e.g. cache full, cache miss), log a warning and enqueue
+                // response
+                TLLM_LOG_WARNING("%s", e.what());
+                enqueueNewResponses({{reqWithId.id, e.what()}});
+            }
         }
         catch (std::exception const& e)
         {
-            // In case of error, create a response with error for this request
-            auto err = std::string("Encountered an error when fetching new request: ") + e.what();
-            TLLM_LOG_ERROR("%s", err.c_str());
-            enqueueNewResponses({{reqWithId.id, err}});
+            if (mIsLeader)
+            {
+                // In case of error, create a response with error for this request
+                auto err = std::string("Encountered an error when fetching new request: ") + e.what();
+                TLLM_LOG_ERROR("%s", err.c_str());
+                enqueueNewResponses({{reqWithId.id, err}});
+            }
         }
     }
     TLLM_LOG_DEBUG("num new requests fetched from queue: %d", newRequests.size());
@@ -1373,7 +1385,10 @@ void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::s
         llmReq->mState = batch_manager::LlmRequestState::kGENERATION_COMPLETE;
         mModel->terminateRequest(llmReq);
 
-        enqueueNewResponses({{llmReq->mRequestId, err}});
+        if (mIsLeader)
+        {
+            enqueueNewResponses({{llmReq->mRequestId, err}});
+        }
 
         // Remove from the requestList
         activeRequests.erase(it++);
@@ -1775,19 +1790,19 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
 {
     NVTX3_SCOPED_RANGE(populateNewResponses);
     std::vector<Response> newResponses;
-    std::vector<IdType> reqIds;
     RequestList finishedRequests;
     for (auto it = activeRequests.begin(); it != activeRequests.end();)
     {
-        auto llmReq = (*it);
-        auto const& reqId = llmReq->mRequestId;
-        bool requestDone = false;
-        auto response = llmReq->createResponse();
-        if (response)
+        auto const& llmReq = (*it);
+        bool const requestDone = llmReq->isFinished();
+        // Only leader should store responses
+        if (mIsLeader)
         {
-            requestDone = response.value().getResult().isSequenceFinal;
-            newResponses.emplace_back(std::move(response.value()));
-            reqIds.push_back(reqId);
+            auto response = llmReq->createResponse(mModel->hasSpeculativeDecodingFastLogits(), mWorldRank);
+            if (response)
+            {
+                newResponses.emplace_back(std::move(response.value()));
+            }
         }
         // Remove from active requests if last response has been generated
         if (requestDone)
@@ -1926,19 +1941,17 @@ void Executor::Impl::enqueueTerminateRequest()
 
 void Executor::Impl::enqueueNewResponses(std::vector<Response>&& newResponses)
 {
-    // Only leader should store responses
-    if (mIsLeader)
+    TLLM_CHECK_WITH_INFO(mIsLeader, "Only leader should store responses");
+
+    if (mCommMode == CommunicationMode::kLEADER)
     {
-        if (mCommMode == CommunicationMode::kLEADER)
-        {
-            appendNewResponses(std::move(newResponses));
-        }
-        else if (mCommMode == CommunicationMode::kORCHESTRATOR)
-        {
-            MpiMessage message(MpiId::RESPONSE);
-            message.data = ResponseData{std::move(newResponses)};
-            mSendQueue.push(std::move(message));
-        }
+        appendNewResponses(std::move(newResponses));
+    }
+    else if (mCommMode == CommunicationMode::kORCHESTRATOR)
+    {
+        MpiMessage message(MpiId::RESPONSE);
+        message.data = ResponseData{std::move(newResponses)};
+        mSendQueue.push(std::move(message));
     }
 }
 

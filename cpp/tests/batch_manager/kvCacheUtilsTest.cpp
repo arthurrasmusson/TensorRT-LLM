@@ -72,13 +72,15 @@ TEST_F(BlockIteratorTest, CacheManagerTest)
     auto constexpr numKvHeads = 6;
     auto constexpr sizePerHead = 16;
     auto constexpr tokensPerBlock = 4;
+    auto constexpr maxBlocksPerSeq = 4;
     auto constexpr blocksInPrimaryPool = 8;
     auto constexpr blocksInSecondaryPool = 0;
+    auto constexpr maxNumSequences = 8;
     auto const stream = std::make_shared<tr::CudaStream>();
     auto constexpr onboardBlocks = true;
 
     BlockManager blockManager(std::vector<BlockManager::SizeType32>(numLayers, numKvHeads), sizePerHead, tokensPerBlock,
-        blocksInPrimaryPool, blocksInSecondaryPool, stream, onboardBlocks);
+        blocksInPrimaryPool, blocksInSecondaryPool, maxNumSequences, stream, onboardBlocks);
     blockManager.allocatePools(dataType, false);
 
     EXPECT_EQ(blockManager.getTokensPerBlock(), tokensPerBlock);
@@ -95,8 +97,7 @@ TEST_F(BlockIteratorTest, CacheManagerTest)
     LlmRequest::RequestIdType requestId{0};
     auto llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
 
-    auto seqSlotIdx = 0;
-    GenerationRequest seq0{seqSlotIdx, inputLength, beamWidth};
+    GenerationRequest seq0{requestId, inputLength, beamWidth, maxBlocksPerSeq};
 
     auto constexpr beamIdx = 0;
     auto promptLen0 = llmRequest0->getNumTokens(beamIdx);

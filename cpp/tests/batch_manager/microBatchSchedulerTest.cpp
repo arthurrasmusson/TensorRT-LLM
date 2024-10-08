@@ -21,7 +21,9 @@
 
 using namespace tensorrt_llm::runtime;
 using namespace tensorrt_llm::batch_manager;
+using namespace tensorrt_llm::batch_manager;
 using namespace tensorrt_llm::batch_manager::batch_scheduler;
+namespace tle = tensorrt_llm::executor;
 
 using RequestTable = std::map<RequestIdType, std::shared_ptr<LlmRequest>>;
 using CudaStreamPtr = std::shared_ptr<tensorrt_llm::runtime::CudaStream>;
@@ -67,8 +69,7 @@ protected:
             mInflightReqIds.erase(reqId);
         }
 
-        auto const [contextRequests, genRequests]
-            = mMicroBatchScheduler->scheduleRequests(activeRequests, mInflightReqIds);
+        auto const [contextRequests, genRequests] = (*mMicroBatchScheduler)(activeRequests, mInflightReqIds);
 
         for (auto const& requests : {contextRequests, genRequests})
         {
@@ -187,8 +188,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxNumTokens)
     constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
     constexpr SizeType32 maxNumTokens = 7;
     constexpr SizeType32 chunkUnitSize = 5;
-    constexpr MicroBatchScheduler::ContextChunkingPolicy ctxChunkPolicy{
-        MicroBatchScheduler::ContextChunkingPolicy::kEQUAL_PROGRESS};
+    constexpr tle::ContextChunkingPolicy ctxChunkPolicy{tle::ContextChunkingPolicy::kEQUAL_PROGRESS};
 
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
@@ -278,8 +278,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxContextLength)
     constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
     constexpr SizeType32 chunkUnitSize = 5;
     constexpr SizeType32 maxContextLength = 12;
-    MicroBatchScheduler::ContextChunkingPolicy ctxChunkPolicy{
-        MicroBatchScheduler::ContextChunkingPolicy::kEQUAL_PROGRESS};
+    tle::ContextChunkingPolicy ctxChunkPolicy{tle::ContextChunkingPolicy::kEQUAL_PROGRESS};
 
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
@@ -542,7 +541,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW4)
 class ContextChunkingTest : public MicroBatchSchedulerTest
 {
 protected:
-    using Policy = MicroBatchScheduler::ContextChunkingPolicy;
+    using Policy = tle::ContextChunkingPolicy;
 
     ~ContextChunkingTest()
     {

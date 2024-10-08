@@ -25,7 +25,8 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     std::optional<LogitsPostProcessorConfig> logitsPostProcessorConfig, std::optional<DecodingConfig> decodingConfig,
     float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig,
-    SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds)
+    SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds,
+    std::optional<SpeculativeDecodingConfig> specDecConfig)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -46,6 +47,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mDebugConfig(std::move(debugConfig))
     , mRecvPollPeriodMs(recvPollPeriodMs)
     , mMaxSeqIdleMicroseconds(maxSeqIdleMicroseconds)
+    , mSpeculativeDecodingConfig(specDecConfig)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -153,6 +155,11 @@ uint64_t ExecutorConfig::getMaxSeqIdleMicroseconds() const
     return mMaxSeqIdleMicroseconds;
 }
 
+std::optional<SpeculativeDecodingConfig> ExecutorConfig::getSpecDecConfig() const
+{
+    return mSpeculativeDecodingConfig;
+}
+
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
 {
     mMaxBeamWidth = maxBeamWidth;
@@ -258,6 +265,11 @@ void ExecutorConfig::setMaxSeqIdleMicroseconds(uint64_t maxSeqIdleMicroseconds)
 {
     mMaxSeqIdleMicroseconds = maxSeqIdleMicroseconds;
     TLLM_CHECK(mMaxSeqIdleMicroseconds > 0);
+}
+
+void ExecutorConfig::setSpecDecConfig(SpeculativeDecodingConfig const& specDecConfig)
+{
+    mSpeculativeDecodingConfig = specDecConfig;
 }
 
 } // namespace tensorrt_llm::executor

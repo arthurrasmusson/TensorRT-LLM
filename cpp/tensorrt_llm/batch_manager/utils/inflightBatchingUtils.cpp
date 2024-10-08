@@ -13,6 +13,7 @@
 #include "inflightBatchingUtils.h"
 
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
 namespace tensorrt_llm::batch_manager::utils
@@ -131,6 +132,8 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
     kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    NVTX3_SCOPED_RANGE(allocateKvCache);
+
     TLLM_CHECK(kvCacheManagerPtr);
     auto& kvCacheManager = *kvCacheManagerPtr;
 
@@ -138,40 +141,38 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
     {
         if (llmReq->isFirstContextChunk())
         {
-            // Get slot of the current sequence in the KV cache
-            auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const requestId = llmReq->mRequestId;
             auto const promptLen = llmReq->mPromptLen;
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
             auto const draftLength = llmReq->getNumDraftTokens();
 
             // Allocate/Reuse KV cache
-            kvCacheManager.addSequence(seqSlot, promptLen, reqBeamWidth, llmReq);
+            kvCacheManager.addSequence(requestId, promptLen, reqBeamWidth, llmReq);
 
             // Allocate more KV cache for speculative decoding
             if (draftLength > 0)
             {
                 for (SizeType32 di = 0; di < draftLength; ++di)
                 {
-                    kvCacheManager.addToken(seqSlot);
+                    kvCacheManager.addToken(requestId);
                 }
             }
 
             if (crossKvCacheManagerPtr != nullptr)
             {
-                crossKvCacheManagerPtr->addSequence(seqSlot, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
+                crossKvCacheManagerPtr->addSequence(requestId, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
             }
         }
     }
 
     for (auto const& llmReq : scheduledRequests.generationRequests)
     {
-        // Get slot of the current sequence in the KV cache
-        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto const requestId = llmReq->mRequestId;
         auto const draftLength = llmReq->getNumDraftTokens();
 
         for (SizeType32 di = 0; di < draftLength + 1; ++di)
         {
-            kvCacheManager.addToken(seqSlot);
+            kvCacheManager.addToken(requestId);
         }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

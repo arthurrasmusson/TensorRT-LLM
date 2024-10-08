@@ -1,23 +1,26 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: NVIDIA TensorRT Source Code License Agreement
+ * Copyright (c) 2023-2024, NVIDIA CORPORATION.  All rights reserved.
  *
- * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
- * property and proprietary rights in and to this material, related
- * documentation and any modifications thereto. Any use, reproduction,
- * disclosure or distribution of this material and related documentation
- * without an express license agreement from NVIDIA CORPORATION or
- * its affiliates is strictly prohibited.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #pragma once
 
-#include "tensorrt_llm/batch_manager/common.h"
+#include "common.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/common/algorithm.h"
 #include "tensorrt_llm/runtime/common.h"
-
-#include <memory>
-#include <unordered_set>
+#include <variant>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -28,30 +31,22 @@ class KVCacheManager;
 class BasePeftCacheManager;
 } // namespace tensorrt_llm::batch_manager
 
-namespace tensorrt_llm::batch_manager::batch_scheduler
+namespace tensorrt_llm::batch_manager
 {
+
+using tensorrt_llm::runtime::SizeType32;
 
 /// @brief This scheduler takes into account the given request capacity and the KV cache capacity.
 ///        Depending on the CapacitySchedulerPolicy it will schedule already started and new requests,
 ///        or even pause previously started requests.
-class CapacityScheduler
+class BaseCapacityScheduler
 {
 public:
-    explicit CapacityScheduler(LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
+    explicit BaseCapacityScheduler(LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
         : mNoScheduleUntilState(noScheduleUntilState)
         , mNoScheduleAfterState(noScheduleAfterState)
     {
     }
-
-    virtual ~CapacityScheduler() = default;
-
-    using SizeType32 = tensorrt_llm::runtime::SizeType32;
-
-    /// @brief Takes as input a sorted list of requests and outputs a sorted lists of requests
-    ///        to update for this current iteration, and a map of requests to pause
-    [[nodiscard]] virtual std::tuple<RequestVector, RequestVector> scheduleRequests(
-        RequestList const& activeRequests) const
-        = 0;
 
     [[nodiscard]] LlmRequestState constexpr getNoScheduleUntilState() const noexcept
     {
@@ -70,7 +65,7 @@ private:
 };
 
 /// @brief Schedule up to maxNumRequests requests
-class MaxRequestsScheduler : public CapacityScheduler
+class MaxRequestsScheduler : public BaseCapacityScheduler
 {
 public:
     explicit MaxRequestsScheduler(SizeType32 maxNumRequests,
@@ -79,8 +74,9 @@ public:
         LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
         LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
-    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
-        RequestList const& activeRequests) const override;
+    /// @brief Takes as input a sorted list of requests and outputs a sorted lists of requests
+    ///        to update for this current iteration, and a map of requests to pause
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> operator()(RequestList const& activeRequests) const;
 
 private:
     SizeType32 mMaxNumRequests;
@@ -91,7 +87,7 @@ private:
 /// @brief   Schedule requests using the MAX_UTILIZATION policy
 /// @details Try reserving resources to advance requests by one step,
 ///          may pause previously started requests.
-class MaxUtilizationScheduler : public CapacityScheduler
+class MaxUtilizationScheduler : public BaseCapacityScheduler
 {
 public:
     MaxUtilizationScheduler(SizeType32 maxNumRequests, std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
@@ -100,8 +96,7 @@ public:
         LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
         LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
-    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
-        RequestList const& activeRequests) const override;
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> operator()(RequestList const& activeRequests) const;
 
 private:
     /// @return {fitsKvCache, fitsPeft}
@@ -118,7 +113,7 @@ private:
 };
 
 /// @brief Schedule requests using the GUARANTEED_NO_EVICT policy
-class GuaranteedNoEvictScheduler : public CapacityScheduler
+class GuaranteedNoEvictScheduler : public BaseCapacityScheduler
 {
 public:
     GuaranteedNoEvictScheduler(SizeType32 maxNumRequests,
@@ -128,14 +123,13 @@ public:
         LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
         LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
-    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
-        RequestList const& activeRequests) const override;
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> operator()(RequestList const& activeRequests) const;
 
 protected:
-    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequestsImpl(
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> forwardImpl(
         RequestList const& activeRequests, bool staticBatchScheduling) const;
 
-protected:
+private:
     SizeType32 mMaxNumRequests;
     std::shared_ptr<kv_cache_manager::KVCacheManager> mKvCacheManager{nullptr};
     std::shared_ptr<kv_cache_manager::KVCacheManager> mCrossKvCacheManager{nullptr};
@@ -152,15 +146,42 @@ public:
         LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
         LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
 
-    [[nodiscard]] std::tuple<RequestVector, RequestVector> scheduleRequests(
-        RequestList const& activeRequests) const override;
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> operator()(RequestList const& activeRequests) const;
 };
 
-std::unique_ptr<CapacityScheduler> makeCapacityScheduler(tensorrt_llm::runtime::SizeType32 maxNumRequests,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
-    std::shared_ptr<BasePeftCacheManager> peftCacheManager, executor::CapacitySchedulerPolicy capacitySchedulerPolicy,
-    bool manyMicroBatches = false, LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
-    LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
+class CapacityScheduler : public Algorithm
+{
+public:
+    constexpr static auto name{"CapacityScheduler"};
 
-} // namespace tensorrt_llm::batch_manager::batch_scheduler
+    CapacityScheduler() = default;
+
+    CapacityScheduler(SizeType32 maxNumRequests, std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+        std::shared_ptr<BasePeftCacheManager> peftCacheManager,
+        executor::CapacitySchedulerPolicy capacitySchedulerPolicy, bool manyMicroBatches = false,
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE);
+
+    static CapacityScheduler make(SizeType32 maxNumRequests,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> kvCacheManager,
+        std::shared_ptr<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+        std::shared_ptr<BasePeftCacheManager> peftCacheManager,
+        executor::CapacitySchedulerPolicy capacitySchedulerPolicy, bool manyMicroBatches = false,
+        LlmRequestState noScheduleUntilState = LlmRequestState::kCONTEXT_INIT,
+        LlmRequestState noScheduleAfterState = LlmRequestState::kGENERATION_COMPLETE)
+    {
+        return CapacityScheduler{maxNumRequests, std::move(kvCacheManager), std::move(crossKvCacheManager),
+            std::move(peftCacheManager), capacitySchedulerPolicy, manyMicroBatches, noScheduleUntilState,
+            noScheduleAfterState};
+    }
+
+    [[nodiscard]] std::tuple<RequestVector, RequestVector> operator()(RequestList const& activeRequests) const;
+
+private:
+    std::variant<std::monostate, MaxRequestsScheduler, MaxUtilizationScheduler, GuaranteedNoEvictScheduler,
+        StaticBatchScheduler>
+        mScheduler;
+};
+
+} // namespace tensorrt_llm::batch_manager

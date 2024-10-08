@@ -47,14 +47,10 @@ public:
     // sink token lengths.
     TensorPtr sinkTokenLengths;
     TensorPtr cacheIndirection;
-    TensorPtr kvCacheBlockPoolPointers;  // [numPools, 2]
-    TensorPtr kvCacheBlockPoolMapping;   // [numLayers]
     TensorPtr kvCacheBlockOffsetsHost;   // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr kvCacheBlockOffsetsDevice; // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr runtimePerfKnobsHost;
 
-    TensorPtr crossKvCacheBlockPoolPointers = nullptr;
-    TensorPtr crossKvCacheBlockPoolMapping = nullptr;
     TensorPtr crossKvCacheBlockOffsetsHost = nullptr;
     TensorPtr crossKvCacheBlockOffsetsDevice = nullptr;
 
@@ -77,10 +73,6 @@ public:
 
     void reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
         runtime::TllmRuntime const& runtime, kv_cache_manager::KVCacheManager const& kvCacheManager);
-
-    void setKvPoolPointers(kv_cache_manager::KVCacheManager& kvCacheManager);
-
-    void setKvPoolMapping(kv_cache_manager::KVCacheManager& kvCacheManager);
 
     void getBuffers(TensorMap& inputBuffers) const;
 

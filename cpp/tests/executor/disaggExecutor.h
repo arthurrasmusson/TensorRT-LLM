@@ -191,6 +191,26 @@ public:
             mIsLeaderInstance = mWorldRank == mWorldRanksInstances.front();
         };
 
+        // bool needExecutor = (!mIsController) || (mIsController && mIsLeaderInstance);
+        bool needExecutor = (std::find(mWorldRanksInstances.begin(), mWorldRanksInstances.end(), worldRank)
+            != mWorldRanksInstances.end());
+        if (needExecutor)
+        {
+            ExecutorConfig executorConfigC = executorConfig;
+
+            auto parallelConfig = executorConfigC.getParallelConfig().value_or(ParallelConfig{});
+            std::vector<int> participantIds = mWorldRanksInstances;
+
+            parallelConfig.setParticipantIds(participantIds);
+            TLLM_CHECK(parallelConfig.getCommunicationMode() == tensorrt_llm::executor::CommunicationMode::kLEADER);
+            parallelConfig.setCommunicationType(tensorrt_llm::executor::CommunicationType::kMPI);
+            parallelConfig.setDeviceIds(mDeviceIdsThisInstance);
+            executorConfigC.setParallelConfig(parallelConfig);
+
+            mExecutor = std::make_unique<Executor>(modelPath, modelType, executorConfigC);
+            // mIsLeaderInstance = (COMM_SESSION.getRank() == 0);
+        }
+
         mIsController = false;
         uint32_t role = 0;
         if (mIsLeaderInstance)
@@ -212,22 +232,7 @@ public:
         mWorldComm.allgather(&role, mRolesPerRank.data(), 1, tensorrt_llm::mpi::MpiType::kUINT32);
 
         generatedRoles();
-        bool needExecutor = (!mIsController) || (mIsController && mIsLeaderInstance);
-        if (needExecutor)
-        {
-            ExecutorConfig executorConfigC = executorConfig;
 
-            auto parallelConfig = executorConfigC.getParallelConfig().value_or(ParallelConfig{});
-            std::vector<int> participantIds = mWorldRanksInstances;
-
-            parallelConfig.setParticipantIds(participantIds);
-            TLLM_CHECK(parallelConfig.getCommunicationMode() == tensorrt_llm::executor::CommunicationMode::kLEADER);
-            parallelConfig.setCommunicationType(tensorrt_llm::executor::CommunicationType::kMPI);
-            parallelConfig.setDeviceIds(mDeviceIdsThisInstance);
-            executorConfigC.setParallelConfig(parallelConfig);
-
-            mExecutor = std::make_unique<Executor>(modelPath, modelType, executorConfigC);
-        }
         if (mIsController)
         {
             mControllerSendThread = std::thread(&DisaggExecutor::ControllerSendThread, this);
@@ -522,7 +527,8 @@ private:
         // send request to context reqid
         // and send context pahse to generation
 
-        TLLM_CUDA_CHECK(cudaSetDevice(0));
+        TLLM_CUDA_CHECK(
+            cudaSetDevice(mDeviceIdsThisInstance.at(COMM_SESSION.getRank() % (mDeviceIdsThisInstance.size()))));
         tensorrt_llm::common::setThreadName("ControllerSendThread");
 
         while (!mShutdown)
@@ -574,7 +580,8 @@ private:
 
         // recv response from context and push to sendQueue
         // recv response from generation and push to responseQueue and notify awaitResponse
-        TLLM_CUDA_CHECK(cudaSetDevice(0));
+        TLLM_CUDA_CHECK(
+            cudaSetDevice(mDeviceIdsThisInstance.at(COMM_SESSION.getRank() % (mDeviceIdsThisInstance.size()))));
 
         while (!mShutdown)
         {
@@ -643,7 +650,8 @@ private:
     {
         tensorrt_llm::common::setThreadName("InstanceLeaderSendThread");
 
-        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceIdsThisInstance.front()));
+        TLLM_CUDA_CHECK(
+            cudaSetDevice(mDeviceIdsThisInstance.at(COMM_SESSION.getRank() % (mDeviceIdsThisInstance.size()))));
 
         // pop senQueue and send response to controller
 
@@ -683,7 +691,8 @@ private:
 #if ENABLE_MULTI_DEVICE
         tensorrt_llm::common::setThreadName("InstanceLeaderRecvThread");
 
-        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceIdsThisInstance.front()));
+        TLLM_CUDA_CHECK(
+            cudaSetDevice(mDeviceIdsThisInstance.at(COMM_SESSION.getRank() % (mDeviceIdsThisInstance.size()))));
 
         // recv request from controller and enqueRequest to executor
         while (!mShutdown)
@@ -753,7 +762,8 @@ private:
 
         tensorrt_llm::common::setThreadName("InstanceLeaderLoopThread");
 
-        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceIdsThisInstance.front()));
+        TLLM_CUDA_CHECK(
+            cudaSetDevice(mDeviceIdsThisInstance.at(COMM_SESSION.getRank() % (mDeviceIdsThisInstance.size()))));
 
         // loop awaitResponse and enqueue into sendQueue
         while (!mShutdown)

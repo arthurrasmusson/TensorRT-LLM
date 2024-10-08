@@ -12,7 +12,8 @@
 
 #pragma once
 
-#include "requestScheduler.h"
+#include "tensorrt_llm/batch_manager/capacityScheduler.h"
+#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -167,7 +168,8 @@ private:
     ReqIdsSet mInflightReqIds;
     ReqIdsSet mReqIdsToPause;
 
-    std::shared_ptr<batch_scheduler::RequestScheduler> mRequestScheduler;
+    tensorrt_llm::batch_manager::CapacityScheduler mCapacityScheduler;
+    tensorrt_llm::batch_manager::MicroBatchScheduler mMicroBatchScheduler;
 
     SizeType32 mHiddenSize;  // already divided by Tensor Parallelism
     SizeType32 mMaxInputLen; // WAR for max_input_len == max_seq_len at all circumstances

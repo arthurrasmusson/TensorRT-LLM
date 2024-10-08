@@ -65,9 +65,6 @@ public:
             && mDataType == other.mDataType;
     }
 
-private:
-    friend class tensorrt_llm::executor::Serialization;
-
     struct ModelConfig
     {
         std::vector<SizeType32> mNbKvHeadsPerLayer;
@@ -92,6 +89,23 @@ private:
         }
     };
 
+    [[nodiscard]] ModelConfig const& getModelConfig() const
+    {
+        return mModelConfig;
+    }
+
+    [[nodiscard]] ParallelConfig const& getParallelConfig() const
+    {
+        return mParallelConfig;
+    }
+
+    [[nodiscard]] nvinfer1::DataType const& getDataType() const
+    {
+        return mDataType;
+    }
+
+private:
+    friend class tensorrt_llm::executor::Serialization;
     ModelConfig mModelConfig;
     ParallelConfig mParallelConfig;
     nvinfer1::DataType mDataType;

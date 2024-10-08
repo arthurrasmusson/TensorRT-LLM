@@ -332,8 +332,7 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
         auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
         numContextLogits += draftLength;
 
-        auto const contextChunkSize
-            = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+        auto const contextChunkSize = llmReq->getContextChunkSize();
         numContextTokens += contextChunkSize + draftLength;
         if (maxContextLength < llmReq->mPromptLen)
             maxContextLength = llmReq->mPromptLen;
@@ -433,7 +432,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             for (auto const& llmReq : requests)
             {
                 auto const currentSequenceLen = llmReq->mPromptLen + llmReq->getMaxNumGeneratedTokens();
-                // Get position of the current sequence in the KV cache
+                // Get position of the current sequence in the decoder
                 auto const seqSlot = llmReq->mSeqSlot.value();
                 seqSlotIndices[batchIdx] = seqSlot;
                 fillValuesPtr[batchIdx] = currentSequenceLen;
@@ -472,8 +471,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             auto const draftLength = llmReq->getNumDraftTokens();
             auto const& positionIds = llmReq->getPositionIds();
 
-            auto const contextChunkSize
-                = llmReq->isFullContextRequest() ? llmReq->mPromptLen : llmReq->getContextChunkSize();
+            auto const contextChunkSize = llmReq->getContextChunkSize();
             auto const beginCompute = llmReq->getContextCurrentPosition();
             auto const endCompute = beginCompute + contextChunkSize;
             inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute, reqTokens.begin() + endCompute);
@@ -582,7 +580,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             SizeType32 constexpr requestType{1};
             std::fill_n(hostRequestTypes + numSequences, reqBeamWidth, requestType);
 
-            // Get position of the current sequence in the KV cache
+            // Get position of the current sequence in the decoder
             auto const seqSlot = llmReq->mSeqSlot.value();
 
             auto const draftLength = llmReq->getNumDraftTokens();
@@ -823,7 +821,7 @@ void RuntimeBuffers::fillIOMaps(
     }
     if (rnnStateBuffers)
     {
-        rnnStateBuffers->getBuffers(rnnStateManager, inputMap, modelConfig, worldConfig);
+        rnnStateBuffers->getBuffers(inputMap);
     }
 
     if (worldConfig.isLastPipelineParallelRank())

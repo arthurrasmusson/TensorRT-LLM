@@ -21,17 +21,28 @@ namespace tensorrt_llm::executor
 {
 
 // Constructor for ExternalDraftTokensConfig
-ExternalDraftTokensConfig::ExternalDraftTokensConfig(
-    VecTokens tokens, std::optional<Tensor> logits, std::optional<FloatType> const& acceptanceThreshold)
+ExternalDraftTokensConfig::ExternalDraftTokensConfig(VecTokens tokens, std::optional<Tensor> logits,
+    std::optional<FloatType> const& acceptanceThreshold, std::optional<bool> const& fastLogits)
     : mTokens(std::move(tokens))
     , mLogits(std::move(logits))
     , mAcceptanceThreshold(acceptanceThreshold)
+    , mFastLogits(fastLogits)
 {
     TLLM_CHECK(!mTokens.empty());
     if (mLogits)
     {
         TLLM_CHECK(mLogits.value().getShape().size() == 2);
-        TLLM_CHECK(mLogits.value().getShape()[0] == static_cast<SizeType32>(mTokens.size()));
+        if (mFastLogits.has_value() && mFastLogits.value())
+        {
+            // Fast logits path, expected [1, specDecFastLogitsInfo] shape
+            TLLM_CHECK(mLogits.value().getShape()[0] == 1);
+            TLLM_CHECK(
+                mLogits.value().getShape()[1] == (sizeof(SpeculativeDecodingFastLogitsInfo) + 1) / sizeof(float));
+        }
+        else
+        {
+            TLLM_CHECK(mLogits.value().getShape()[0] == static_cast<SizeType32>(mTokens.size()));
+        }
     }
     if (mAcceptanceThreshold)
     {

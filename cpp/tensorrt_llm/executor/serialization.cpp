@@ -132,8 +132,9 @@ ExternalDraftTokensConfig Serialization::deserializeExternalDraftTokensConfig(st
     auto tokens = su::deserialize<VecTokens>(is);
     auto logits = su::deserialize<std::optional<Tensor>>(is);
     auto acceptanceThreshold = su::deserialize<std::optional<FloatType>>(is);
+    auto fastLogits = su::deserialize<std::optional<bool>>(is);
 
-    return ExternalDraftTokensConfig{std::move(tokens), std::move(logits), acceptanceThreshold};
+    return ExternalDraftTokensConfig{std::move(tokens), std::move(logits), acceptanceThreshold, fastLogits};
 }
 
 void Serialization::serialize(ExternalDraftTokensConfig const& config, std::ostream& os)
@@ -141,6 +142,7 @@ void Serialization::serialize(ExternalDraftTokensConfig const& config, std::ostr
     su::serialize(config.mTokens, os);
     su::serialize(config.mLogits, os);
     su::serialize(config.mAcceptanceThreshold, os);
+    su::serialize(config.mFastLogits, os);
 }
 
 size_t Serialization::serializedSize(ExternalDraftTokensConfig const& config)
@@ -149,6 +151,7 @@ size_t Serialization::serializedSize(ExternalDraftTokensConfig const& config)
     totalSize += su::serializedSize(config.mTokens);
     totalSize += su::serializedSize(config.mLogits);
     totalSize += su::serializedSize(config.mAcceptanceThreshold);
+    totalSize += su::serializedSize(config.mFastLogits);
     return totalSize;
 }
 
@@ -561,6 +564,29 @@ size_t Serialization::serializedSize(Tensor const& tensor)
     return totalSize;
 }
 
+// SpeculativeDecodingFastLogitsInfo
+SpeculativeDecodingFastLogitsInfo Serialization::deserializeSpecDecFastLogitsInfo(std::istream& is)
+{
+    auto draftRequestId = su::deserialize<uint64_t>(is);
+    auto draftParticipantId = su::deserialize<int32_t>(is);
+
+    return SpeculativeDecodingFastLogitsInfo{draftRequestId, draftParticipantId};
+}
+
+void Serialization::serialize(SpeculativeDecodingFastLogitsInfo const& info, std::ostream& os)
+{
+    su::serialize(info.draftRequestId, os);
+    su::serialize(info.draftParticipantId, os);
+}
+
+size_t Serialization::serializedSize(SpeculativeDecodingFastLogitsInfo const& info)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(info.draftRequestId);
+    totalSize += su::serializedSize(info.draftParticipantId);
+    return totalSize;
+}
+
 // Result
 Result Serialization::deserializeResult(std::istream& is)
 {
@@ -571,6 +597,7 @@ Result Serialization::deserializeResult(std::istream& is)
     auto logProbs = su::deserialize<std::optional<std::vector<VecLogProbs>>>(is);
     auto contextLogits = su::deserialize<std::optional<Tensor>>(is);
     auto generationLogits = su::deserialize<std::optional<Tensor>>(is);
+    auto specDecFastLogitsInfo = su::deserialize<std::optional<SpeculativeDecodingFastLogitsInfo>>(is);
     auto encoderOutput = su::deserialize<std::optional<Tensor>>(is);
     auto finishReasons = su::deserialize<std::vector<FinishReason>>(is);
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
@@ -579,8 +606,9 @@ Result Serialization::deserializeResult(std::istream& is)
     auto isSequenceFinal = su::deserialize<bool>(is);
 
     return Result{isFinal, std::move(outputTokenIds), std::move(cumLogProbs), std::move(logProbs),
-        std::move(contextLogits), std::move(generationLogits), std::move(encoderOutput), std::move(finishReasons),
-        std::move(contextPhaseParams), decodingIter, sequenceIndex, isSequenceFinal};
+        std::move(contextLogits), std::move(generationLogits), std::move(specDecFastLogitsInfo),
+        std::move(encoderOutput), std::move(finishReasons), std::move(contextPhaseParams), decodingIter, sequenceIndex,
+        isSequenceFinal};
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -591,6 +619,7 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.logProbs, os);
     su::serialize(result.contextLogits, os);
     su::serialize(result.generationLogits, os);
+    su::serialize(result.specDecFastLogitsInfo, os);
     su::serialize(result.encoderOutput, os);
     su::serialize(result.finishReasons, os);
     su::serialize(result.contextPhaseParams, os);
@@ -607,6 +636,7 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.cumLogProbs);
     totalSize += su::serializedSize(result.logProbs);
     totalSize += su::serializedSize(result.contextLogits);
+    totalSize += su::serializedSize(result.specDecFastLogitsInfo);
     totalSize += su::serializedSize(result.generationLogits);
     totalSize += su::serializedSize(result.encoderOutput);
     totalSize += su::serializedSize(result.finishReasons);

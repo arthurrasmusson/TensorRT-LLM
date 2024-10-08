@@ -305,7 +305,7 @@ TEST(SerializeUtilsTest, Nested)
 TEST(SerializeUtilsTest, ResultResponse)
 {
     texec::Result res = texec::Result{false, {{1, 2, 3}}, texec::VecLogProbs{1.0, 2.0},
-        std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
+        std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         std::vector<texec::FinishReason>{texec::FinishReason::kLENGTH}, texec::ContextPhaseParams({9, 37}, 0), 3, 2,
         true};
     {
@@ -331,7 +331,7 @@ TEST(SerializeUtilsTest, VectorResponses)
         {
             texec::Result res = texec::Result{false, {{i + 1, i + 2, i + 3}}, texec::VecLogProbs{1.0, 2.0},
                 std::vector<texec::VecLogProbs>{{1.1, 2.2}, {3.3, 4.4}}, std::nullopt, std::nullopt, std::nullopt,
-                std::vector<texec::FinishReason>{texec::FinishReason::kEND_ID}};
+                std::nullopt, std::vector<texec::FinishReason>{texec::FinishReason::kEND_ID}};
             responsesIn.emplace_back(i, res);
         }
         else
@@ -547,6 +547,14 @@ TEST(SerializeUtilsTest, ContextPhaseParams)
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
+}
+
+TEST(SerializeUtilsTest, SpeculativeDecodingFastLogitsInfo)
+{
+    auto logitsInfo = texec::SpeculativeDecodingFastLogitsInfo{10, 20};
+    auto logitsInfo2 = serializeDeserialize(logitsInfo);
+    EXPECT_EQ(logitsInfo.draftRequestId, logitsInfo2.draftRequestId);
+    EXPECT_EQ(logitsInfo.draftParticipantId, logitsInfo2.draftParticipantId);
 }
 
 TEST(SerializeUtilsTest, ExecutorConfig)

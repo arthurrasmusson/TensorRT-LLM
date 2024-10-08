@@ -38,10 +38,12 @@ set(SRCS
     samplingConfig.cpp
     schedulerConfig.cpp
     serialization.cpp
+    speculativeDecodingConfig.cpp
     tensor.cpp
     types.cpp
     requestUtils.cpp
-    contextPhaseParams.cpp)
+    contextPhaseParams.cpp
+    cache_transmission/cacheConcatenate.cu)
 
 if(NOT WIN32)
   # additional warnings
@@ -66,3 +68,6 @@ set_property(TARGET ${EXECUTOR_STATIC_TARGET}
 set(TOP_LEVEL_DIR "${PROJECT_SOURCE_DIR}/..")
 target_compile_definitions(${EXECUTOR_STATIC_TARGET}
                            PUBLIC TOP_LEVEL_DIR="${TOP_LEVEL_DIR}")
+
+target_compile_options(${EXECUTOR_STATIC_TARGET}
+                       PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)

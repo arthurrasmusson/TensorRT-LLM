@@ -163,30 +163,6 @@ void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 ma
     }
 }
 
-void TransformerBuffers::setKvPoolPointers(kv_cache_manager::KVCacheManager& kvCacheManager)
-{
-    if (kvCacheManager.isCrossKv())
-    {
-        crossKvCacheBlockPoolPointers = kvCacheManager.getBlockPoolPointers();
-    }
-    else
-    {
-        kvCacheBlockPoolPointers = kvCacheManager.getBlockPoolPointers();
-    }
-}
-
-void TransformerBuffers::setKvPoolMapping(kv_cache_manager::KVCacheManager& kvCacheManager)
-{
-    if (kvCacheManager.isCrossKv())
-    {
-        crossKvCacheBlockPoolMapping = kvCacheManager.getLayerToPoolMapping();
-    }
-    else
-    {
-        kvCacheBlockPoolMapping = kvCacheManager.getLayerToPoolMapping();
-    }
-}
-
 void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -200,16 +176,12 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     inputBuffers.insert_or_assign("host_max_attention_window_sizes", maxAttentionWindows);
     inputBuffers.insert_or_assign("kv_cache_block_offsets", kvCacheBlockOffsetsDevice);
     inputBuffers.insert_or_assign("host_kv_cache_block_offsets", kvCacheBlockOffsetsHost);
-    inputBuffers.insert_or_assign("host_kv_cache_pool_pointers", kvCacheBlockPoolPointers);
-    inputBuffers.insert_or_assign("host_kv_cache_pool_mapping", kvCacheBlockPoolMapping);
     inputBuffers.insert_or_assign("host_runtime_perf_knobs", runtimePerfKnobsHost);
 
-    if (crossKvCacheBlockPoolPointers)
+    if (crossKvCacheBlockOffsetsHost)
     {
         inputBuffers.insert_or_assign("cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsDevice);
         inputBuffers.insert_or_assign("host_cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsHost);
-        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_pointers", crossKvCacheBlockPoolPointers);
-        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", crossKvCacheBlockPoolMapping);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -303,17 +275,16 @@ void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests
     {
         for (auto const& llmReq : requests)
         {
-            // Get position of the current sequence in the KV cache
-            auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const requestId = llmReq->mRequestId;
             auto const isContextRequest = llmReq->isContextInitState();
             auto const beamWidth = isContextRequest ? contextBeamWidth : llmReq->mSamplingConfig.beamWidth;
             auto const maxBeamBlockCount
-                = kvCacheManager->copyBlockOffsets(*kvCacheBlockOffsetsHost, numSequences, seqSlot, beamWidth);
+                = kvCacheManager->copyBlockOffsets(*kvCacheBlockOffsetsHost, numSequences, requestId);
             maxBlockCount = std::max(maxBlockCount, maxBeamBlockCount);
             if (crossKvCacheBlockOffsetsHost)
             {
-                auto const maxCrossBeamBlockCount = crossKvCacheManager->copyBlockOffsets(
-                    *crossKvCacheBlockOffsetsHost, numSequences, seqSlot, beamWidth);
+                auto const maxCrossBeamBlockCount
+                    = crossKvCacheManager->copyBlockOffsets(*crossKvCacheBlockOffsetsHost, numSequences, requestId);
                 maxCrossBlockCount = std::max(maxCrossBlockCount, maxCrossBeamBlockCount);
             }
             numSequences += beamWidth;

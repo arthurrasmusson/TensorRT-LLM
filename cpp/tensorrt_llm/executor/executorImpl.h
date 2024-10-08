@@ -117,6 +117,8 @@ public:
 
     bool canEnqueueRequests() const;
 
+    bool isParticipant() const;
+
 private:
     using RtTensorPtr = runtime::ITensor::SharedPtr;
     using CudaStreamPtr = runtime::BufferManager::CudaStreamPtr;
@@ -129,11 +131,10 @@ private:
         runtime::GptJsonConfig const& jsonConfig, ExecutorConfig const& executorConfig, bool isEncoder,
         std::optional<std::map<std::string, Tensor>> const& managedWeightsOpt);
 
-    static std::shared_ptr<Model> createModel(runtime::RawEngine const& rawEngine,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
-        ExecutorConfig const& executorConfig);
+    std::shared_ptr<Model> createModel(runtime::RawEngine const& rawEngine, runtime::ModelConfig const& modelConfig,
+        runtime::WorldConfig const& worldConfig, ExecutorConfig const& executorConfig);
 
-    static std::shared_ptr<Model> createEncoderModel(runtime::RawEngine const& rawEngine,
+    std::shared_ptr<Model> createEncoderModel(runtime::RawEngine const& rawEngine,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
         ExecutorConfig const& executorConfig);
 
@@ -302,6 +303,7 @@ private:
 
     int32_t mLeaderRank = -1;
     int32_t mOrchRank = 0;
+    int32_t mWorldRank = -1;
 
     MpiMessageQueue mSendQueue;
 

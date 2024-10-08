@@ -71,13 +71,18 @@ TrtEncoderModel::TrtEncoderModel(runtime::ModelConfig const& modelConfig, WorldC
     // mEncoderWaitEvents.resize(mNumMicroBatches);
 
     // set noScheduleUntilState to LlmRequestState::kENCODER_INIT for encoder model
-    auto PeftCacheManager = std::make_shared<NoOpPeftCacheManager>();
+    auto peftCacheManager = std::make_shared<NoOpPeftCacheManager>();
     // when null kv cache manager is given, request scheduler will use MaxRequests as capacity scheduler, i.e. no
-    // handling of maximizing utlization or pause/evict
+    // handling of maximizing utilization or pause/evict
     // TODO: finer control on encoder requests scheduling
-    mRequestScheduler = std::make_shared<batch_scheduler::RequestScheduler>(getMaxBatchSize(), mNumMicroBatches,
-        nullptr, nullptr, PeftCacheManager, optionalParams.schedulerConfig, mModelConfig.getMaxNumTokens(),
-        std::nullopt, mModelConfig.getMaxInputLen(), LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT);
+    auto maxBatchSize = getMaxBatchSize();
+    mCapacityScheduler = tensorrt_llm::batch_manager::CapacityScheduler{maxBatchSize * mNumMicroBatches, nullptr,
+        nullptr, std::move(peftCacheManager), optionalParams.schedulerConfig.getCapacitySchedulerPolicy(),
+        mNumMicroBatches > 1, LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT};
+
+    mMicroBatchScheduler
+        = tensorrt_llm::batch_manager::MicroBatchScheduler{maxBatchSize, mModelConfig.getMaxNumTokens(), std::nullopt,
+            mModelConfig.getMaxInputLen(), LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT};
 
     mHiddenSize = modelConfig.getHiddenSize();
 
@@ -264,9 +269,9 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
         // The scheduler will not include any requests that are already in flight for encoder models
         // TODO: add pause handling logic
         TLLM_LOG_DEBUG("Running ENCODER request scheduler");
-        RequestVector requestsToPause;
-        std::tie(currRequests.contextRequests, std::ignore, requestsToPause)
-            = mRequestScheduler->scheduleRequests(activeRequests, mInflightReqIds);
+
+        auto [fittingRequests, requestsToPause] = mCapacityScheduler(activeRequests);
+        std::tie(currRequests.contextRequests, std::ignore) = mMicroBatchScheduler(fittingRequests, mInflightReqIds);
 
         {
             NVTX3_SCOPED_RANGE(pauseRequestsFlaggedByScheduler);

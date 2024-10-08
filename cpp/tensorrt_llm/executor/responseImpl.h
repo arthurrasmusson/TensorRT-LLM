@@ -20,16 +20,18 @@ namespace tensorrt_llm::executor
 class Response::Impl
 {
 public:
-    Impl(IdType requestId, std::string errorMsg)
+    Impl(IdType requestId, std::string errorMsg, std::optional<IdType> clientId)
         : mRequestId(requestId)
         , mErrOrResult(std::move(errorMsg))
+        , mClientId(clientId)
     {
         TLLM_CHECK_WITH_INFO(!std::get<std::string>(mErrOrResult).empty(), "Error message should not be empty");
     }
 
-    Impl(IdType requestId, Result Result)
+    Impl(IdType requestId, Result Result, std::optional<IdType> clientId)
         : mRequestId(requestId)
         , mErrOrResult(std::move(Result))
+        , mClientId(clientId)
     {
     }
 
@@ -48,6 +50,11 @@ public:
     [[nodiscard]] IdType getRequestId() const
     {
         return mRequestId;
+    }
+
+    [[nodiscard]] std::optional<IdType> getClientId() const
+    {
+        return mClientId;
     }
 
     /// Could throw exception if no result is available
@@ -79,6 +86,7 @@ private:
     friend class Serialization;
     IdType mRequestId;
     std::variant<std::string, Result> mErrOrResult;
+    std::optional<IdType> mClientId = std::nullopt;
 };
 
 } // namespace tensorrt_llm::executor

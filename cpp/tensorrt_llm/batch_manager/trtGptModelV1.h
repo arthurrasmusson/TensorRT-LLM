@@ -12,8 +12,9 @@
 
 #pragma once
 
-#include "requestScheduler.h"
+#include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/runtime/generationInput.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -125,7 +126,8 @@ private:
         SizeType32 maxBatchSize, bool normalizeLogProbs);
 
     std::shared_ptr<runtime::GptSession> mSession;
-    std::shared_ptr<batch_scheduler::RequestScheduler> mRequestScheduler;
+    tensorrt_llm::batch_manager::CapacityScheduler mCapacityScheduler;
+    tensorrt_llm::batch_manager::MicroBatchScheduler mMicroBatchScheduler;
     std::shared_ptr<BasePeftCacheManager> mPeftCacheManager;
     IterationStatsV1 mLastIterationStatsV1;
     // Iteration counter used to distinguish debug output

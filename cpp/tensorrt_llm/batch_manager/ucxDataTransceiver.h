@@ -81,7 +81,6 @@ public:
     UcxDataSender(std::unique_ptr<UcxCommFactory>&& factory, executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, TFormatter formatter, uint16_t listenerPort = 0)
         : mFactory{std::move(factory)}
-        , mSelfCacheState{std::move(selfCacheState)}
         , mFormatter{std::move(formatter)}
     {
         mSelfState.setCommState(
@@ -90,9 +89,12 @@ public:
         mContext = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
         mWorker = mContext->createWorker();
         // Ensure the progress thread has CUDA context initialized
-        mWorker->setProgressThreadStartCallback(cudaFree, nullptr);
-        mWorker->startProgressThread();
+        int device;
+        TLLM_CUDA_CHECK(cudaGetDevice(&device));
 
+        mWorker->setProgressThreadStartCallback(
+            [device](void* arg) { TLLM_CUDA_CHECK(cudaSetDevice(device)); }, nullptr);
+        mWorker->startProgressThread();
         startListener(listenerPort);
     }
 
@@ -107,8 +109,13 @@ public:
             mIncomingRequests.pop_front();
         }
         auto info = comm->recvRequestInfo();
+
+        TLLM_CHECK_WITH_INFO(mFormatter->inquireSupport(
+                                 mSelfState.getCacheState().value(), info.getTransState().getCacheState().value()),
+            "Disagg server does not currently support these cacheState.");
         std::lock_guard<std::mutex> lk(mMtx);
         mRequestToComm.emplace(info.getRequestId(), std::move(comm));
+
         return info;
     }
 
@@ -122,7 +129,12 @@ public:
                 (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
             comm = it->second.get();
         }
-        (*mFormatter)(llmRequest, {comm});
+
+        // TODO: fake destCacheState
+
+        (*mFormatter)(llmRequest, {comm}, mSelfState.getCacheState().value(),
+            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value());
+
         {
             // For now, the connection will be dropped once the transfer is completed
             std::lock_guard<std::mutex> lk(mMtx);
@@ -138,6 +150,11 @@ public:
     void setCommState(executor::kv_cache::CommState const& commState) override
     {
         mSelfState.setCommState(commState);
+    }
+
+    [[nodiscard]] bool availableRelease(LlmRequest const& llmRequest)
+    {
+        return true;
     }
 
 private:
@@ -165,7 +182,6 @@ private:
     }
 
     std::unique_ptr<UcxCommFactory> mFactory;
-    executor::kv_cache::CacheState mSelfCacheState;
     TFormatter mFormatter;
 
     std::shared_ptr<ucxx::Context> mContext;
@@ -196,7 +212,11 @@ public:
         mContext = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
         mWorker = mContext->createWorker();
         // Ensure the progress thread has CUDA context initialized
-        mWorker->setProgressThreadStartCallback(cudaFree, nullptr);
+        int device;
+        TLLM_CUDA_CHECK(cudaGetDevice(&device));
+
+        mWorker->setProgressThreadStartCallback(
+            [device](void* arg) { TLLM_CUDA_CHECK(cudaSetDevice(device)); }, nullptr);
         mWorker->startProgressThread();
     }
 
@@ -207,16 +227,13 @@ public:
         auto const& contextState = llmRequest.getDataTransceiverState();
         auto const& socketState = contextState.getCommState().value().getSocketState();
         std::vector<SizeType32> targetRanks{};
-        if (contextState.getCacheState().has_value())
-        {
-            auto const& destCacheState = contextState.getCacheState().value();
-            targetRanks = mFormatter->getCounterparts(
-                mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState);
-        }
-        else
-        {
-            targetRanks.push_back(0);
-        }
+
+        auto const& destCacheState = contextState.getCacheState().value();
+
+        targetRanks = mFormatter->getCounterparts(
+            mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState);
+        TLLM_CHECK_WITH_INFO(mFormatter->inquireSupport(mSelfState.getCacheState().value(), destCacheState),
+            "Disagg server does not currently support these cacheState.");
         auto& socketComm = socketState.at(targetRanks[0]);
         auto comm = mFactory->create(mWorker->createEndpointFromHostname(socketComm.mIp, socketComm.mPort));
         RequestInfo info{requestId, mSelfState};
@@ -235,7 +252,12 @@ public:
                 (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
             comm = it->second.get();
         }
-        (*mFormatter)(llmRequest, {comm});
+        auto const& contextState = llmRequest.getDataTransceiverState();
+
+        auto const& destCacheState = contextState.getCacheState().value();
+
+        (*mFormatter)(llmRequest, {comm}, mSelfState.getCacheState().value(),
+            mSelfState.getCommState().value().getSelfIdx(), destCacheState);
         {
             // For now, the connection will be dropped once the transfer is completed
             std::lock_guard<std::mutex> lk(mMtx);
