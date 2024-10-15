@@ -162,8 +162,8 @@ private:
     std::vector<RequestWithId> getNewReqWithIds(
         SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
-    RequestList fetchNewRequests(SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive,
-        double& newActiveRequestsQueueLatencyMS);
+    std::tuple<Executor::Impl::RequestList, double> fetchNewRequests(
+        SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
     void forwardSync(RequestList& activeRequests);
 
@@ -174,10 +174,10 @@ private:
     void terminateActiveRequests(RequestList& activeRequests, std::string const& err);
 
     IterationStats getCurrentIterationStats(RequestList const& activeRequests, double iterLatencyMS,
-        double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
+        SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
 
     void appendCurrentIterStats(IterationStats&& currentIterStats);
-    void updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
+    void updateIterationStats(RequestList const& activeRequests, double iterLatencyMS, SizeType32 numNewActiveRequests,
         double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
 
     RequestStatsPerIteration getCurrentRequestStats(

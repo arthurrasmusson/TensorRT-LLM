@@ -991,6 +991,58 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
 }
 
+TEST_F(KVCacheManagerTest, KVCacheManagerPerRequestStatsTest)
+{
+    // tc::Logger::getLogger()->setLevel(tc::Logger::Level::DEBUG);
+
+    auto constexpr numLayers = 12;
+    auto constexpr numHeads = 6;
+    auto constexpr sizePerHead = 16;
+    auto constexpr tokensPerBlock = 4;
+    auto constexpr maxBlocksPerSeq = 4;
+    auto constexpr maxNumSequences = 8;
+    auto constexpr blocksInPrimaryPool = 16;
+    auto constexpr blocksInSecondaryPool = 0;
+    auto constexpr onboardBlocks = true;
+    auto const stream = std::make_shared<tr::CudaStream>();
+
+    auto constexpr beamWidth = 1;
+    SizeType32 constexpr maxNewTokens{0};
+    tr::SamplingConfig const samplingConfig{beamWidth};
+    bool constexpr isStreaming{false};
+
+    KVCacheManager kvCacheManager(numLayers, numHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
+        blocksInSecondaryPool, maxNumSequences, beamWidth, tokensPerBlock * maxBlocksPerSeq, 0, false, stream, true,
+        onboardBlocks);
+
+    auto inputTokens = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7, 8});
+    auto const inputLength = static_cast<SizeType32>(inputTokens->size());
+
+    LlmRequest::RequestIdType requestId{0};
+    auto llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
+
+    // Add the sequence to req0
+    EXPECT_NO_THROW(kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest0));
+
+    // After first addition, check allocations and reuses
+    auto numBlocks = tc::ceilDiv(inputLength, tokensPerBlock);
+    EXPECT_EQ(llmRequest0->getReusedBlocksPerRequest(), 0);
+    EXPECT_EQ(llmRequest0->getAllocTotalBlocksPerRequest(), numBlocks);
+    EXPECT_EQ(llmRequest0->getAllocNewBlocksPerRequest(), numBlocks);
+
+    EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest0));
+
+    requestId = 1;
+    auto llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming);
+
+    EXPECT_NO_THROW(kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest1));
+
+    auto const numSharedBlocks = inputLength / tokensPerBlock;
+    EXPECT_EQ(llmRequest1->getReusedBlocksPerRequest(), numSharedBlocks);
+    EXPECT_EQ(llmRequest1->getAllocTotalBlocksPerRequest(), numBlocks - numSharedBlocks);
+    EXPECT_EQ(llmRequest1->getAllocNewBlocksPerRequest(), numBlocks - numSharedBlocks);
+}
+
 TEST_P(KVCacheManagerTest, KVCacheManagerAllocationTest)
 {
     using DType = half;

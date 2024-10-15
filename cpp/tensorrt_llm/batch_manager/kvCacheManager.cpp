@@ -1077,6 +1077,11 @@ void KVCacheManager::addSequence(RequestIdType requestId, SizeType32 inputLength
     inputLength = std::min(inputLength, mMaxTokenNum);
     auto const numContextBlocks = tc::ceilDiv(inputLength, getTokensPerBlock());
 
+    // Get statistics for block allocations/reuse pre request.
+    SizeType32 numAllocTotalBlocksPreRequest = mBlockManager.getNumAllocTotalBlocks();
+    SizeType32 numAllocNewBlocksPreRequest = mBlockManager.getNumAllocNewBlocks();
+    SizeType32 numReusedBlocksPreRequest = mBlockManager.getNumReusedBlocks();
+
     if (!enableCyclicKvCache && mEnableBlockReuse)
     {
         mBlockManager.addSequence(sequence, inputLength, numContextBlocks, llmRequest);
@@ -1086,6 +1091,15 @@ void KVCacheManager::addSequence(RequestIdType requestId, SizeType32 inputLength
         mBlockManager.addSequence(sequence, numContextBlocks, unsharedBlockIdx);
     }
     cacheBlockOffsets(sequence);
+
+    if (llmRequest)
+    {
+        // Update statistics for block allocations/reuse per request.
+        llmRequest->updateAllocTotalBlocksPerRequest(
+            mBlockManager.getNumAllocTotalBlocks() - numAllocTotalBlocksPreRequest);
+        llmRequest->updateAllocNewBlocksPerRequest(mBlockManager.getNumAllocNewBlocks() - numAllocNewBlocksPreRequest);
+        llmRequest->updateReusedBlocksPerRequest(mBlockManager.getNumReusedBlocks() - numReusedBlocksPreRequest);
+    }
 }
 
 void KVCacheManager::storeContextBlocks(std::shared_ptr<LlmRequest> const& llmRequest)

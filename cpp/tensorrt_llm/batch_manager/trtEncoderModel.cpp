@@ -425,7 +425,8 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
 
     std::vector<TokenIdType> inputIdsHost;
     std::vector<SizeType32> positionIdsHost;
-    SizeType32 totalLength = 0;
+    SizeType32 totalOutputLength = 0;
+    SizeType32 totalInputLength = 0;
     std::vector<SizeType32> inputLengthsHost;
     std::vector<std::byte> inputFeaturesHost;
 
@@ -434,17 +435,13 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
 
     for (auto const& llmReq : requestList)
     {
-        SizeType32 length;
+        SizeType32 length = 0;
         if (mModelConfig.getModelName() == "EncoderModel")
         {
             auto const& reqTokens = *(llmReq->getEncoderTokens().value());
             length = reqTokens.size();
 
             inputIdsHost.insert(inputIdsHost.end(), reqTokens.begin(), reqTokens.end());
-            positionIdsHost.reserve(positionIdsHost.size() + length);
-            auto const newReqPosBegin = positionIdsHost.end();
-            positionIdsHost.resize(positionIdsHost.size() + length);
-            std::iota(newReqPosBegin, positionIdsHost.end(), 0);
             maxInputLengthHost = std::max(maxInputLengthHost, static_cast<SizeType32>(length));
         }
         else if (mModelConfig.getModelName() == "WhisperEncoder")
@@ -456,7 +453,13 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
             auto const srcPtr = reinterpret_cast<std::byte*>(reqFeatures->data());
             inputFeaturesHost.insert(inputFeaturesHost.end(), srcPtr, srcPtr + curFeatureBytes);
         }
-        totalLength += llmReq->getEncoderOutputLen();
+        positionIdsHost.reserve(positionIdsHost.size() + length);
+        auto const newReqPosBegin = positionIdsHost.end();
+        positionIdsHost.resize(positionIdsHost.size() + length);
+        std::iota(newReqPosBegin, positionIdsHost.end(), 0);
+
+        totalOutputLength += llmReq->getEncoderOutputLen();
+        totalInputLength += length;
         inputLengthsHost.push_back(length);
     }
 
@@ -474,9 +477,9 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
     }
 
     // engine outputs
-    rankOutput
-        = getBufferManager().gpu(ITensor::makeShape({totalLength, mHiddenSize * mWorldConfig.getTensorParallelism()}),
-            mModelConfig.getDataType());
+    rankOutput = getBufferManager().gpu(
+        ITensor::makeShape({totalOutputLength, mHiddenSize * mWorldConfig.getTensorParallelism()}),
+        mModelConfig.getDataType());
 
     if (mWorldConfig.isFirstPipelineParallelRank())
     {
@@ -484,9 +487,9 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
         {
             // Engine inputs
             TensorPtr inputIds
-                = getBufferManager().copyFrom(inputIdsHost, ITensor::makeShape({totalLength}), MemoryType::kGPU);
-            TensorPtr positionIds
-                = getBufferManager().copyFrom(positionIdsHost, ITensor::makeShape({totalLength}), MemoryType::kGPU);
+                = getBufferManager().copyFrom(inputIdsHost, ITensor::makeShape({totalInputLength}), MemoryType::kGPU);
+            TensorPtr positionIds = getBufferManager().copyFrom(
+                positionIdsHost, ITensor::makeShape({totalInputLength}), MemoryType::kGPU);
             inputTensors.emplace("input_ids", inputIds);
             inputTensors.emplace("position_ids", positionIds);
         }
@@ -495,17 +498,21 @@ void TrtEncoderModel::executeBatch(RequestVector const& requestList)
             auto inputFeaturesHostPtr = inputFeaturesHost.data();
             auto const featureDim = requestList.front()->getEncoderInputFeatures()->getShape().d[1];
             auto const dtype = requestList.front()->getEncoderInputFeatures()->getDataType();
-            TensorPtr inputFeatures = getBufferManager().gpu(ITensor::makeShape({totalLength, featureDim}), dtype);
+            TensorPtr inputFeatures = getBufferManager().gpu(ITensor::makeShape({totalInputLength, featureDim}), dtype);
             getBufferManager().copy(
                 reinterpret_cast<void const*>(inputFeaturesHostPtr), *inputFeatures, runtime::MemoryType::kCPU);
+            TensorPtr positionIds = getBufferManager().copyFrom(
+                positionIdsHost, ITensor::makeShape({totalOutputLength}), MemoryType::kGPU);
             inputTensors.emplace("input_features", inputFeatures);
+            inputTensors.emplace("position_ids", positionIds);
         }
     }
     else
     {
-        hiddenStatesInput = getBufferManager().gpu(
-            ITensor::makeShape({totalLength, mHiddenSize * mWorldConfig.getTensorParallelism()}),
-            mModelConfig.getDataType());
+        SizeType32 length = mModelConfig.getModelName() == "WhisperEncoder" ? totalOutputLength : totalInputLength;
+        hiddenStatesInput
+            = getBufferManager().gpu(ITensor::makeShape({length, mHiddenSize * mWorldConfig.getTensorParallelism()}),
+                mModelConfig.getDataType());
 
         inputTensors.emplace("hidden_states_input", hiddenStatesInput);
     }

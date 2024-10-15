@@ -468,6 +468,7 @@ TEST(SerializeUtilsTest, IterationStats)
     auto iter = texec::IterationType{10};
     auto iterLatencyMS = double{100};
     auto newActiveRequestsQueueLatencyMS = double{1000};
+    auto numNewActiveRequests = texec::SizeType32{10};
     auto numActiveRequests = texec::SizeType32{20};
     auto numQueuedRequests = texec::SizeType32{30};
     auto numCompletedRequests = texec::SizeType32{10};
@@ -481,8 +482,9 @@ TEST(SerializeUtilsTest, IterationStats)
     {
         {
             auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
-                numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage,
-                cpuMemUsage, pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats, ifbBatchingStats};
+                numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests,
+                gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats,
+                ifbBatchingStats};
 
             // serialize and deserialize using std::vector<char>
             {
@@ -507,8 +509,9 @@ TEST(SerializeUtilsTest, IterationStats)
                 std::vector<std::optional<texec::InflightBatchingStats>>{std::nullopt, ifbBatchingStats})
             {
                 auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
-                    numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage,
-                    cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats, ifbBatchStats};
+                    numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests,
+                    maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats,
+                    ifbBatchStats};
                 {
                     auto buffer = texec::Serialization::serialize(stats);
                     auto stats2 = texec::Serialization::deserializeIterationStats(buffer);

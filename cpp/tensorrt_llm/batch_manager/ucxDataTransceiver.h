@@ -39,6 +39,10 @@ public:
     explicit UcxComm(std::shared_ptr<ucxx::Endpoint> const& endpoint)
         : mEndpoint(endpoint)
     {
+        if (mEndpoint)
+        {
+            initializeEndpointTag();
+        }
     }
 
     virtual ~UcxComm() = default;
@@ -50,8 +54,25 @@ public:
     virtual void sendRequestInfo(RequestInfo const& info) const;
 
 private:
+    void initializeEndpointTag();
+    void setRequestTag(LlmRequest::RequestIdType const requestId);
+
     static constexpr ucxx::Tag kID_TAG{1};
     static constexpr ucxx::Tag kDATA_TAG{2};
+
+    // a send tag is defined as:
+    // | local port (16 bits) | remote port (16 bits) | truncated request id (16 bits) | UCXComm flags (16 bits) |
+    // a recv tag is defined as:
+    // | remote port (16 bits) | local port (16 bits) | truncated request id (16 bits) | UCXComm flags (16 bits) |
+    ucxx::Tag mSendTag{0};
+    ucxx::Tag mRecvTag{0};
+
+    // Set of bit map used to represent UCXComm flags
+    ucxx::Tag mInfoTag{1};
+
+    static constexpr ucxx::TagMask mEndpointMask{(((uint64_t) 1 << (32 + 1)) - 1) << 32};
+    static constexpr ucxx::TagMask mRequestIdMask{(((uint64_t) 1 << (16 + 1)) - 1) << 16};
+    static constexpr ucxx::TagMask mFlagMask{(((uint64_t) 1 << (16 + 1)) - 1)};
 
     mutable std::mutex mMtx;
     mutable std::condition_variable mCv;

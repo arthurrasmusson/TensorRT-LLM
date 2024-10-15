@@ -139,7 +139,14 @@ void EncoderBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     inputIds->reshape(ITensor::makeShape({encoderInputLen}));
     if (positionIds)
     {
-        positionIds->reshape(ITensor::makeShape({encoderInputLen}));
+        if (modelConfig.getModelName() == "WhisperEncoder")
+        {
+            positionIds->reshape(ITensor::makeShape({encoderOutputLen}));
+        }
+        else
+        {
+            positionIds->reshape(ITensor::makeShape({encoderInputLen}));
+        }
     }
     if (tokenTypeIds)
     {
@@ -195,31 +202,33 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
 
     for (auto const& llmReq : requests)
     {
-        SizeType32 const length = llmReq->getEncoderInputLen();
+        SizeType32 const inputLength = llmReq->getEncoderInputLen();
+        SizeType32 const outputLength = llmReq->getEncoderOutputLen();
         if (llmReq->getEncoderInputFeatures())
         {
             auto const& reqFeatures = llmReq->getEncoderInputFeatures(); // [length, featureDim]
             TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - request id = %d, input features length = %d",
-                llmReq->mRequestId, length);
-            manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, length));
-            offset += length;
+                llmReq->mRequestId, inputLength);
+            manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, inputLength));
+            offset += inputLength;
         }
         else
         {
             auto const& reqTokens = *llmReq->getEncoderTokens().value();
             inputIdsAll.insert(inputIdsAll.end(), reqTokens.begin(), reqTokens.end());
-            if (positionIds)
-            {
-                positionIdsAll.insert(
-                    positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
-            }
             if (tokenTypeIds)
             {
                 tokenTypeIdsAll.insert(
-                    tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + length);
+                    tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + inputLength);
             }
         }
-        inputLengthsAll.push_back(llmReq->getEncoderInputLen());
+        if (positionIds)
+        {
+            SizeType32 const length = modelConfig.getModelName() == "WhisperEncoder" ? outputLength : inputLength;
+            positionIdsAll.insert(
+                positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
+        }
+        inputLengthsAll.push_back(inputLength);
     }
 
     // copy inputs from host to device
@@ -228,15 +237,15 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
         if (requests.front()->getEncoderTokens())
         {
             manager.copy(inputIdsAll.data(), *inputIds);
-            if (positionIds)
-            {
-                manager.copy(positionIdsAll.data(), *positionIds);
-            }
             if (tokenTypeIds)
             {
                 manager.copy(tokenTypeIdsAll.data(), *tokenTypeIds);
             }
             manager.copy(maxInputLengthAll.data(), *maxInputLength);
+        }
+        if (positionIds)
+        {
+            manager.copy(positionIdsAll.data(), *positionIds);
         }
         manager.copy(inputLengthsAll.data(), *inputLengths);
     }
@@ -257,6 +266,7 @@ void EncoderBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     {
         inputMap.insert_or_assign("input_features", inputFeatures);
         inputMap.insert_or_assign("input_lengths", inputLengths);
+        inputMap.insert_or_assign("position_ids", positionIds);
     }
     else
     {

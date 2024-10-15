@@ -185,8 +185,13 @@ void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& model
         if (modelPathOpt.has_value())
         {
             rawEngine.setPath(modelPathOpt.value() / jsonConfig.engineFilename(worldConfig));
+            if (managedWeightsOpt.has_value())
+            {
+                TLLM_LOG_WARNING(
+                    "Executor::Impl::loadModel: managedWeightsOpt argument is ignored when loading engine from file.");
+            }
         }
-        if (managedWeightsOpt.has_value())
+        else if (managedWeightsOpt.has_value())
         {
             rawEngine.setManagedWeightsMap(managedWeightsOpt.value());
         }
@@ -1207,15 +1212,14 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     return reqWithIds;
 }
 
-Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiveRequests,
-    std::optional<PriorityType> lowestPriorityActive, double& newActiveRequestsQueueLatencyMS)
+std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests(
+    SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
     NVTX3_SCOPED_RANGE(fetchNewRequests);
     // If grab requests from queue, do exchange between ranks
     auto reqWithIds = getNewReqWithIds(numActiveRequests, lowestPriorityActive);
-
     RequestList newRequests;
-    newActiveRequestsQueueLatencyMS = 0;
+    double newActiveRequestsQueueLatencyMS{0.};
     for (auto& reqWithId : reqWithIds)
     {
         if (reqWithId.id == mTerminateReqId)
@@ -1370,7 +1374,7 @@ Executor::Impl::RequestList Executor::Impl::fetchNewRequests(SizeType32 numActiv
     }
     TLLM_LOG_DEBUG("num new requests fetched from queue: %d", newRequests.size());
 
-    return newRequests;
+    return {newRequests, newActiveRequestsQueueLatencyMS};
 }
 
 void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::string const& err)
@@ -1461,12 +1465,12 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
 }
 
 IterationStats Executor::Impl::getCurrentIterationStats(RequestList const& activeRequests, double iterLatencyMS,
-    double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
+    SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
 {
     IterationStats stats;
     // Timestamp
     stats.timestamp = tensorrt_llm::common::getCurrentTimestamp();
-
+    stats.numNewActiveRequests = numNewActiveRequests;
     stats.iterLatencyMS = iterLatencyMS;
     stats.newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatencyMS;
     // Active request count
@@ -1527,6 +1531,9 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.numGeneratedTokens = request->getMaxBeamNumTokens() - request->getOrigPromptLen();
         requestStats.avgNumDecodedTokensPerIter = request->getAvgDecodedTokensPerIter();
         includeDisServingStats(request, requestStats);
+        requestStats.allocTotalBlocksPerRequest = request->getAllocTotalBlocksPerRequest();
+        requestStats.allocNewBlocksPerRequest = request->getAllocNewBlocksPerRequest();
+        requestStats.reusedBlocksPerRequest = request->getReusedBlocksPerRequest();
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1541,6 +1548,9 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
             requestStats.contextPrefillPosition = 0;
             requestStats.numGeneratedTokens = 0;
             requestStats.avgNumDecodedTokensPerIter = 0;
+            requestStats.allocTotalBlocksPerRequest = 0;
+            requestStats.allocNewBlocksPerRequest = 0;
+            requestStats.reusedBlocksPerRequest = 0;
             requestStatsVec.emplace_back(requestStats);
         }
     }
@@ -1555,6 +1565,9 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.numGeneratedTokens = request->getMaxBeamNumTokens() - request->getOrigPromptLen();
         requestStats.avgNumDecodedTokensPerIter = request->getAvgDecodedTokensPerIter();
         includeDisServingStats(request, requestStats);
+        requestStats.allocTotalBlocksPerRequest = request->getAllocTotalBlocksPerRequest();
+        requestStats.allocNewBlocksPerRequest = request->getAllocNewBlocksPerRequest();
+        requestStats.reusedBlocksPerRequest = request->getReusedBlocksPerRequest();
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1576,13 +1589,12 @@ void Executor::Impl::appendCurrentIterStats(IterationStats&& currentIterStats)
 }
 
 void Executor::Impl::updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
-    double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
+    SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
 {
     if (mIterStatsMaxIterations > 0)
     {
         auto currentIterStats = getCurrentIterationStats(
-            activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS, numCompletedRequests);
-
+            activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS, numCompletedRequests);
         // Send the stats to the orchestrator
         if (mCommMode == CommunicationMode::kORCHESTRATOR && mIsLeader)
         {
@@ -1837,6 +1849,7 @@ void Executor::Impl::executionLoop()
         kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
 
     double iterLatencyMS{0}, newActiveRequestsQueueLatencyMS{0};
+    SizeType32 numNewActiveRequests{0};
     std::chrono::time_point<std::chrono::steady_clock> iterStart;
     std::chrono::time_point<std::chrono::steady_clock> iterEnd;
     RequestList activeRequests;
@@ -1880,10 +1893,10 @@ void Executor::Impl::executionLoop()
                 lowestPriority = activeRequests.back()->priority();
             }
 
-            auto newRequests
-                = fetchNewRequests(static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()),
-                    lowestPriority, newActiveRequestsQueueLatencyMS);
-
+            auto [newRequests, newActiveRequestsQueueLatency] = fetchNewRequests(
+                static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()), lowestPriority);
+            newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatency;
+            numNewActiveRequests = newRequests.size();
             for (auto const& newRequest : newRequests)
             {
                 insertRequestInOrder(activeRequests, newRequest);
@@ -1893,7 +1906,7 @@ void Executor::Impl::executionLoop()
         if (!activeRequests.empty() || !inTransmissionRequests.empty())
         {
             forwardAsync(activeRequests);
-            updateIterationStats(activeRequests, iterLatencyMS, newActiveRequestsQueueLatencyMS,
+            updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS,
                 static_cast<SizeType32>(finishedRequests.size()));
             updateRequestStats(activeRequests, finishedRequests);
             appendCurrentDebugTensors();

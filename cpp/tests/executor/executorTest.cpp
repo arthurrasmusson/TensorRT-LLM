@@ -1158,6 +1158,13 @@ TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
         EXPECT_EQ(stats.size(), 5);
         // only check numCompletedRequests in 4th iteration
         EXPECT_EQ(stats[3].numCompletedRequests, 1);
+        // 1st iteration shall record all 2 requests queueing time;
+        EXPECT_EQ(stats[0].numNewActiveRequests, 2);
+        // all rest iterations shall not return any queueing time;
+        for (int i = 1; i < stats.size(); ++i)
+        {
+            EXPECT_EQ(stats[i].numNewActiveRequests, 0);
+        }
     }
     else
     {
@@ -1165,6 +1172,8 @@ TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
         EXPECT_GT(stats.size(), 5);
         // 1st request's completion is at 4th iteration
         EXPECT_EQ(stats[3].numCompletedRequests, 1);
+        // 1st iteration record 1 request's queueing time;
+        EXPECT_EQ(stats[0].numNewActiveRequests, 1);
         // the iteration where 2nd request became active, queue latency must be > 0
         uint64_t currentIter = 0;
         for (auto const& stat : stats)
@@ -1179,6 +1188,8 @@ TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
             {
                 EXPECT_GT(currentIter, 0); // it must be after 1st iteration
                 EXPECT_GT(stat.newActiveRequestsQueueLatencyMS, 0);
+                // 2nd request record queueing time in this iteration
+                EXPECT_EQ(stat.numNewActiveRequests, 1);
                 break;
             }
             ++currentIter;

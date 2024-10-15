@@ -179,6 +179,79 @@ TEST_F(UcxCommTest, DeviceBufferSync)
     EXPECT_EQ(gotValue, expectedValue);
 }
 
+TEST_F(UcxCommTest, MultiPointIsolation)
+{
+    // This test is to ensure many to many communication is being handled properly.
+    // Due to UCX implementation, tagRecv and amRecv are receiving data on to UCX worker
+    // which is shared by all endpoints. This results in the case where one data transceiver
+    // is receiving data from multiple other transceivers, both sides must have agreed on
+    // how to demux the data in the UCX worker.
+
+    // setup: creating two sets of endpoints to mimic peer is trying to get data from two
+    // different source.
+    using ContextPair = std::pair<std::shared_ptr<ucxx::Listener>, std::promise<std::shared_ptr<ucxx::Endpoint>>>;
+    ContextPair context;
+    auto& listener = context.first;
+    auto& endpointPromise = context.second;
+
+    listener = mSelfWorker->createListener(
+        0,
+        [](ucp_conn_request_h conn_request, void* data)
+        {
+            auto context = reinterpret_cast<ContextPair*>(data);
+            context->second.set_value(context->first->createEndpointFromConnRequest(conn_request));
+        },
+        &context);
+
+    UcxComm peerComm0{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
+
+    auto endpointFuture0 = endpointPromise.get_future();
+    ASSERT_EQ(endpointFuture0.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    UcxComm selfComm0{endpointFuture0.get()};
+
+    context.second = std::promise<std::shared_ptr<ucxx::Endpoint>>();
+    UcxComm peerComm1{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
+
+    auto endpointFuture1 = endpointPromise.get_future();
+    ASSERT_EQ(endpointFuture1.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    UcxComm selfComm1{endpointFuture1.get()};
+
+    int32_t expectedValue0 = 234;
+    tr::HostBuffer sendBuffer0{sizeof(int32_t), nvinfer1::DataType::kINT32},
+        recvBuffer0{sizeof(int32_t), nvinfer1::DataType::kINT32};
+    *reinterpret_cast<int32_t*>(sendBuffer0.data()) = expectedValue0;
+
+    int32_t expectedValue1 = 777;
+    tr::HostBuffer sendBuffer1{sizeof(int32_t), nvinfer1::DataType::kINT32},
+        recvBuffer1{sizeof(int32_t), nvinfer1::DataType::kINT32};
+    *reinterpret_cast<int32_t*>(sendBuffer1.data()) = expectedValue1;
+
+    // comm1 send then comm0 send
+    auto sendFuture = std::async(std::launch::async,
+        [&]()
+        {
+            selfComm1.sendBuffer(sendBuffer1);
+            selfComm0.sendBuffer(sendBuffer0);
+        });
+
+    // comm0 recv then comm1 recv
+    auto recvFuture = std::async(std::launch::async,
+        [&]()
+        {
+            peerComm0.recvBuffer(recvBuffer0);
+            peerComm1.recvBuffer(recvBuffer1);
+        });
+    ASSERT_EQ(sendFuture.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(recvFuture.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    sendFuture.get();
+    recvFuture.get();
+
+    EXPECT_EQ(*reinterpret_cast<int32_t*>(recvBuffer0.data()), expectedValue0);
+    EXPECT_EQ(*reinterpret_cast<int32_t*>(recvBuffer1.data()), expectedValue1);
+}
+
+// [FIXME] request? Assumption that a set of endpoints is created for each request?
+
 // ---------------------------------------
 //          MockTransceiverTest
 // ---------------------------------------

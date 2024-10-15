@@ -60,7 +60,13 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     inputsIds->reshape(ITensor::makeShape({maxBatchTokens}));
     if (worldConfig.isPipelineParallel())
     {
-        auto const hiddenSize = modelConfig.getHiddenSize() * worldConfig.getTensorParallelism();
+        auto hiddenSize = modelConfig.getHiddenSize();
+
+        if (!(modelConfig.getPpReduceScatter() && !worldConfig.isFirstPipelineParallelRank()))
+        {
+            hiddenSize *= worldConfig.getTensorParallelism();
+        }
+
         auto const hiddenStatesShape = ITensor::makeShape({maxBatchTokens, hiddenSize});
         hiddenStates->reshape(hiddenStatesShape);
     }
@@ -758,7 +764,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
     if (worldConfig.isPipelineParallel())
     {
-        auto const hiddenSize = modelConfig.getHiddenSize() * worldConfig.getTensorParallelism();
+        auto hiddenSize = modelConfig.getHiddenSize();
+
+        if (!(modelConfig.getPpReduceScatter() && !worldConfig.isFirstPipelineParallelRank()))
+        {
+            hiddenSize *= worldConfig.getTensorParallelism();
+        }
         auto const hiddenStatesShape = ITensor::makeShape({totalInputSize, hiddenSize});
         hiddenStates->reshape(hiddenStatesShape);
     }

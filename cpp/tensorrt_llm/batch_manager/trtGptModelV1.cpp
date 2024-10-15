@@ -227,7 +227,6 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     sessionConfig.normalizeLogProbs = optionalParams.normalizeLogProbs;
     sessionConfig.gpuWeightsPercent = optionalParams.gpuWeightsPercent;
     sessionConfig.cudaGraphMode = true;
-    sessionConfig.enginePath = rawEngine.getPathOpt();
 
     mSession = std::make_shared<GptSession>(sessionConfig, modelConfig, worldConfig, rawEngine, logger);
 

@@ -1230,6 +1230,7 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto iter = su::deserialize<IterationType>(is);
     auto iterLatencyMS = su::deserialize<double>(is);
     auto newActiveRequestsQueueLatencyMS = su::deserialize<double>(is);
+    auto numNewActiveRequests = su::deserialize<SizeType32>(is);
     auto numActiveRequests = su::deserialize<SizeType32>(is);
     auto numQueuedRequests = su::deserialize<SizeType32>(is);
     auto numCompletedRequests = su::deserialize<SizeType32>(is);
@@ -1242,9 +1243,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto staticBatchingStats = su::deserialize<std::optional<StaticBatchingStats>>(is);
     auto inflightBatchingStats = su::deserialize<std::optional<InflightBatchingStats>>(is);
 
-    return IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS, numActiveRequests,
-        numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage,
-        kvCacheStats, crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
+    return IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS, numNewActiveRequests,
+        numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage, cpuMemUsage,
+        pinnedMemUsage, kvCacheStats, crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
 }
 
 IterationStats Serialization::deserializeIterationStats(std::vector<char>& buffer)
@@ -1264,6 +1265,7 @@ size_t Serialization::serializedSize(IterationStats const& iterStats)
     totalSize += su::serializedSize(iterStats.iter);
     totalSize += su::serializedSize(iterStats.iterLatencyMS);
     totalSize += su::serializedSize(iterStats.newActiveRequestsQueueLatencyMS);
+    totalSize += su::serializedSize(iterStats.numNewActiveRequests);
     totalSize += su::serializedSize(iterStats.numActiveRequests);
     totalSize += su::serializedSize(iterStats.numQueuedRequests);
     totalSize += su::serializedSize(iterStats.numCompletedRequests);
@@ -1285,6 +1287,7 @@ void Serialization::serialize(IterationStats const& iterStats, std::ostream& os)
     su::serialize(iterStats.iter, os);
     su::serialize(iterStats.iterLatencyMS, os);
     su::serialize(iterStats.newActiveRequestsQueueLatencyMS, os);
+    su::serialize(iterStats.numNewActiveRequests, os);
     su::serialize(iterStats.numActiveRequests, os);
     su::serialize(iterStats.numQueuedRequests, os);
     su::serialize(iterStats.numCompletedRequests, os);
