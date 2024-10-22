@@ -212,7 +212,7 @@ void TrtEncoderModel::rearrangeOutputs(ScheduledRequests const& scheduledRequest
 void TrtEncoderModel::forwardSync()
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(forwardSync);
+    NVTX3_SCOPED_RANGE_WITH_NAME(range, "TrtEncoderModel::forwardSync");
 
     auto const device = mWorldConfig.getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
@@ -257,6 +257,7 @@ void TrtEncoderModel::forwardSync()
 void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    NVTX3_SCOPED_RANGE_WITH_NAME(range, "TrtEncoderModel::ForwardAsync");
     auto const device = mWorldConfig.getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
 

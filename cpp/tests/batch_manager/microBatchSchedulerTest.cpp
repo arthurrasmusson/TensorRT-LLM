@@ -538,6 +538,59 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW4)
     }
 }
 
+TEST_F(MicroBatchSchedulerTest, DraftTokensMaxNumTokens)
+{
+    // This test checks that draft tokens will not cause maxNumTokens to be exceeded.
+    constexpr SizeType32 maxNumTokens = 4096;
+    constexpr SizeType32 maxBatchSize = 64;
+    constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+
+    mNumContexts = 1;
+    mContextRequests.resize(mNumContexts);
+
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(maxBatchSize, maxNumTokens);
+
+    constexpr int32_t maxNewTokens = 10;
+    constexpr int32_t promptLen = 1024;
+    constexpr int32_t draftLen = 17;
+
+    RequestVector activeRequests;
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 3, 1, draftLen));
+
+    for (int it = 0; it < 12; ++it)
+    {
+        RequestTable newRequests = forward(activeRequests);
+        if (it == 0)
+        {
+            // Due to draft tokens, only 3 requests can fit.
+            EXPECT_EQ(newRequests.size(), 3);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+        }
+        else if (it < 10)
+        {
+            EXPECT_EQ(newRequests.size(), 4);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+            EXPECT_NE(newRequests.find(3), newRequests.end());
+        }
+        else if (it == 10)
+        {
+            EXPECT_EQ(newRequests.size(), 1);
+            EXPECT_NE(newRequests.find(3), newRequests.end());
+        }
+        else if (it == 11)
+        {
+            EXPECT_EQ(newRequests.size(), 0);
+        }
+    }
+}
+
 class ContextChunkingTest : public MicroBatchSchedulerTest
 {
 protected:

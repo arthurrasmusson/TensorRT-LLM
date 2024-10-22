@@ -45,13 +45,16 @@ TEST(RequestWithIdTest, serializeDeserialize)
         ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
     request2.setEncoderInputFeatures(encoderInputFeatures);
 
-    auto request3 = Request({37, 19, 87, 29}, 4, false, SamplingConfig(1, 1, 0.9), OutputConfig(false, false));
-    request3.setNumReturnSequences(3);
+    auto samplingConfig3 = SamplingConfig(1, 1, 0.9);
+    samplingConfig3.setNumReturnSequences(3);
+    auto request3 = Request({37, 19, 87, 29}, 4, false, samplingConfig3, OutputConfig(false, false), 66, 99,
+        std::make_optional<std::vector<SizeType32>>({0, 1, 1, 2}), badWords2, stopWords2, embeddingBias,
+        ExternalDraftTokensConfig({7, 8, 9, 10}), std::nullopt, std::nullopt);
 
     std::vector<RequestWithId> reqWithIds;
     reqWithIds.emplace_back(RequestWithId{request1, 1});
     reqWithIds.emplace_back(RequestWithId{request2, 2});
-    reqWithIds.emplace_back(RequestWithId{request2, 3, {4, 5}});
+    reqWithIds.emplace_back(RequestWithId{request3, 3, {4, 5}});
 
     auto serialized = RequestWithId::serializeReqWithIds(reqWithIds);
     auto reqWithIdsOut = RequestWithId::deserializeReqWithIds(serialized);
@@ -65,13 +68,11 @@ TEST(RequestWithIdTest, serializeDeserialize)
 
         EXPECT_EQ(reqWithIdOut.id, reqWithId.id);
         EXPECT_EQ(reqWithIdOut.childReqIds, reqWithId.childReqIds);
-
         auto const& reqOut = reqWithIdOut.req;
         auto const& req = reqWithId.req;
         EXPECT_EQ(reqOut.getInputTokenIds(), req.getInputTokenIds());
         EXPECT_EQ(reqOut.getMaxTokens(), req.getMaxTokens());
         EXPECT_EQ(reqOut.getSamplingConfig(), req.getSamplingConfig());
-        EXPECT_EQ(reqOut.getNumReturnSequences(), req.getNumReturnSequences());
         EXPECT_EQ(reqOut.getStopWords(), req.getStopWords());
         EXPECT_EQ(reqOut.getExternalDraftTokensConfig().value().getTokens(),
             req.getExternalDraftTokensConfig().value().getTokens());

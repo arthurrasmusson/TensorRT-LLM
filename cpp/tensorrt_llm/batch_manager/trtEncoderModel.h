@@ -111,6 +111,8 @@ public:
     void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched) override;
     void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) override;
 
+    void resetIterationStats() override {}
+
 protected:
     std::shared_ptr<kv_cache_manager::KVCacheManager> getKVCacheManager() override
     {

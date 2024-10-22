@@ -163,6 +163,12 @@ std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::
     return reqWithIds;
 }
 
+SizeType32 getNumChildRequests(Request const& request)
+{
+    auto samplingConfig = request.getSamplingConfig();
+    return samplingConfig.getBeamWidth() > 1 ? 0 : samplingConfig.getNumReturnSequences().value_or(1) - 1;
+}
+
 void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& modelPathOpt,
     std::optional<BufferView> const& engineBufferOpt, runtime::GptJsonConfig const& jsonConfig,
     ExecutorConfig const& executorConfig, bool isEncoder,
@@ -306,6 +312,7 @@ Executor::Impl::Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr
 
 void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
 {
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     mShutdown = false;
     mShutdownCalled = false;
     mIterStatsMaxIterations = executorConfig.getIterStatsMaxIterations();
@@ -367,6 +374,7 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     }
 
     mEnableBlockReuse = executorConfig.getKvCacheConfig().getEnableBlockReuse();
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 std::shared_ptr<Model> Executor::Impl::createModel(runtime::RawEngine const& rawEngine,
@@ -748,11 +756,11 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
             ids.emplace_back(generateReqId());
 
             std::vector<IdType> childReqIds;
-            auto numReturnSequences = req.getNumReturnSequences();
-            if (numReturnSequences > 1)
+            auto numChildRequests = getNumChildRequests(req);
+            if (numChildRequests > 0)
             {
-                childReqIds.reserve(numReturnSequences - 1);
-                for (int seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
+                childReqIds.reserve(numChildRequests);
+                for (int childId = 0; childId < numChildRequests; childId++)
                 {
                     childReqIds.emplace_back(generateReqId());
                 }
@@ -774,7 +782,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
                 auto totalRequestSize = 0;
                 for (auto&& reqWithId : requestWithIds)
                 {
-                    totalRequestSize += reqWithId.req.getNumReturnSequences();
+                    totalRequestSize += (getNumChildRequests(reqWithId.req) + 1);
                 }
 
                 if (maxQueueSize > 0 && mQueuedRequests.size() + totalRequestSize > static_cast<size_t>(maxQueueSize))
@@ -1074,6 +1082,7 @@ bool Executor::Impl::isParticipant() const
 std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const& worldConfig = mModel->getWorldConfig();
     SizeType32 numMicroBatches = mRequestWithIdWaitThreads.size();
 
@@ -1087,7 +1096,8 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
         requestWithIdWaitThread->join();
         requestWithIdWaitThread.reset(nullptr);
     }
-
+    auto originalDevice = tensorrt_llm::common::getDevice();
+    cudaSetDevice(worldConfig.getDevice());
     std::vector<RequestWithId> reqWithIds;
     if (mIsLeader)
     {
@@ -1116,7 +1126,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
 
                 for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests;)
                 {
-                    req += mQueuedRequests.front().req.getNumReturnSequences();
+                    req += (getNumChildRequests(mQueuedRequests.front().req) + 1);
                     if (req > maxNewRequests)
                     {
                         break;
@@ -1209,6 +1219,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
                 = std::make_unique<std::thread>([handle = std::move(reqWithIdAsyncSndHdl)]() {});
         }
     }
+    cudaSetDevice(originalDevice);
     return reqWithIds;
 }
 
@@ -1244,7 +1255,7 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
 
             auto newLlmReq = std::make_shared<batch_manager::LlmRequest>(
                 reqWithId.id, std::move(reqWithId.req), logitsPostProcessor, applyLogitsPostProcessorBatched);
-            auto numReturnSequences = newLlmReq->getNumReturnSequences();
+            auto numReturnSequences = newLlmReq->getNumSubRequests();
 
             if (numReturnSequences > 1)
             {
@@ -1401,6 +1412,7 @@ void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::s
 
 void Executor::Impl::forwardSync(RequestList& activeRequests)
 {
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     try
     {
         if (mEncoderModel)
@@ -1414,6 +1426,7 @@ void Executor::Impl::forwardSync(RequestList& activeRequests)
         std::string const err = std::string("Encountered an error in forwardSync function: ") + e.what();
         terminateActiveRequests(activeRequests, err);
     }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 // The function is used to change the state of a request to context_init from encoder_init for enc-dec model whose
@@ -1591,6 +1604,7 @@ void Executor::Impl::appendCurrentIterStats(IterationStats&& currentIterStats)
 void Executor::Impl::updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
     SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
 {
+    NVTX3_SCOPED_RANGE(updateIterationStats);
     if (mIterStatsMaxIterations > 0)
     {
         auto currentIterStats = getCurrentIterationStats(
@@ -1612,6 +1626,7 @@ void Executor::Impl::updateIterationStats(RequestList const& activeRequests, dou
 
 void Executor::Impl::updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests)
 {
+    NVTX3_SCOPED_RANGE(updateRequestStats);
     if (mRequestStatsMaxIterations > 0)
     {
         // Add current iteration request stats
@@ -1639,6 +1654,7 @@ void Executor::Impl::appendCurrentDebugTensors()
 
 void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
 {
+    NVTX3_SCOPED_RANGE(terminateCancelledRequests);
     auto const broadcastCancelledRequests = [this, &activeRequests]
     {
         auto const& commSession = COMM_SESSION;
@@ -1770,6 +1786,7 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
 
 void Executor::Impl::terminateContextFinishedRequests(RequestList& inTransmissionRequests)
 {
+    NVTX3_SCOPED_RANGE(terminateContextFinishedRequests);
     for (auto it = inTransmissionRequests.begin(); it != inTransmissionRequests.end();)
     {
         auto req = *it;
@@ -1843,20 +1860,22 @@ Executor::Impl::RequestList Executor::Impl::populateNewResponses(
 
 void Executor::Impl::executionLoop()
 {
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     tensorrt_llm::common::setThreadName("executionLoop");
 
     auto const [profileIterIdxs, stopIterIdxs] = tensorrt_llm::common::populateIterationIndexes(
         kPROFILE_START_STOP_ENV_VAR_NAME, kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME);
 
-    double iterLatencyMS{0}, newActiveRequestsQueueLatencyMS{0};
     SizeType32 numNewActiveRequests{0};
     std::chrono::time_point<std::chrono::steady_clock> iterStart;
     std::chrono::time_point<std::chrono::steady_clock> iterEnd;
+    bool firstIteration{true};
     RequestList activeRequests;
     RequestList inTransmissionRequests;
     bool runCancelReqEpilogue = false;
     while (!mShutdown || !activeRequests.empty())
     {
+        double iterLatencyMS{0.0}, newActiveRequestsQueueLatencyMS{0.0};
         auto const iterCounter = mModel->getIterCounter();
         auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
         auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
@@ -1893,10 +1912,25 @@ void Executor::Impl::executionLoop()
                 lowestPriority = activeRequests.back()->priority();
             }
 
+            // When there are no active or inflight requests, we need to update the stats before calling
+            // fetchNewRequests to make sure that the stats are reported accurately.
+            if (static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()) == 0 && !firstIteration)
+            {
+                mModel->resetIterationStats();
+                updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests,
+                    newActiveRequestsQueueLatencyMS, static_cast<SizeType32>(finishedRequests.size()));
+                updateRequestStats(activeRequests, finishedRequests);
+            }
             auto [newRequests, newActiveRequestsQueueLatency] = fetchNewRequests(
                 static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()), lowestPriority);
             newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatency;
             numNewActiveRequests = newRequests.size();
+
+            if (firstIteration)
+            {
+                firstIteration = false;
+            }
+
             for (auto const& newRequest : newRequests)
             {
                 insertRequestInOrder(activeRequests, newRequest);
@@ -1939,6 +1973,7 @@ void Executor::Impl::executionLoop()
             waitThread.reset(nullptr);
         }
     }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void Executor::Impl::enqueueTerminateRequest()

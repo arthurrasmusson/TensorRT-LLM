@@ -10,6 +10,20 @@
  * its affiliates is strictly prohibited.
  */
 
+#define UCX_WRAPPER_LIB_NAME "tensorrt_llm_ucx_wrapper"
+
+#if defined(_WIN32)
+#include <windows.h>
+#define dllOpen(name) LoadLibrary(name ".dll")
+#define dllClose(handle) FreeLibrary(static_cast<HMODULE>(handle))
+#define dllGetSym(handle, name) static_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), name))
+#else // For non-Windows platforms
+#include <dlfcn.h>
+#define dllOpen(name) dlopen("lib" name ".so", RTLD_LAZY)
+#define dllClose(handle) dlclose(handle)
+#define dllGetSym(handle, name) dlsym(handle, name)
+#endif // defined(_WIN32)
+
 #include "cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
@@ -20,12 +34,11 @@
 #include <cstddef>
 #include <numeric>
 #include <unordered_set>
-#if ENABLE_UCX
-#include "ucxDataTransceiver.h"
-#endif
 
 namespace tensorrt_llm::batch_manager
 {
+
+std::mutex CacheTransceiver::mDllMutex;
 
 CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManager, CommType commType,
     runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
@@ -58,12 +71,29 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
     }
     else if (mCommType == CommType::UCX)
     {
-
-#if ENABLE_UCX
+        {
+            std::lock_guard<std::mutex> lock(mDllMutex);
+            mWrapperLibHandle = dllOpen(UCX_WRAPPER_LIB_NAME);
+            TLLM_CHECK_WITH_INFO(mWrapperLibHandle != nullptr, "UCX wrapper library is not open correctly.");
+            auto load_sym = [](void* handle, char const* name)
+            {
+                void* ret = dllGetSym(handle, name);
+                TLLM_CHECK_WITH_INFO(ret != nullptr,
+                    "Unable to load UCX wrapper library symbol, possible cause is that TensorRT-LLM library is not "
+                    "built with UCX support, please rebuild in UCX-enabled environment.");
+                return ret;
+            };
+            std::unique_ptr<DataResponder> (*makeUcxCacheResponder)(
+                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::KVCacheManager*);
+            std::unique_ptr<DataRequester> (*makeUcxCacheRequester)(
+                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::KVCacheManager*);
+            *(void**) (&makeUcxCacheResponder) = load_sym(mWrapperLibHandle, "makeUcxCacheResponder");
+            *(void**) (&makeUcxCacheRequester) = load_sym(mWrapperLibHandle, "makeUcxCacheRequester");
+            mDataResponder = makeUcxCacheResponder(*mCacheState, worldConfig.getRank(), cacheManager);
+            mDataRequester = makeUcxCacheRequester(*mCacheState, worldConfig.getRank(), cacheManager);
+        }
         namespace su = tensorrt_llm::executor::serialize_utils;
 
-        mDataResponder = makeUcxCacheResponder(*mCacheState, worldConfig.getRank(), cacheManager);
-        mDataRequester = makeUcxCacheRequester(*mCacheState, worldConfig.getRank(), cacheManager);
         if (mMpiGroupComm->getSize() > 1)
         {
             // updata
@@ -103,16 +133,21 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
             executor::kv_cache::CommState allCommState{socketStates, worldConfig.getRank()};
             mDataResponder->setCommState(std::move(allCommState));
         }
-
-#else
-        TLLM_THROW("To use UCX, the ENABLE_UCX option must be enabled during code building.");
-#endif
     }
     else
     {
         TLLM_THROW("Unsupported communication type.");
     }
     initializeCommState();
+}
+
+CacheTransceiver::~CacheTransceiver()
+{
+    if (mWrapperLibHandle)
+    {
+        std::lock_guard<std::mutex> lock(mDllMutex);
+        dllClose(mWrapperLibHandle);
+    }
 }
 
 void CacheTransceiver::initializeCommState()

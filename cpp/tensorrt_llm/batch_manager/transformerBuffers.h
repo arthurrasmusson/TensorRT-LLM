@@ -51,8 +51,25 @@ public:
     TensorPtr kvCacheBlockOffsetsDevice; // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr runtimePerfKnobsHost;
 
+    // Cross attention buffers
+    TensorPtr crossKvCacheBlockPoolPointers = nullptr;
+    TensorPtr crossKvCacheBlockPoolMapping = nullptr;
     TensorPtr crossKvCacheBlockOffsetsHost = nullptr;
     TensorPtr crossKvCacheBlockOffsetsDevice = nullptr;
+    TensorPtr crossAttentionMaskCopySrcOffsets = nullptr; // [maxNumRequest] pinned memory.
+    TensorPtr crossAttentionMaskCopyDstOffsets = nullptr; // [maxNumRequest] pinned memory.
+    TensorPtr crossAttentionMaskCopySizes = nullptr;      // [maxNumRequest] pinned memory.
+    TensorPtr crossAttentionMaskDevice = nullptr;         // [maxBatchSize, maxInputLengthInBatch, maxEncoderOutputLen]
+    // See more details in tensorrt_llm/kernels/contextFusedMultiHeadAttention/fmhaPackedMask.cu.
+    // The attention packed mask for FMHA where each bit represents one mask.
+    TensorPtr crossAttentionPackedMaskDevice
+        = nullptr; // [maxBatchSize, maxInputLengthInBatch, roundUp(maxEncoderOutputLen, 32)]
+    // The number of cumulative Q sequence lengths in the mask input, which is used to get mask offsets for different
+    // requests.
+    TensorPtr crossAttentionCuQSeqLensDevice = nullptr; // [maxBatchSize + 1]
+    // The number of cumulative Q sequence lengths in the packed mask, which is used to get mask offsets for different
+    // requests.
+    TensorPtr crossAttentionPackedMaskCuMaskRowsDevice = nullptr; // [maxBatchSize + 1]
 
     TensorPtr cacheIndirBatchedCopySrcOffsets;
     TensorPtr cacheIndirBatchedCopyDstOffsets;
@@ -69,7 +86,7 @@ public:
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
 
-    void reshape(SizeType32 numSequences);
+    void reshape(SizeType32 numSequences, SizeType32 numInputTokens);
 
     void reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
         runtime::TllmRuntime const& runtime, kv_cache_manager::KVCacheManager const& kvCacheManager);
@@ -94,6 +111,16 @@ public:
 
     void copyCacheIndirection(RequestVector const& genRequests, TensorPtr const& decoderCacheIndirectionOutput,
         runtime::TllmRuntime const& runtime);
+
+    void copyCrossAttentionMasks(RequestVector const& contextRequests, RequestVector const& genRequests,
+        TensorPtr const& decoderContextLengthsDevice, TensorPtr const& encoderInputLengths,
+        SizeType32 maxDecoderContextLength, SizeType32 maxEncoderInputLengthInBatch,
+        runtime::TllmRuntime const& runtime);
+
+private:
+    SizeType32 maxInputLen;
+    SizeType32 maxEncoderOutputLen;
+    SizeType32 maxNumTokens;
 };
 
 } // namespace tensorrt_llm::batch_manager

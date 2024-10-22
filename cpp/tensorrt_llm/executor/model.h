@@ -50,6 +50,9 @@ public:
 
     virtual void updatePeftCache(LlmRequestPtr const& llmRequest) = 0;
 
+    /// @brief Reset the iteration stats when there are no inflight requests
+    virtual void resetIterationStats() = 0;
+
     [[nodiscard]] virtual SizeType32 getMaxNumSequences() const = 0;
     [[nodiscard]] virtual SizeType32 getMaxInputLen() const = 0;
     [[nodiscard]] virtual SizeType32 getHiddenSize() const = 0;

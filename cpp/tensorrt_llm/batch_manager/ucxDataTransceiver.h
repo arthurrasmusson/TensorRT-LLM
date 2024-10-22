@@ -159,6 +159,12 @@ public:
         {
             // For now, the connection will be dropped once the transfer is completed
             std::lock_guard<std::mutex> lk(mMtx);
+            {
+                // [WAR] Releasing endpoint soon after tagSend results in hanging,
+                // postponing release at the moment to avoid that.
+                auto it = mRequestToComm.find(llmRequest.mRequestId);
+                reapFinishedComm(std::move(it->second));
+            }
             mRequestToComm.erase(llmRequest.mRequestId);
         }
     }
@@ -202,6 +208,25 @@ private:
         mRequestCv.notify_all();
     }
 
+    void reapFinishedComm(std::unique_ptr<UcxComm>&& comm)
+    {
+        // this WAR function assumes 'mMtx' is being held
+        auto now = std::chrono::steady_clock::now();
+        if (comm != nullptr)
+        {
+            mReapingComm.emplace_back(now, std::move(comm));
+        }
+        while (!mReapingComm.empty())
+        {
+            auto timePassed = std::chrono::duration<double, std::milli>(now - mReapingComm.front().first).count();
+            if (timePassed < 200)
+            {
+                break;
+            }
+            mReapingComm.pop_front();
+        }
+    }
+
     std::unique_ptr<UcxCommFactory> mFactory;
     TFormatter mFormatter;
 
@@ -214,6 +239,8 @@ private:
     std::deque<std::unique_ptr<UcxComm>> mIncomingRequests;
     std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
     executor::DataTransceiverState mSelfState;
+
+    std::deque<std::pair<decltype(std::chrono::steady_clock::now()), std::unique_ptr<UcxComm>>> mReapingComm;
 };
 
 template <typename TDataConfig>
@@ -298,10 +325,27 @@ private:
     std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
 };
 
-std::unique_ptr<DataResponder> makeUcxCacheResponder(executor::kv_cache::CacheState selfCacheState,
-    SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
+// specify C linkage to allow isolating UCX features into separate shared library
+// and dynamically loading on demand. This is to allow running fully-featured
+// TRTLLM in UCX-less environment.
+// This WAR results in additional UCX wrapper shared library to be shipped with TRTLLM,
+// a cleaner resolution is to dynamically load the underlying UCX library, but it requires
+// modification to implement the data responder against UCX directly, instead of UCXX
+// (a C++ wrapper of UCX picked to simplify implementation). Implementing against UCXX
+// adds one layer of indirection and makes dynamically loading the below functions a simpler WAR.
+#if __cplusplus
+extern "C"
+{
+#endif
 
-std::unique_ptr<DataRequester> makeUcxCacheRequester(executor::kv_cache::CacheState selfCacheState,
-    SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
+    std::unique_ptr<DataResponder> makeUcxCacheResponder(executor::kv_cache::CacheState selfCacheState,
+        SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
+
+    std::unique_ptr<DataRequester> makeUcxCacheRequester(executor::kv_cache::CacheState selfCacheState,
+        SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
+
+#if __cplusplus
+}
+#endif
 
 } // namespace tensorrt_llm::batch_manager

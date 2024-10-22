@@ -343,7 +343,7 @@ void TrtGptModelInflightBatching::setupSpeculativeDecodingModule(executor::Decod
         SizeType32 maxDraftTokens, maxDraftPathLen;
         std::tie(std::ignore, std::ignore, maxDraftTokens, maxDraftPathLen)
             = maxLookaheadConfig.calculateSpeculativeResource();
-        TLLM_CHECK(maxDraftTokens <= mModelConfig.getMaxDecodingDraftTokens());
+        TLLM_CHECK(maxDraftTokens == mModelConfig.getMaxDecodingDraftTokens());
         mModelConfig.getSpeculativeDecodingModulePtr()->setMaxDraftTokens(maxDraftTokens);
         mModelConfig.getSpeculativeDecodingModulePtr()->setMaxDraftPathLen(maxDraftPathLen);
 
@@ -692,7 +692,7 @@ TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fill
 void TrtGptModelInflightBatching::forwardSync()
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(forwardSync);
+    NVTX3_SCOPED_RANGE_WITH_NAME(range, "TrtGptModelInflightBatching::forwardSync");
 
     auto const device = mWorldConfig.getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
@@ -809,10 +809,15 @@ void TrtGptModelInflightBatching::storeContextBlocks(std::shared_ptr<LlmRequest>
     }
 }
 
+void TrtGptModelInflightBatching::resetIterationStats()
+{
+    mLastIterationStatsIFB = IterationStatsIFB{mMicroBatchId};
+}
+
 void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(ModelForwardAsync);
+    NVTX3_SCOPED_RANGE_WITH_NAME(range, "TrtGptModelInflightBatching::ForwardAsync");
 
     auto const device = mWorldConfig.getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
@@ -896,7 +901,6 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                                                                              : DecoderFinishedEventPtr();
 
             mLastIterationStatsIFB = fillIterationStats(currRequests, requestsToPause);
-
             for (auto const& requests : {currRequests.contextRequests, currRequests.generationRequests})
             {
                 for (auto const& llmReq : requests)
@@ -1334,6 +1338,7 @@ RequestVector TrtGptModelInflightBatching::scheduleDistGenInitRequests(RequestLi
 
 void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& activeRequests)
 {
+    NVTX3_SCOPED_RANGE(prepareDistGenInitRequests);
     auto newGenReqs = scheduleDistGenInitRequests(activeRequests);
 
     for (auto& newGenReq : newGenReqs)
@@ -1469,7 +1474,9 @@ void TrtGptModelInflightBatching::executeStep(
     RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(executeStep);
+    NVTX3_SCOPED_RANGE_WITH_NAME(range,
+        "executeStep: " + std::to_string(contextRequests.size()) + " ctx reqs, "
+            + std::to_string(generationRequests.size()) + " gen reqs");
 
     auto [optProfileId, inputMap, outputMap] = prepareBuffers(contextRequests, generationRequests, bufferId);
 
@@ -2065,14 +2072,14 @@ void TrtGptModelInflightBatching::copyCacheIndirectionFromOutputsToInputs(
     NVTX3_SCOPED_RANGE(copyCacheIndirectionFromOutputsToInputs);
 
     auto& genRuntimeBuffers = *mBuffers.at(genBufferId);
-    auto* srcOffsetsPtr = bufferCast<SizeType32>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopySrcOffsets);
-    auto* dstOffsetsPtr = bufferCast<SizeType32>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopyDstOffsets);
-    auto* copySizesPtr = bufferCast<SizeType32>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopySizes);
+    auto* srcOffsetsPtr = bufferCast<SizeType64>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopySrcOffsets);
+    auto* dstOffsetsPtr = bufferCast<SizeType64>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopyDstOffsets);
+    auto* copySizesPtr = bufferCast<SizeType64>(*genRuntimeBuffers.cacheIndirDecoderIOBatchedCopySizes);
 
     auto const& cacheIndirShape = mDecoderBuffers->cacheIndirectionOutput->getShape();
 
     SizeType32 batchIdx{0};
-    SizeType32 maxCopySize{0};
+    SizeType64 maxCopySize{0};
     auto& manager = mRuntime->getBufferManager();
     for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
     {
@@ -2081,7 +2088,7 @@ void TrtGptModelInflightBatching::copyCacheIndirectionFromOutputsToInputs(
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
             auto const seqSlot = llmReq->mSeqSlot.value();
 
-            auto const copySize = static_cast<SizeType32>(cacheIndirShape.d[2]) * reqBeamWidth;
+            auto const copySize = static_cast<SizeType64>(cacheIndirShape.d[2]) * reqBeamWidth;
             srcOffsetsPtr[batchIdx] = seqSlot * copySize;
             dstOffsetsPtr[batchIdx] = seqSlot * copySize;
             copySizesPtr[batchIdx] = copySize;

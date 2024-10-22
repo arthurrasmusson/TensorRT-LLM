@@ -54,7 +54,7 @@ std::vector<RequestWithId> tensorrt_llm::executor::RequestWithId::deserializeReq
     auto numReq = su::deserialize<size_t>(istream);
     for (size_t req = 0; req < numReq; ++req)
     {
-        auto const id = su::deserialize<size_t>(istream);
+        auto const id = su::deserialize<IdType>(istream);
         auto const request = Serialization::deserializeRequest(istream);
         auto const childReqIds = su::deserialize<std::vector<IdType>>(istream);
         reqWithIds.emplace_back(RequestWithId{request, id, childReqIds});

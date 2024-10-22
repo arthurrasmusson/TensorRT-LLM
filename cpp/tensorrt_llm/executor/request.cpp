@@ -28,13 +28,14 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
     std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
     std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
-    std::optional<SizeType32> encoderOutputLength, SizeType32 numReturnSequences)
+    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
+    SizeType32 numReturnSequences)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
         returnAllGeneratedTokens, priority, type, std::move(contextPhaseParams), std::move(encoderInputFeatures),
-        encoderOutputLength, numReturnSequences))
+        encoderOutputLength, crossAttentionMask, numReturnSequences))
 {
 }
 
@@ -184,9 +185,17 @@ std::optional<SizeType32> Request::getEncoderOutputLength() const
     return mImpl->getEncoderOutputLength();
 }
 
+std::optional<Tensor> Request::getCrossAttentionMask() const
+{
+    return mImpl->getCrossAttentionMask();
+}
+
 SizeType32 Request::getNumReturnSequences() const
 {
-    return mImpl->getNumReturnSequences();
+    TLLM_LOG_WARNING(
+        "'Request.getNumReturnSequences' will be deprecated. Please directly use "
+        "'SamplingConfig.getNumReturnSequences' instead.");
+    return mImpl->getSamplingConfig().getNumReturnSequences().value_or(1);
 }
 
 void Request::setStreaming(bool streaming)
@@ -299,9 +308,17 @@ void Request::setEncoderOutputLength(SizeType32 encoderOutputLength)
     return mImpl->setEncoderOutputLength(encoderOutputLength);
 }
 
+void Request::setCrossAttentionMask(Tensor crossAttentionMask)
+{
+    return mImpl->setCrossAttentionMask(crossAttentionMask);
+}
+
 void Request::setNumReturnSequences(SizeType32 numReturnSequences)
 {
-    return mImpl->setNumReturnSequences(numReturnSequences);
+    TLLM_LOG_WARNING(
+        "'Request.setNumReturnSequences' will be deprecated. Please directly use "
+        "'SamplingConfig.setNumReturnSequences' instead.");
+    mImpl->getSamplingConfig().setNumReturnSequences(numReturnSequences);
 }
 
 } // namespace tensorrt_llm::executor

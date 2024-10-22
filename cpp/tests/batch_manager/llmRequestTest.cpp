@@ -50,7 +50,7 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getTokens().size(), 1);
         EXPECT_EQ(llmReq.getTokens().at(0), inputTokens);
         EXPECT_EQ(llmReq.mMaxNewTokens, maxNewTokens);
-        EXPECT_EQ(llmReq.getNumReturnSequences(), execReq.getNumReturnSequences());
+        EXPECT_EQ(llmReq.mSamplingConfig.numReturnSequences, execReq.getSamplingConfig().getNumReturnSequences());
         EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
         EXPECT_EQ(llmReq.getMaxSentTokenLen(), inputTokens.size());
         EXPECT_EQ(llmReq.mState, tb::LlmRequestState::kCONTEXT_INIT);
@@ -429,9 +429,10 @@ TEST_F(LlmRequestTest, testCreateRequests)
     SizeType32 vocabSize{32};
     nvinfer1::DataType dtype{nvinfer1::DataType::kHALF};
 
-    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, tr::SamplingConfig(1), false);
-    llmReq.mSamplingConfig.randomSeed = std::vector<texec::RandomSeedType>{7};
+    tr::SamplingConfig samplingConfig(1);
+    samplingConfig.randomSeed = std::vector<texec::RandomSeedType>{7};
 
+    tb::LlmRequest llmReq(requestId, maxNewTokens, inputTokens, samplingConfig, false);
     try
     {
         auto childReq = llmReq.createChildRequest(1837);
@@ -442,12 +443,13 @@ TEST_F(LlmRequestTest, testCreateRequests)
         EXPECT_THAT(e.what(), testing::HasSubstr("Cannot create child requests more than"));
     }
 
-    llmReq.setNumReturnSequences(3);
+    samplingConfig.numReturnSequences = 3;
+    tb::LlmRequest llmReq2(requestId, maxNewTokens, inputTokens, samplingConfig, false);
 
-    auto childReq1 = llmReq.createChildRequest(78);
+    auto childReq1 = llmReq2.createChildRequest(78);
 
     {
-        EXPECT_EQ(llmReq.getChildRequests().size(), 1);
+        EXPECT_EQ(llmReq2.getChildRequests().size(), 1);
         EXPECT_EQ(childReq1->mRequestId, 78);
         EXPECT_EQ(childReq1->getTokens().at(0), *inputTokens);
         EXPECT_EQ(childReq1->getNumTokens(0), llmReq.getNumTokens(0));
@@ -455,19 +457,19 @@ TEST_F(LlmRequestTest, testCreateRequests)
         EXPECT_EQ(childReq1->mMaxNewTokens, llmReq.mMaxNewTokens);
         EXPECT_EQ(childReq1->mState, llmReq.mState);
         EXPECT_EQ(childReq1->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{8});
-        EXPECT_EQ(llmReq.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
+        EXPECT_EQ(llmReq2.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
         EXPECT_FALSE(childReq1->mSeqSlot);
     }
 
     {
-        auto childReq2 = llmReq.createChildRequest(79);
-        auto childRequests = llmReq.getChildRequests();
+        auto childReq2 = llmReq2.createChildRequest(79);
+        auto childRequests = llmReq2.getChildRequests();
         EXPECT_EQ(childRequests.size(), 2);
         EXPECT_EQ(childRequests.at(0), childReq1);
         EXPECT_EQ(childRequests.at(1), childReq2);
         EXPECT_EQ(childReq2->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{9});
         EXPECT_EQ(childReq1->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{8});
-        EXPECT_EQ(llmReq.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
+        EXPECT_EQ(llmReq2.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
     }
 }
 
@@ -517,9 +519,19 @@ TEST_P(ParamTest, createResponse)
     SizeType32 maxNewTokens(66);
     tb::LlmRequest::RequestIdType requestId{77};
 
+    tr::SamplingConfig samplingConfig(beamWidth);
+    // numReturnSequences = nullopt, otherwise.
+    if (beamWidth == 1 || numReturnSequences < beamWidth)
+    {
+        samplingConfig.numReturnSequences = numReturnSequences;
+    }
+    auto numReturnBeams = samplingConfig.getNumReturnBeams();
+    // Expect one sequence per request in beam search.
+    auto numSequences = beamWidth > 1 ? 1 : numReturnSequences;
+
     std::vector<std::shared_ptr<tb::LlmRequest>> llmRequests;
-    llmRequests.emplace_back(std::make_shared<tb::LlmRequest>(
-        requestId, maxNewTokens, inputTokens, tr::SamplingConfig(beamWidth), streaming));
+    llmRequests.emplace_back(
+        std::make_shared<tb::LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, streaming));
 
     {
         auto llmReq = llmRequests.at(0);
@@ -531,9 +543,9 @@ TEST_P(ParamTest, createResponse)
             return;
         }
         llmReq->setReturnAllGeneratedTokens(returnAllGeneratedTokens);
-        llmReq->setNumReturnSequences(numReturnSequences);
     }
 
+    if (beamWidth == 1)
     {
         auto llmReq = llmRequests.at(0);
         for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
@@ -553,30 +565,30 @@ TEST_P(ParamTest, createResponse)
     }
 
     SizeType32 constexpr numIterations{5};
-    std::vector<texec::TokenIdType> newTokens(numReturnSequences);
+    std::vector<texec::TokenIdType> newTokens(numSequences);
     std::iota(newTokens.begin(), newTokens.end(), 1);
 
-    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
+    for (auto seqIdx = 0; seqIdx < numSequences; seqIdx++)
     {
         auto llmReq = llmRequests.at(seqIdx);
         for (int i = 0; i < numIterations - 1; ++i)
         {
             for (int j = 0; j < tokensPerIteration; ++j)
             {
-                llmReq->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
+                llmReq->addNewTokens(VecTokens(numReturnBeams, newTokens.at(seqIdx)));
             }
 
             llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
             auto response = llmReq->createResponse();
             EXPECT_TRUE(streaming == response.has_value());
 
-            for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+            for (int beamIdx = 0; beamIdx < numReturnBeams; ++beamIdx)
             {
                 if (streaming)
                 {
                     EXPECT_EQ(response.value().getRequestId(), requestId);
                     auto result = response.value().getResult();
-                    EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
+                    EXPECT_EQ(result.outputTokenIds.size(), numReturnBeams);
                     auto const& beamTokens = result.outputTokenIds.at(beamIdx);
                     if (returnAllGeneratedTokens)
                     {
@@ -600,11 +612,11 @@ TEST_P(ParamTest, createResponse)
         }
     }
 
-    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
+    for (auto seqIdx = 0; seqIdx < numSequences; seqIdx++)
     {
         for (int j = 0; j < tokensPerIteration; ++j)
         {
-            llmRequests.at(seqIdx)->addNewTokens(VecTokens(beamWidth, newTokens.at(seqIdx)));
+            llmRequests.at(seqIdx)->addNewTokens(VecTokens(numReturnBeams, newTokens.at(seqIdx)));
         }
     }
 
@@ -612,7 +624,7 @@ TEST_P(ParamTest, createResponse)
 
     auto const numNewTokens = numIterations * tokensPerIteration;
 
-    for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
+    for (auto seqIdx = 0; seqIdx < numSequences; seqIdx++)
     {
         auto llmReq = llmRequests.at(seqIdx);
         auto response = llmReq->createResponse();
@@ -630,15 +642,15 @@ TEST_P(ParamTest, createResponse)
         EXPECT_EQ(response.value().getRequestId(), requestId);
 
         auto result = response.value().getResult();
-        EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
+        EXPECT_EQ(result.outputTokenIds.size(), numReturnBeams);
 
         // Only the first sequence has finished.
         EXPECT_EQ(result.isSequenceFinal, seqIdx == 0) << "seqIdx " << seqIdx;
-        EXPECT_EQ(result.isFinal, numReturnSequences == 1) << "seqIdx " << seqIdx;
+        EXPECT_EQ(result.isFinal, numSequences == 1) << "seqIdx " << seqIdx;
 
         auto newToken = newTokens.at(seqIdx);
 
-        for (int beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+        for (int beamIdx = 0; beamIdx < numReturnBeams; ++beamIdx)
         {
             auto const& beamTokens = result.outputTokenIds.at(beamIdx);
 
@@ -678,9 +690,9 @@ TEST_P(ParamTest, createResponse)
         }
     }
 
-    if (numReturnSequences > 1)
+    if (numSequences > 1)
     {
-        for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
+        for (auto seqIdx = 1; seqIdx < numSequences; seqIdx++)
         {
             auto llmReq = llmRequests.at(seqIdx);
             for (int j = 0; j < tokensPerIteration; ++j)
@@ -690,7 +702,7 @@ TEST_P(ParamTest, createResponse)
             llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
         }
 
-        for (auto seqIdx = 1; seqIdx < numReturnSequences; seqIdx++)
+        for (auto seqIdx = 1; seqIdx < numSequences; seqIdx++)
         {
             auto response = llmRequests.at(seqIdx)->createResponse();
             EXPECT_TRUE(response) << "seqIdx " << seqIdx;

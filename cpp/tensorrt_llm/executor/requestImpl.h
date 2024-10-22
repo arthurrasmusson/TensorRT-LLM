@@ -37,7 +37,7 @@ public:
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
         PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
         std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
-        SizeType32 numReturnSequences)
+        std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -62,6 +62,7 @@ public:
         , mContextPhaseParams(contextPhaseParams)
         , mEncoderInputFeatures(encoderInputFeatures)
         , mEncoderOutputLength(encoderOutputLength)
+        , mCrossAttentionMask(crossAttentionMask)
         , mNumReturnSequences(numReturnSequences)
     {
         validate();
@@ -196,14 +197,22 @@ public:
         return mEncoderInputFeatures;
     }
 
+    std::optional<Tensor> getCrossAttentionMask() const
+    {
+        return mCrossAttentionMask;
+    }
+
     std::optional<SizeType32> getEncoderOutputLength() const
     {
         return mEncoderOutputLength;
     }
 
-    SizeType32 getNumReturnSequences() const
+    std::optional<SizeType32> getNumReturnSequences() const
     {
-        return mNumReturnSequences;
+        TLLM_LOG_WARNING(
+            "The 'getNumReturnSequences' method in the Request class is deprecated and will be removed in a future "
+            "release. Please use 'getNumReturnSequences' directly from the 'SamplingConfig' object.");
+        return mSamplingConfig.getNumReturnSequences();
     }
 
     void setStreaming(bool streaming)
@@ -311,6 +320,11 @@ public:
         mEncoderInputFeatures = encoderInputFeatures;
     }
 
+    void setCrossAttentionMask(Tensor crossAttentionMask)
+    {
+        mCrossAttentionMask = crossAttentionMask;
+    }
+
     void setEncoderOutputLength(SizeType32 encoderOutputLength)
     {
         mEncoderOutputLength = encoderOutputLength;
@@ -318,7 +332,11 @@ public:
 
     void setNumReturnSequences(SizeType32 numReturnSequences)
     {
+        TLLM_LOG_WARNING(
+            "The 'setNumReturnSequences' method in the Request class is deprecated and will be removed in a future "
+            "release. Please use 'setNumReturnSequences' directly on the 'SamplingConfig' object.");
         mNumReturnSequences = numReturnSequences;
+        mSamplingConfig.setNumReturnSequences(numReturnSequences);
     }
 
 private:
@@ -326,7 +344,15 @@ private:
     {
         TLLM_CHECK(!mInputTokenIds.empty());
         TLLM_CHECK(mMaxNewTokens > 0);
-        TLLM_CHECK(mNumReturnSequences > 0);
+
+        // Show warning message unless mNumReturnSequences is the default value.
+        if (mNumReturnSequences > 1)
+        {
+            TLLM_LOG_WARNING(
+                "The 'numReturnSequences' in the Request class is deprecated and will be removed in a future release. "
+                "Please set the number of return sequences directly in 'SamplingConfig'.");
+            mSamplingConfig.setNumReturnSequences(mNumReturnSequences);
+        }
     }
 
     static std::optional<Tensor> checkEmbeddingBias(std::optional<Tensor> bias)
@@ -366,6 +392,7 @@ private:
         lambda(mContextPhaseParams);
         lambda(mEncoderInputFeatures);
         lambda(mEncoderOutputLength);
+        lambda(mCrossAttentionMask);
         lambda(mNumReturnSequences);
     }
 
@@ -393,6 +420,7 @@ private:
     std::optional<ContextPhaseParams> mContextPhaseParams;
     std::optional<Tensor> mEncoderInputFeatures;
     std::optional<SizeType32> mEncoderOutputLength;
+    std::optional<Tensor> mCrossAttentionMask;
     SizeType32 mNumReturnSequences;
 };
 

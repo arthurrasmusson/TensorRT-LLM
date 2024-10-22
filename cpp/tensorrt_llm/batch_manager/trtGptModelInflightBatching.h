@@ -163,6 +163,8 @@ public:
 
     RequestVector scheduleDistGenInitRequests(RequestList const& activeRequests);
 
+    void resetIterationStats() override;
+
 private:
     [[nodiscard]] SizeType32 getContextBufferId() const
     {

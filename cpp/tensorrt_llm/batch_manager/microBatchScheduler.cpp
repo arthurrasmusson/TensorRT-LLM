@@ -244,7 +244,8 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
             if (!mCtxChunkConfig) // skip chunking
             {
                 constexpr SizeType32 beam{0};
-                reqNumTokens = llmReq->getNumTokens(beam);
+                reqNumTokens
+                    = llmReq->getNumTokens(beam) + (llmReq->hasDraftTokens() ? llmReq->getNumDraftTokens() : 0);
                 TLLM_CHECK_WITH_INFO(!mMaxContextLength || reqNumTokens <= mMaxContextLength.value(),
                     "The number of context tokens (%d) exceeds the limit value (%d)", reqNumTokens,
                     mMaxContextLength.value());

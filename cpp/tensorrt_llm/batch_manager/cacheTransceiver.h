@@ -36,6 +36,8 @@ public:
     CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManager, CommType commType,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
+    ~CacheTransceiver();
+
     void respondAndSendAsync(LlmRequest* llmRequest);
 
     void requestAndReceiveSync(LlmRequest* llmRequest);
@@ -55,6 +57,11 @@ private:
     std::shared_ptr<mpi::MpiComm> mMpiGroupTensorParaComm, mMpiGroupPipeParaComm;
     executor::kv_cache::CommState const* mCommState;
     std::unique_ptr<executor::kv_cache::CacheState> mCacheState;
+
+    // library handle to the communicator related features,
+    // this is used to defer dependency resolution until needed.
+    static std::mutex mDllMutex;
+    void* mWrapperLibHandle{nullptr};
 };
 
 } // namespace tensorrt_llm::batch_manager

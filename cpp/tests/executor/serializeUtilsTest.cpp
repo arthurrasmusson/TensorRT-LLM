@@ -258,6 +258,16 @@ TEST(SerializeUtilsTest, SamplingConfig)
         texec::SamplingConfig val(2);
         testSerializeDeserialize(val);
     }
+    {
+        texec::SamplingConfig val(4);
+        val.setNumReturnSequences(3);
+        testSerializeDeserialize(val);
+    }
+    {
+        texec::SamplingConfig val(1);
+        val.setNumReturnSequences(3);
+        testSerializeDeserialize(val);
+    }
 }
 
 TEST(SerializeUtilsTest, Nested)

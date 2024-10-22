@@ -123,7 +123,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 
     if (transformerBuffers)
     {
-        transformerBuffers->reshape(numSequences);
+        transformerBuffers->reshape(numSequences, numContextTokens + numGenTokens);
     }
 
     if (rnnStateBuffers)
@@ -225,17 +225,17 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     sortedSeqSlots = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
     cacheIndirDecoderIOBatchedCopySrcOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     cacheIndirDecoderIOBatchedCopyDstOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     cacheIndirDecoderIOBatchedCopySizes
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     mCacheIndirDecoderIOBatchedCopySrcOffsetsSliceDevice
-        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     mCacheIndirDecoderIOBatchedCopyDstOffsetsSliceDevice
-        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     mCacheIndirDecoderIOBatchedCopyCopySizesDevice
-        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
 
     // Pre-allocate buffer for saving generation logits for model w/o draft tokens
     if (modelConfig.computeGenerationLogits()
@@ -708,12 +708,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         positionIdsHost.insert(positionIdsHost.end(), positionIdsHostRow2.begin(), positionIdsHostRow2.end());
     }
 
-    if (transformerBuffers && kvCacheManagerPtr)
-    {
-        transformerBuffers->copyKvBlockOffsets(
-            contextRequests, genRequests, kvCacheManagerPtr, crossKvCacheManagerPtr, runtime);
-    }
-
     if (modelConfig.useCrossAttention())
     {
         encoderBuffers->fill(contextRequests, genRequests, manager);
@@ -751,6 +745,18 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             rnnStateBuffers->copySlotMappingH2D(runtime);
         }
+    }
+
+    if (transformerBuffers && kvCacheManagerPtr)
+    {
+        transformerBuffers->copyKvBlockOffsets(
+            contextRequests, genRequests, kvCacheManagerPtr, crossKvCacheManagerPtr, runtime);
+    }
+
+    if (modelConfig.useCrossAttention())
+    {
+        transformerBuffers->copyCrossAttentionMasks(contextRequests, genRequests, contextLengthsDevice,
+            encoderBuffers->inputLengths, maxContextLength, encoderBuffers->getMaxInputLengthInBatch(), runtime);
     }
 
     if (pastKeyValueLengthsPtr)

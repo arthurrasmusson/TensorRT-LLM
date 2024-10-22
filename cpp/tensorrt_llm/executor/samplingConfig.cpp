@@ -25,7 +25,8 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
     std::optional<SizeType32> const& minTokens, std::optional<FloatType> const& beamSearchDiversityRate,
     std::optional<FloatType> const& repetitionPenalty, std::optional<FloatType> const& presencePenalty,
     std::optional<FloatType> const& frequencyPenalty, std::optional<FloatType> const& lengthPenalty,
-    std::optional<SizeType32> const& earlyStopping, std::optional<SizeType32> const& noRepeatNgramSize)
+    std::optional<SizeType32> const& earlyStopping, std::optional<SizeType32> const& noRepeatNgramSize,
+    std::optional<SizeType32> const& numReturnSequences)
     : mBeamWidth(checkBeamWidth(beamWidth))
     , mTopK(checkTopK(topK))
     , mTopP(checkTopP(topP))
@@ -42,24 +43,30 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
     , mLengthPenalty(lengthPenalty)
     , mEarlyStopping(earlyStopping)
     , mNoRepeatNgramSize(checkNoRepeatNgramSize(noRepeatNgramSize))
+    , mNumReturnSequences(checkNumReturnSequences(numReturnSequences, beamWidth))
 {
+    updateNumReturnBeams();
 }
 
 bool SamplingConfig::operator==(SamplingConfig const& other) const
 {
     return mBeamWidth == other.mBeamWidth && mTopK == other.mTopK && mTopP == other.mTopP && mTopPMin == other.mTopPMin
-               && mTopPResetIds == other.mTopPResetIds && mTopPDecay == other.mTopPDecay && mSeed == other.mSeed
-               && mTemperature == other.mTemperature && mMinTokens == other.mMinTokens
-               && mBeamSearchDiversityRate == other.mBeamSearchDiversityRate
-               && mRepetitionPenalty == other.mRepetitionPenalty && mPresencePenalty == other.mPresencePenalty
-               && mFrequencyPenalty == other.mFrequencyPenalty && mLengthPenalty == other.mLengthPenalty
-               && mEarlyStopping == other.mEarlyStopping,
-           mNoRepeatNgramSize == other.mNoRepeatNgramSize;
+        && mTopPResetIds == other.mTopPResetIds && mTopPDecay == other.mTopPDecay && mSeed == other.mSeed
+        && mTemperature == other.mTemperature && mMinTokens == other.mMinTokens
+        && mBeamSearchDiversityRate == other.mBeamSearchDiversityRate && mRepetitionPenalty == other.mRepetitionPenalty
+        && mPresencePenalty == other.mPresencePenalty && mFrequencyPenalty == other.mFrequencyPenalty
+        && mLengthPenalty == other.mLengthPenalty && mEarlyStopping == other.mEarlyStopping
+        && mNoRepeatNgramSize == other.mNoRepeatNgramSize && mNumReturnSequences == other.mNumReturnSequences;
 }
 
 SizeType32 SamplingConfig::getBeamWidth() const
 {
     return mBeamWidth;
+}
+
+SizeType32 SamplingConfig::getNumReturnBeams() const
+{
+    return mNumReturnBeams;
 }
 
 std::optional<SizeType32> SamplingConfig::getTopK() const
@@ -149,11 +156,17 @@ std::optional<SizeType32> SamplingConfig::getNoRepeatNgramSize() const
     return mNoRepeatNgramSize;
 }
 
+std::optional<SizeType32> SamplingConfig::getNumReturnSequences() const
+{
+    return mNumReturnSequences;
+}
+
 // the setters
 
 void SamplingConfig::setBeamWidth(SizeType32 beamWidth)
 {
     mBeamWidth = checkBeamWidth(beamWidth);
+    updateNumReturnBeams();
 }
 
 void SamplingConfig::setTopK(std::optional<SizeType32> const& topK)
@@ -241,6 +254,12 @@ void SamplingConfig::setEarlyStopping(std::optional<SizeType32> const& earlyStop
 void SamplingConfig::setNoRepeatNgramSize(std::optional<SizeType32> const& noRepeatNgramSize)
 {
     mNoRepeatNgramSize = checkNoRepeatNgramSize(noRepeatNgramSize);
+}
+
+void SamplingConfig::setNumReturnSequences(std::optional<SizeType32> const& numReturnSequences)
+{
+    mNumReturnSequences = checkNumReturnSequences(numReturnSequences, mBeamWidth);
+    updateNumReturnBeams();
 }
 
 SizeType32 SamplingConfig::checkBeamWidth(SizeType32 beamWidth)
@@ -342,6 +361,23 @@ std::optional<FloatType> const& SamplingConfig::checkBeamSearchDiversityRate(
         TLLM_CHECK(beamSearchDiversityRate.value() >= 0.f);
     }
     return beamSearchDiversityRate;
+}
+
+std::optional<SizeType32> const& SamplingConfig::checkNumReturnSequences(
+    std::optional<SizeType32> const& numReturnSequences, SizeType32 beamWidth)
+{
+    if (numReturnSequences.has_value())
+    {
+        TLLM_CHECK(numReturnSequences.value() > 0);
+        TLLM_CHECK(beamWidth == 1 || numReturnSequences.value() <= beamWidth);
+    }
+    return numReturnSequences;
+}
+
+void SamplingConfig::updateNumReturnBeams()
+{
+    mNumReturnBeams
+        = (mNumReturnSequences && mBeamWidth > 1) ? std::min(mNumReturnSequences.value(), mBeamWidth) : mBeamWidth;
 }
 
 } // namespace tensorrt_llm::executor

@@ -46,10 +46,11 @@ SamplingConfig Serialization::deserializeSamplingConfig(std::istream& is)
     auto lengthPenalty = su::deserialize<std::optional<FloatType>>(is);
     auto earlyStopping = su::deserialize<std::optional<SizeType32>>(is);
     auto noRepeatNgramSize = su::deserialize<std::optional<SizeType32>>(is);
+    auto numReturnSequences = su::deserialize<std::optional<SizeType32>>(is);
 
     return SamplingConfig{beamWidth, topK, topP, topPMin, topPResetIds, topPDecay, randomSeed, temperature, minLength,
         beamSearchDiversityRate, repetitionPenalty, presencePenalty, frequencyPenalty, lengthPenalty, earlyStopping,
-        noRepeatNgramSize};
+        noRepeatNgramSize, numReturnSequences};
 }
 
 void Serialization::serialize(SamplingConfig const& config, std::ostream& os)
@@ -70,6 +71,7 @@ void Serialization::serialize(SamplingConfig const& config, std::ostream& os)
     su::serialize(config.mLengthPenalty, os);
     su::serialize(config.mEarlyStopping, os);
     su::serialize(config.mNoRepeatNgramSize, os);
+    su::serialize(config.mNumReturnSequences, os);
 }
 
 size_t Serialization::serializedSize(SamplingConfig const& config)
@@ -91,6 +93,7 @@ size_t Serialization::serializedSize(SamplingConfig const& config)
     totalSize += su::serializedSize(config.mLengthPenalty);
     totalSize += su::serializedSize(config.mEarlyStopping);
     totalSize += su::serializedSize(config.mNoRepeatNgramSize);
+    totalSize += su::serializedSize(config.mNumReturnSequences);
     return totalSize;
 }
 
@@ -418,6 +421,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
     auto encoderInputFeatures = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
+    auto crossAttentionMask = su::deserialize<std::optional<Tensor>>(is);
     auto numReturnSequences = su::deserialize<SizeType32>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
@@ -425,7 +429,7 @@ Request Serialization::deserializeRequest(std::istream& is)
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
         returnAllGeneratedTokens, priority, requestType, std::move(contextPhaseParams), std::move(encoderInputFeatures),
-        encoderOutputLength, numReturnSequences);
+        encoderOutputLength, std::move(crossAttentionMask), numReturnSequences);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)

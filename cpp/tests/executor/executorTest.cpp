@@ -391,51 +391,57 @@ TEST_F(GptExecutorTest, ReturnAcceptedTokenLogits)
     // Create request
     SizeType32 maxNewTokens = 5;
     VecTokens inputTokens{1, 2, 3, 4, 5, 6, 7, 8};
-    auto request = Request(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
 
-    // Set draft tokens
-    auto draftTokens = VecTokens{9, 10, 11, 12, 13}; // draft tokens
-    auto draftLength = draftTokens.size();
-    FloatType const acceptanceThreshold = 0.00001f;  // Ensure the draft token can be accepted
-    auto externalDraftTokensConfig = ExternalDraftTokensConfig(draftTokens, std::nullopt, acceptanceThreshold);
-    request.setExternalDraftTokensConfig(externalDraftTokensConfig);
+    std::vector<bool> streamingOptions{false, true};
 
-    // Set return accepted token logits for this request
-    OutputConfig outConfig;
-    outConfig.returnGenerationLogits = true;
-    request.setOutputConfig(outConfig);
-
-    // Enqueue this request
-    auto requestId = executor.enqueueRequest(request);
-
-    bool done = false;
-    int iter = 0;
-    while (!done && iter < 5000)
+    for (auto streaming : streamingOptions)
     {
-        std::chrono::milliseconds waitTime(mMaxWaitMs);
-        auto responses = executor.awaitResponses(requestId, waitTime);
-        for (auto& response : responses)
-        {
-            if (response.hasError())
-            {
-                FAIL();
-            }
-            else
-            {
-                auto result = response.getResult();
-                done = result.isFinal;
-                auto& genLogits = result.generationLogits;
-                EXPECT_TRUE(genLogits.has_value());
+        auto request = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth));
 
-                // Expected shape: (1, numAcceptedDraftToken, vocabSizePadded)
-                auto const& acceptedTokenLogitsShape = genLogits->getShape();
-                EXPECT_EQ(acceptedTokenLogitsShape.size(), 3);
-                EXPECT_EQ(acceptedTokenLogitsShape[0], 1);
-                EXPECT_LE(acceptedTokenLogitsShape[1], draftLength);     // number of accepted tokens
-                EXPECT_EQ(acceptedTokenLogitsShape[2], vocabSizePadded); // vocabSizePadded
+        // Set draft tokens
+        auto draftTokens = VecTokens{9, 10, 11, 12, 13}; // draft tokens
+        auto draftLength = draftTokens.size();
+        FloatType const acceptanceThreshold = 0.00001f;  // Ensure the draft token can be accepted
+        auto externalDraftTokensConfig = ExternalDraftTokensConfig(draftTokens, std::nullopt, acceptanceThreshold);
+        request.setExternalDraftTokensConfig(externalDraftTokensConfig);
+
+        // Set return accepted token logits for this request
+        OutputConfig outConfig;
+        outConfig.returnGenerationLogits = true;
+        request.setOutputConfig(outConfig);
+
+        // Enqueue this request
+        auto requestId = executor.enqueueRequest(request);
+
+        bool done = false;
+        int iter = 0;
+        while (!done && iter < 5000)
+        {
+            std::chrono::milliseconds waitTime(mMaxWaitMs);
+            auto responses = executor.awaitResponses(requestId, waitTime);
+            for (auto& response : responses)
+            {
+                if (response.hasError())
+                {
+                    FAIL();
+                }
+                else
+                {
+                    auto result = response.getResult();
+                    done = result.isFinal;
+                    auto& genLogits = result.generationLogits;
+                    EXPECT_TRUE(genLogits.has_value());
+
+                    // Expected shape: (1, numAcceptedDraftToken, vocabSizePadded)
+                    auto const& acceptedTokenLogitsShape = genLogits->getShape();
+                    EXPECT_EQ(acceptedTokenLogitsShape.size(), 3);
+                    EXPECT_EQ(acceptedTokenLogitsShape[0], 1);
+                    EXPECT_LE(acceptedTokenLogitsShape[1], draftLength);     // number of accepted tokens
+                    EXPECT_EQ(acceptedTokenLogitsShape[2], vocabSizePadded); // vocabSizePadded
+                }
             }
+            ++iter;
         }
-        ++iter;
     }
 }
 
@@ -1043,15 +1049,24 @@ TEST_F(GptExecutorTest, GetLatestStats)
     }
     EXPECT_LT(iter, mMaxWaitMs);
 
-    // Expect 5 non-empty iterations
+    // Expect 6 non-empty iterations
     auto stats = executor.getLatestIterationStats();
-    EXPECT_EQ(stats.size(), 5);
+    EXPECT_EQ(stats.size(), 6);
     uint64_t currentIter = 0;
     for (auto const& stat : stats)
     {
         EXPECT_EQ(stat.timestamp.size(), 26);
         EXPECT_EQ(stat.iter, currentIter);
-        EXPECT_EQ(stat.numActiveRequests, 1);
+        if (currentIter != 5)
+        {
+            EXPECT_EQ(stat.numActiveRequests, 1);
+        }
+        else
+        {
+            // For the last iteration the number of active requests
+            // should be zero.
+            EXPECT_EQ(stat.numActiveRequests, 0);
+        }
         EXPECT_EQ(stat.maxNumActiveRequests, 64);
         // Very loose check to make sure the memory stats are valid
         EXPECT_GT(stat.gpuMemUsage, 16);
@@ -1078,7 +1093,8 @@ TEST_F(GptExecutorTest, GetLatestStats)
         EXPECT_EQ(modelStats.numPausedRequests, 0);
         EXPECT_EQ(modelStats.numCtxTokens, currentIter == 0 ? inputTokens.size() : 0);
         EXPECT_EQ(modelStats.microBatchId, 0);
-        EXPECT_NEAR(modelStats.avgNumDecodedTokensPerIter, currentIter == 0 ? 0.f : 1.f, 1e-9f);
+        EXPECT_NEAR(
+            modelStats.avgNumDecodedTokensPerIter, currentIter == 0 || currentIter == maxNewTokens ? 0.f : 1.f, 1e-9f);
 
         auto jsonStr = JsonSerialization::toJsonStr(stat);
         EXPECT_THAT(jsonStr, testing::HasSubstr("\"iter\":" + std::to_string(currentIter)));
@@ -1271,21 +1287,22 @@ TEST_F(GptExecutorTest, GetLatestRequestStats)
     EXPECT_LT(iter, mMaxWaitMs);
 
     // Expect 5 non-empty iterations
-    // Note: The 6th iteration with the last finished request will not be reported
-    //       because execution will stop at getNewReqWithIds due to numActiveRequests == 0.
+    // Note: The 6th iteration with the last finished request will be reported
+    //       but might be unavailable when getLatestRequestStats is called since
+    //       it could be updated after the final response has been sent.
     auto stats = executor.getLatestRequestStats();
-    EXPECT_EQ(stats.size(), 5);
+    EXPECT_GE(stats.size(), 5);
     SizeType32 currentIter = 0;
     auto invalidStart = std::numeric_limits<SizeType32>::max();
     std::vector<SizeType32> genStart(requestParams.size(), invalidStart); // The iteration index when generation started
     std::set<IdType> completedRequests;
-    for (auto const& stat : stats)
+    for (auto stat = stats.begin(); stat != stats.begin() + 5; ++stat)
     {
-        auto jsonStrIter = JsonSerialization::toJsonStr(stat);
-        EXPECT_EQ(stat.iter, currentIter);
+        auto jsonStrIter = JsonSerialization::toJsonStr(*stat);
+        EXPECT_EQ(stat->iter, currentIter);
         EXPECT_THAT(jsonStrIter, testing::HasSubstr("\"iter\":" + std::to_string(currentIter)));
-        EXPECT_EQ(stat.requestStats.size() + completedRequests.size(), requestParams.size());
-        for (auto rStat : stat.requestStats)
+        EXPECT_EQ(stat->requestStats.size() + completedRequests.size(), requestParams.size());
+        for (auto rStat : stat->requestStats)
         {
             auto jsonStr = JsonSerialization::toJsonStr(rStat);
             // Only a few requests here so all of them should be scheduled. A separate test
@@ -1427,13 +1444,16 @@ TEST_F(GptExecutorTest, GetLatestRequestStatsScheduling)
     auto stats = executor.getLatestRequestStats();
     SizeType32 numFinished = 0;
     SizeType32 const maxActiveSize = 64; // Decided by the model
-    for (auto const& stat : stats)
+    // The 6th iteration request stat may or may not be available when getLatestRequestStats
+    // is called. When there are no other active or inTransmission requests, there will be
+    // another request stats to properly reset all the statistics to zero.
+    for (auto stat = stats.begin(); stat != stats.begin() + 5; ++stat)
     {
         SizeType32 numReqs = 0;
         SizeType32 numReqsActive = 0;
         SizeType32 numReqsQueued = 0;
         SizeType32 numReqsJustDone = 0;
-        for (auto rStat : stat.requestStats)
+        for (auto rStat : stat->requestStats)
         {
             ++numReqs;
             numReqsActive += rStat.scheduled ? 1 : 0;
@@ -1994,7 +2014,7 @@ struct FlakyTestInfo
 void verifyOutput(std::unordered_map<SizeType32, std::vector<BeamTokens>> const& resultTokens, TestData const& testData,
     std::vector<SizeType32> const& givenInputLengths, SizeType32 nbGivenInputs, bool streaming,
     bool excludeInputFromOutput, FlakyTestInfo flakyTestInfo, bool isSpeculativeDecoding, bool returnAllGeneratedTokens,
-    SizeType32 numReturnSequences, bool isNonGreedySampling)
+    SizeType32 reqBeamWidth, SizeType32 numReturnSequences, bool isNonGreedySampling)
 {
     for (auto const& [batchId, beamTokens] : resultTokens)
     {
@@ -2002,13 +2022,13 @@ void verifyOutput(std::unordered_map<SizeType32, std::vector<BeamTokens>> const&
         {
             auto const& tokens = beamTokens.at(seqIdx);
             auto const inputLength = givenInputLengths.at(batchId);
-            SizeType32 const reqBeamWidth = tokens.size();
+            SizeType32 const numReturnBeams = tokens.size();
             auto const* const expectedOutputData = tr::bufferCast<TokenIdType const>(*testData.expectedOutputIds);
             auto const expectedOutputLengths = testData.expectedOutputLengths;
             auto const endId = testData.endIds[batchId];
             auto const maxSeqLen = testData.maxSeqLen;
 
-            for (SizeType32 beam = 0; beam < reqBeamWidth; ++beam)
+            for (SizeType32 beam = 0; beam < numReturnBeams; ++beam)
             {
                 bool isFlaky = flakyTestInfo.batchIdBeams.count(std::make_pair(batchId, beam));
                 if (isFlaky)
@@ -2097,17 +2117,18 @@ void verifyLogProbs(bool computeLogProbs, TestData const& testData, bool streami
     auto expectedCumLogProbs = testData.expectedCumLogProbs[batchId];
     auto expectedLogProbs = testData.expectedLogProbs[batchId];
     auto const expectedOutputLengths = testData.expectedOutputLengths;
+    auto const numReturnBeams = beamTokens.size();
 
     if (computeLogProbs)
     {
         EXPECT_TRUE(cumLogProbs.has_value()) << "bid: " << batchId;
         EXPECT_TRUE(logProbs.has_value()) << "bid: " << batchId;
-        EXPECT_EQ(cumLogProbs.value().size(), beamWidth) << "bid: " << batchId;
-        EXPECT_EQ(logProbs.value().size(), beamWidth) << "bid: " << batchId;
+        EXPECT_EQ(cumLogProbs.value().size(), numReturnBeams) << "bid: " << batchId;
+        EXPECT_EQ(logProbs.value().size(), numReturnBeams) << "bid: " << batchId;
 
         bool removeInput = !excludeInputFromOutput && !streaming;
 
-        for (SizeType32 beam = 0; beam < beamWidth; ++beam)
+        for (SizeType32 beam = 0; beam < numReturnBeams; ++beam)
         {
             bool isFlaky = flakyTestInfo.batchIdBeams.count(std::make_pair(batchId, beam));
             if (isFlaky)
@@ -2187,6 +2208,8 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
     BeamTokens const& beamTokens, std::optional<Tensor> const& genLogits, SizeType32 vocabSizePadded,
     SizeType32 batchId, BatchingType batchingType, bool const returnAllGeneratedTokens)
 {
+    auto const numReturnBeams = beamTokens.size();
+
     if (getGenLogits)
     {
         EXPECT_TRUE(genLogits.has_value()) << "bid: " << batchId;
@@ -2202,7 +2225,7 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
 
         if (streaming && batchingType != BatchingType::kSTATIC)
         {
-            EXPECT_EQ(genLogits.value().getShape()[1], beamWidth);
+            EXPECT_EQ(genLogits.value().getShape()[1], numReturnBeams);
             EXPECT_EQ(beamWidth, 1); // Only support streaming && beamWidth == 1
 
             SizeType32 const beamIdx = 0;
@@ -2230,7 +2253,7 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
         else
         {
             // Non-streaming
-            EXPECT_EQ(genLogits.value().getShape()[0], beamWidth);
+            EXPECT_EQ(genLogits.value().getShape()[0], numReturnBeams);
             EXPECT_EQ(genLogits.value().getShape()[1], maxOutputLen);
 
             if (isFinal && batchingType != BatchingType::kSTATIC && beamWidth == 1)
@@ -2303,10 +2326,11 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
         SizeType32 endId = -1;
         auto const* const seqBegin = givenInputData + req * maxInputLength;
         VecTokens tokens(seqBegin, seqBegin + inputLen);
-        auto request = Request(VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming,
-            tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig, endId);
+        auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
+        samplingConfig.setNumReturnSequences(numReturnSequences);
+        auto request = Request(
+            VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming, samplingConfig, outConfig, endId);
         request.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
-        request.setNumReturnSequences(numReturnSequences);
         request.setRequestType(RequestType::REQUEST_TYPE_CONTEXT_ONLY);
         requests.emplace_back(std::move(request));
     }
@@ -2396,7 +2420,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
         }
         EXPECT_LT(iter, maxWaitMs);
         verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
-            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, numReturnSequences, false);
+            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, beamWidth, numReturnSequences, false);
     }
     comm.barrier();
     if (executor.isGenerationRank())
@@ -2433,6 +2457,15 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
     SizeType32 maxRequests = numRequests;
     std::vector<Request> requests;
     std::vector<SizeType32> reqMaxNewTokens;
+
+    auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
+    // top-k will be set by a large number to test non-identical N sequences.
+    if (isNonGreedySampling)
+    {
+        samplingConfig.setTopK(32);
+    }
+    samplingConfig.setNumReturnSequences(numReturnSequences);
+
     for (SizeType32 req = 0; req < maxRequests; ++req)
     {
         SizeType32 inputLen = givenInputLengths.at(req);
@@ -2441,24 +2474,19 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
         SizeType32 endId = -1;
         auto const* const seqBegin = givenInputData + req * maxInputLength;
         VecTokens tokens(seqBegin, seqBegin + inputLen);
-
-        auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
-        // top-k will be set by a large number to test non-identical N sequences.
-        if (isNonGreedySampling)
-        {
-            samplingConfig.setTopK(vocabSizePadded);
-        }
-
         auto request = Request(
             VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming, samplingConfig, outConfig, endId);
         request.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
-        request.setNumReturnSequences(numReturnSequences);
         requests.emplace_back(std::move(request));
     }
 
     auto& comm = tensorrt_llm::mpi::MpiComm::world();
     auto const worldRank = comm.getRank();
     auto const worldSize = comm.getSize();
+
+    // Expected return sizes.
+    auto const numSequences = beamWidth > 1 ? 1 : numReturnSequences;
+    auto const numReturnBeams = std::min(beamWidth, numReturnSequences);
 
     std::vector<IdType> reqIds;
     if (worldRank == 0)
@@ -2468,10 +2496,10 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
         for (SizeType32 req = 0; req < reqIds.size(); ++req)
         {
             std::vector<BeamTokens> resultTokens;
-            resultTokens.reserve(numReturnSequences);
-            for (SizeType32 seqIdx = 0; seqIdx < numReturnSequences; ++seqIdx)
+            resultTokens.reserve(numSequences);
+            for (SizeType32 seqIdx = 0; seqIdx < numSequences; ++seqIdx)
             {
-                resultTokens.emplace_back(beamWidth);
+                resultTokens.emplace_back(numReturnBeams);
             }
             tokens[req] = std::move(resultTokens);
             reqIdToBatchId[reqIds.at(req)] = req;
@@ -2499,8 +2527,8 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
                     auto& genLogits = result.generationLogits;
                     auto& outputTokenIds = result.outputTokenIds;
 
-                    EXPECT_EQ(result.finishReasons.size(), beamWidth);
-                    for (SizeType32 beam = 0; beam < beamWidth; ++beam)
+                    EXPECT_EQ(result.finishReasons.size(), numReturnBeams);
+                    for (SizeType32 beam = 0; beam < numReturnBeams; ++beam)
                     {
                         auto& newTokens = outputTokenIds.at(beam);
                         auto& reqTokens = tokens.at(batchId).at(seqIdx).at(beam);
@@ -2517,6 +2545,7 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
                     auto& cumLogProbs = result.cumLogProbs;
                     auto& logProbs = result.logProbs;
                     auto& beamTokens = tokens.at(batchId).at(seqIdx);
+                    EXPECT_EQ(beamTokens.size(), numReturnBeams);
 
                     if (!isNonGreedySampling)
                     {
@@ -2543,7 +2572,8 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
         }
         EXPECT_LT(iter, maxWaitMs);
         verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
-            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, numReturnSequences, isNonGreedySampling);
+            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, beamWidth, numSequences,
+            isNonGreedySampling);
     }
 }
 
@@ -2788,11 +2818,6 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         TLLM_THROW("Unrecognized modelName");
     }
 
-    if (streaming && beamWidth > 1)
-    {
-        GTEST_SKIP() << "Test does not support streaming with beam search";
-    }
-
     // Warning: This should be the last check before running the test.
     // It will initialize MPI which can take significant time.
     if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
@@ -2874,10 +2899,6 @@ TEST_P(AllParamsTest, TokenComparison)
     if (numReturnSequences > 1 && batchingType == BatchingType::kSTATIC)
     {
         GTEST_SKIP() << "Test does not support numReturnSequences with static batching";
-    }
-    if (numReturnSequences > 1 && beamWidth > 1)
-    {
-        GTEST_SKIP() << "Skip because numReturnSequences > 1 under beam search is not supported.";
     }
 
     std::optional<std::vector<SizeType32>> participantIds = std::nullopt;
@@ -3580,6 +3601,7 @@ public:
     MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
     MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
     MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
+    MOCK_METHOD(void, resetIterationStats, (), ());
 };
 
 TEST_P(ParamTest, MockedModel)
@@ -3732,8 +3754,9 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
 
     try
     {
-        auto request = Request(inputTokens, maxNewTokens);
-        request.setNumReturnSequences(maxQueueSize);
+        auto samplingConfig = SamplingConfig(1);
+        samplingConfig.setNumReturnSequences(maxQueueSize);
+        auto request = Request(inputTokens, maxNewTokens, false, samplingConfig);
         auto requestId = executor.enqueueRequest(std::move(request));
         FAIL() << "Expected TllmException";
     }
@@ -4342,8 +4365,9 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     EXPECT_LT(callCount, maxNewTokens);
 
     // Create the request having child requests.
-    auto request2 = Request(inputTokens, maxNewTokens, streaming);
-    request2.setNumReturnSequences(2);
+    auto samplingConfig2 = SamplingConfig(1);
+    samplingConfig2.setNumReturnSequences(2);
+    auto request2 = Request(inputTokens, maxNewTokens, streaming, samplingConfig2);
 
     // Reset call count.
     callCount = 0;
@@ -4383,6 +4407,105 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     {
         // Expecting to receiving fewer tokens than maxNewTokens
         EXPECT_LT(count, maxNewTokens) << "Failed at request id: " << reqId;
+    }
+}
+
+TEST_F(GptExecutorTest, MockedModelNumReturns)
+{
+    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
+    using RequestList = std::list<LlmRequestPtr>;
+
+    SizeType32 const maxBeamWidth = 4;
+    OutputConfig outConfig;
+    auto model = std::make_shared<MockedModel>();
+
+    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
+    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
+    EXPECT_CALL(*model, getLogitDataType()).Times(0);
+    tr::WorldConfig const dummyWorldConfig;
+    EXPECT_CALL(*model, getWorldConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentRequestStats(_))
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+
+    SizeType32 callCount = 0;
+    EXPECT_CALL(*model, forwardAsync(_))
+        .WillRepeatedly(Invoke(
+            [&](RequestList const& requestList)
+            {
+                for (auto const& llmReq : requestList)
+                {
+                    // Don't add any tokens to simulate no output tokens
+                    auto numBeams = llmReq->mSamplingConfig.getNumReturnBeams();
+                    llmReq->addNewTokens(VecTokens(numBeams, 1));
+                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
+                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
+                    {
+                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
+                    }
+                }
+                callCount++;
+            }));
+
+    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
+    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
+    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 20; }));
+
+    ExecutorConfig executorConfig(maxBeamWidth);
+    auto executor = Executor(model, executorConfig);
+
+    // Create the request
+    SizeType32 maxNewTokens = 5;
+    VecTokens inputTokens{1, 2, 3, 4};
+    bool streaming = false;
+
+    auto samplingConfig1 = SamplingConfig(1);
+    samplingConfig1.setNumReturnSequences(3);
+    auto request1 = Request(inputTokens, maxNewTokens, streaming, samplingConfig1, outConfig);
+    auto samplingConfig2 = SamplingConfig(4);
+    auto request2 = Request(inputTokens, maxNewTokens, streaming, samplingConfig2, outConfig);
+    auto samplingConfig3 = SamplingConfig(4);
+    samplingConfig3.setNumReturnSequences(2);
+    auto request3 = Request(inputTokens, maxNewTokens, streaming, samplingConfig3, outConfig);
+
+    // Enqueue the request
+    auto requestId1 = executor.enqueueRequest(std::move(request1));
+    auto requestId2 = executor.enqueueRequest(std::move(request2));
+    auto requestId3 = executor.enqueueRequest(std::move(request3));
+
+    // Expecting one response in beam search. Instead, numReturnSequences limits the number of beams to return.
+    std::unordered_map<IdType, SizeType32> expectedNumResponses{{requestId1, 3}, {requestId2, 1}, {requestId3, 1}};
+    std::unordered_map<IdType, SizeType32> expectedNumBeams{{requestId1, 1}, {requestId2, 4}, {requestId3, 2}};
+
+    std::unordered_map<IdType, SizeType32> numResponses{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
+    std::unordered_map<IdType, SizeType32> numBeams{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
+    int numFinished = 0;
+    int iter = 0;
+    while (numFinished < 3 && iter < mMaxWaitMs)
+    {
+        std::chrono::milliseconds waitTime(1);
+        auto responses = executor.awaitResponses(waitTime);
+        for (auto& response : responses)
+        {
+            auto result = response.getResult();
+            auto reqId = response.getRequestId();
+            numFinished += result.isFinal;
+            numResponses[reqId]++;
+            numBeams[reqId] = result.outputTokenIds.size();
+        }
+        ++iter;
+    }
+
+    EXPECT_LT(iter, mMaxWaitMs);
+    EXPECT_EQ(numFinished, 3);
+    for (auto& [reqId, numResp] : numResponses)
+    {
+        EXPECT_EQ(numResp, expectedNumResponses[reqId]);
+    }
+    for (auto& [reqId, numResp] : numResponses)
+    {
+        EXPECT_EQ(numResp, expectedNumResponses[reqId]);
     }
 }
 
@@ -4669,11 +4792,6 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
     auto const numReturnSequences = std::get<3>(GetParam());
     auto const modelName = std::get<4>(GetParam());
 
-    if (beamWidth > 1 && numReturnSequences > 1)
-    {
-        GTEST_SKIP() << "Skipping test with beamWidth > 1 and numReturnSequences > 1";
-    }
-
     OutputConfig outConfig;
 
     auto executorConfig = ExecutorConfig(beamWidth);
@@ -4730,11 +4848,11 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
     // Create the request
     SizeType32 maxNewTokens = 50;
     VecTokens inputTokens{1, 2, 3, 4};
-    auto request
-        = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-    auto request2
-        = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-    request2.setNumReturnSequences(numReturnSequences);
+    auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
+    auto request = Request(inputTokens, maxNewTokens, streaming, samplingConfig, outConfig);
+    auto samplingConfig2 = tensorrt_llm::executor::SamplingConfig(beamWidth);
+    samplingConfig2.setNumReturnSequences(numReturnSequences);
+    auto request2 = Request(inputTokens, maxNewTokens, streaming, samplingConfig2, outConfig);
 
     if (executor.canEnqueueRequests())
     {
@@ -4774,7 +4892,8 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
                     auto result = response.getResult();
                     numFinished += result.isFinal;
                     auto seqIdx = result.sequenceIndex;
-                    auto& newTokens = result.outputTokenIds.at(beamWidth - 1);
+                    auto numSequences = result.outputTokenIds.size();
+                    auto& newTokens = result.outputTokenIds.at(numSequences - 1);
                     auto& reqResults = tokens[response.getRequestId()];
                     auto& reqTokens = reqResults[seqIdx];
                     if (streaming && beamWidth > 1)
@@ -4800,8 +4919,10 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
 
         EXPECT_LT(tokens[requestId][0].size(), expectedNumTokens[requestId]);
         EXPECT_EQ(tokens[requestId2][0].size(), expectedNumTokens[requestId2]);
-        EXPECT_LT(tokens[requestId3][0].size(), expectedNumTokens[requestId3]);
-        EXPECT_LT(tokens[requestId3][1].size(), expectedNumTokens[requestId3]);
+        for (auto seqIdx = 0; seqIdx < tokens[requestId3].size(); seqIdx++)
+        {
+            EXPECT_LT(tokens[requestId3][seqIdx].size(), expectedNumTokens[requestId3]);
+        }
     }
 }
 

@@ -16,6 +16,8 @@
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/kernels/attentionMask.h"
+#include "tensorrt_llm/kernels/contextFusedMultiHeadAttention/fmhaPackedMask.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
@@ -46,6 +48,10 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     cacheIndirection
         = manager.gpu(ITensor::makeShape({maxBatchSize, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
 
+    maxInputLen = modelConfig.getMaxInputLen();
+    maxEncoderOutputLen = modelConfig.getMaxEncoderLen();
+    maxNumTokens = modelConfig.getMaxNumTokens().value();
+
     if (modelConfig.isKVCacheEnabled())
     {
         auto const kvCacheBlockOffsetsType = engine.getTensorDataType("kv_cache_block_offsets");
@@ -56,6 +62,20 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
         {
             crossKvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNEDPOOL, kvCacheBlockOffsetsType);
             crossKvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
+            crossAttentionMaskDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kBOOL);
+            crossAttentionPackedMaskDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+            crossAttentionCuQSeqLensDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+            crossAttentionPackedMaskCuMaskRowsDevice
+                = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+
+            // Pinned memory for batch copy of attention masks.
+            // There will be paddings in the dim1, so copy it by tokens.
+            crossAttentionMaskCopySrcOffsets
+                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
+            crossAttentionMaskCopyDstOffsets
+                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
+            crossAttentionMaskCopySizes
+                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
         }
     }
 
@@ -65,10 +85,10 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     seqSlotsAltDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
     cacheIndirBatchedCopySrcOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     cacheIndirBatchedCopyDstOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    cacheIndirBatchedCopySizes = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
+    cacheIndirBatchedCopySizes = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
 
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
@@ -93,7 +113,7 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     runtimePerfKnobsHostPtr[1] = enableContextFMHAFP32AccVal;
 }
 
-void TransformerBuffers::reshape(SizeType32 numSequences)
+void TransformerBuffers::reshape(SizeType32 numSequences, SizeType32 numInputTokens)
 {
     pastKeyValueLengths->reshape(ITensor::makeShape({numSequences}));
 
@@ -128,6 +148,37 @@ void TransformerBuffers::reshape(SizeType32 numSequences)
             TLLM_LOG_DEBUG("crossKvCacheBlockOffsets not allocated yet");
         }
     }
+
+    if (crossAttentionMaskDevice)
+    {
+        auto crossAttentionMaskShape = crossAttentionMaskDevice->getShape();
+        if (crossAttentionMaskShape.nbDims > 0)
+        {
+            crossAttentionMaskShape.d[0] = numInputTokens;
+            crossAttentionMaskDevice->reshape(crossAttentionMaskShape);
+            crossAttentionMaskCopySrcOffsets->reshape(ITensor::makeShape({numInputTokens}));
+            crossAttentionMaskCopyDstOffsets->reshape(ITensor::makeShape({numInputTokens}));
+            crossAttentionMaskCopySizes->reshape(ITensor::makeShape({numInputTokens}));
+        }
+        else
+        {
+            TLLM_LOG_DEBUG("crossAttentionMaskDevice not allocated yet");
+        }
+    }
+
+    if (crossAttentionPackedMaskDevice)
+    {
+        auto crossAttentionMaskPackedShape = crossAttentionPackedMaskDevice->getShape();
+        if (crossAttentionMaskPackedShape.nbDims > 0)
+        {
+            crossAttentionMaskPackedShape.d[0] = numInputTokens;
+            crossAttentionPackedMaskDevice->reshape(crossAttentionMaskPackedShape);
+        }
+        else
+        {
+            TLLM_LOG_DEBUG("crossAttentionPackedMaskDevice not allocated yet");
+        }
+    }
 }
 
 void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
@@ -160,6 +211,21 @@ void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 ma
 
         crossKvCacheBlockOffsetsDevice->reshape(crossCacheBlockOffsetsShape);
         manager.setZero(*crossKvCacheBlockOffsetsDevice);
+
+        // TODO: make cross-attention works with chunked context.
+        crossAttentionMaskDevice->reshape(ITensor::makeShape({maxNumTokens, maxEncoderOutputLen}));
+        manager.setZero(*crossAttentionMaskDevice);
+
+        // Only context attention needs this, so allocate it by shape [maxBatchSize, maxInputLen, maxEncoderOutputLen].
+        auto [packedMaskM, packedMaskN] = tk::roundUpPackedMaskMNDims(maxInputLen, maxEncoderOutputLen);
+        crossAttentionPackedMaskDevice->reshape(ITensor::makeShape({maxBatchSize * packedMaskM, packedMaskN}));
+        manager.setZero(*crossAttentionPackedMaskDevice);
+
+        crossAttentionCuQSeqLensDevice->reshape(ITensor::makeShape({maxBatchSize + 1}));
+        manager.setZero(*crossAttentionCuQSeqLensDevice);
+
+        crossAttentionPackedMaskCuMaskRowsDevice->reshape(ITensor::makeShape({maxBatchSize + 1}));
+        manager.setZero(*crossAttentionPackedMaskCuMaskRowsDevice);
     }
 }
 
@@ -182,6 +248,10 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     {
         inputBuffers.insert_or_assign("cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsDevice);
         inputBuffers.insert_or_assign("host_cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsHost);
+        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_pointers", crossKvCacheBlockPoolPointers);
+        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", crossKvCacheBlockPoolMapping);
+        inputBuffers.insert_or_assign("cross_attention_mask", crossAttentionMaskDevice);
+        inputBuffers.insert_or_assign("cross_attention_packed_mask", crossAttentionPackedMaskDevice);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -326,13 +396,13 @@ void TransformerBuffers::copyCacheIndirection(
 
     auto const numGenerationRequests = genRequests.size();
 
-    auto batchedCopySrcOffsets = BufferRange<SizeType32>(*cacheIndirBatchedCopySrcOffsets);
-    auto batchedCopyDstOffsets = BufferRange<SizeType32>(*cacheIndirBatchedCopyDstOffsets);
-    auto batchedCopySizes = BufferRange<SizeType32>(*cacheIndirBatchedCopySizes);
+    auto batchedCopySrcOffsets = BufferRange<SizeType64>(*cacheIndirBatchedCopySrcOffsets);
+    auto batchedCopyDstOffsets = BufferRange<SizeType64>(*cacheIndirBatchedCopyDstOffsets);
+    auto batchedCopySizes = BufferRange<SizeType64>(*cacheIndirBatchedCopySizes);
 
     auto cacheIndirShape = decoderCacheIndirectionOutput->getShape();
     cacheIndirShape.d[0] = 1;
-    auto const copySize = static_cast<SizeType32>(ITensor::volume(cacheIndirShape));
+    auto const copySize = static_cast<SizeType64>(ITensor::volume(cacheIndirShape));
 
     std::transform(genRequests.begin(), genRequests.end(), batchedCopySrcOffsets.begin(),
         [copySize](auto const& llmReq) { return llmReq->mSeqSlot.value() * copySize; });
@@ -345,6 +415,175 @@ void TransformerBuffers::copyCacheIndirection(
     auto const batchedCopySizesSlice = ITensor::slice(cacheIndirBatchedCopySizes, 0, numGenerationRequests);
     runtime::kernels::invokeCopyBatch(*decoderCacheIndirectionOutput, *cacheIndirection, *batchedCopySrcOffsetsSlice,
         *batchedCopyDstOffsetsSlice, *batchedCopySizesSlice, copySize, stream);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextRequests, RequestVector const& genRequests,
+    TensorPtr const& decoderContextLengthsDevice, TensorPtr const& encoderInputLengths,
+    SizeType32 maxDecoderContextLength, SizeType32 maxEncoderInputLengthInBatch, TllmRuntime const& runtime)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    auto const& manager = runtime.getBufferManager();
+
+    // Reshape the tensor to make sure the dim1 matches maxEncoderInputLengthInBatch.
+    auto crossAttentionMaskShape = crossAttentionMaskDevice->getShape();
+    crossAttentionMaskShape.d[1] = maxEncoderInputLengthInBatch;
+    crossAttentionMaskDevice->reshape(crossAttentionMaskShape);
+    // Set crossAttentionMask to true by default if it is not provided.
+    manager.setMem(*crossAttentionMaskDevice, 1);
+
+    // Check if all context requests have cross attention mask.
+    bool allCrossAttentionMaskProvided = true;
+    for (auto const& llmReq : contextRequests)
+    {
+        auto const& crossAttentionMaskRequest = llmReq->getCrossAttentionMask();
+        if (bufferCastOrNull<bool>(crossAttentionMaskRequest) == nullptr)
+        {
+            allCrossAttentionMaskProvided = false;
+            break;
+        }
+    }
+
+    // If not all requests have cross attention mask, let us create the default ones. And it will be overwritten if some
+    // requests have cross attention mask.
+    auto const& stream = runtime.getStream();
+    if (!allCrossAttentionMaskProvided)
+    {
+        tk::AttentionMaskParams<bool> attentionMaskParams;
+        memset((void*) &attentionMaskParams, 0, sizeof(attentionMaskParams));
+        // Set parameters.
+        attentionMaskParams.mask = bufferCastOrNull<bool>(crossAttentionMaskDevice);
+        attentionMaskParams.cuQSeqLens = bufferCastOrNull<SizeType32>(crossAttentionCuQSeqLensDevice);
+        attentionMaskParams.actualQSeqLens = bufferCastOrNull<SizeType32>(decoderContextLengthsDevice);
+        attentionMaskParams.actualKvSeqLens = bufferCastOrNull<SizeType32>(encoderInputLengths);
+        attentionMaskParams.attentionMaskType = tk::AttentionMaskType::PADDING;
+        attentionMaskParams.batchSize = contextRequests.size();
+        attentionMaskParams.maxQSeqLen = maxDecoderContextLength;
+        attentionMaskParams.maxKvSeqLen = maxEncoderInputLengthInBatch;
+        // Launch the kernel.
+        tk::invokeBuildAttentionMask(attentionMaskParams, stream.get());
+        sync_check_cuda_error();
+    }
+
+    // Use the first request's cross attention mask tensor's pointer address as the primary source pointer.
+    auto const& attentionMaskSrc = !contextRequests.empty() ? contextRequests[0]->getCrossAttentionMask()
+                                                            : genRequests[0]->getCrossAttentionMask();
+    bool const* primarySrcPtr = bufferCastOrNull<bool>(attentionMaskSrc);
+
+    // Pinned-memory buffer preparation for batch copy.
+    auto batchedCopySrcOffsets = BufferRange<SizeType64>(*crossAttentionMaskCopySrcOffsets);
+    auto batchedCopyDstOffsets = BufferRange<SizeType64>(*crossAttentionMaskCopyDstOffsets);
+    auto batchedCopySizes = BufferRange<SizeType64>(*crossAttentionMaskCopySizes);
+    // Requests with cross-attention-mask don't need to copy.
+    manager.setZero(*crossAttentionMaskCopySizes);
+
+    SizeType32 numTokens = 0;
+    for (auto const& llmReq : contextRequests)
+    {
+        auto const& crossAttentionMaskRequest = llmReq->getCrossAttentionMask();
+        if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
+        {
+            auto const position = llmReq->getContextCurrentPosition();
+            auto const size = llmReq->getContextChunkSize();
+            SizeType64 crossAttentionMaskRequestDim0
+                = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[0]);
+            SizeType64 crossAttentionMaskRequestDim1
+                = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[1]);
+            TLLM_LOG_DEBUG("copyCrossAttentionMasks (shape [%d, %d]) from contextRequests position %d chunkSize %d",
+                crossAttentionMaskRequestDim0, crossAttentionMaskRequestDim1, position, size);
+            if ((position + size - 1) >= crossAttentionMaskRequestDim0)
+            {
+                TLLM_LOG_WARNING(
+                    "The provided crossAttentionMask input is not complete for context phases, the last row will be "
+                    "used by default.");
+            }
+            for (SizeType32 tokenId = position; tokenId < position + size; tokenId++)
+            {
+                batchedCopySrcOffsets.begin()[numTokens]
+                    = static_cast<SizeType64>(bufferCastOrNull<bool>(crossAttentionMaskRequest) - primarySrcPtr)
+                    + std::min(crossAttentionMaskRequestDim0 - 1, static_cast<SizeType64>(tokenId))
+                        * crossAttentionMaskRequestDim1;
+                batchedCopyDstOffsets.begin()[numTokens]
+                    = numTokens * static_cast<SizeType64>(maxEncoderInputLengthInBatch);
+                batchedCopySizes.begin()[numTokens] = crossAttentionMaskRequestDim1;
+                numTokens++;
+            }
+        }
+        else
+        {
+            TLLM_LOG_WARNING(
+                "CrossAttentionMask is not provided for the request. Default padding attention mask will be created.");
+        }
+    }
+
+    for (auto const& llmReq : genRequests)
+    {
+        auto const promptLen = llmReq->mPromptLen;
+        auto const decodingIter = llmReq->getDecodingIter();
+        auto const& crossAttentionMaskRequest = llmReq->getCrossAttentionMask();
+        if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
+        {
+            SizeType64 crossAttentionMaskRequestDim0
+                = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[0]);
+            SizeType64 crossAttentionMaskRequestDim1
+                = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[1]);
+            TLLM_LOG_DEBUG("copyCrossAttentionMasks (shape [%d, %d]) from genRequests decodingIter %d",
+                crossAttentionMaskRequestDim0, crossAttentionMaskRequestDim1, decodingIter);
+            batchedCopySrcOffsets.begin()[numTokens]
+                = static_cast<SizeType64>(bufferCastOrNull<bool>(crossAttentionMaskRequest) - primarySrcPtr)
+                + std::min(crossAttentionMaskRequestDim0 - 1, static_cast<SizeType64>(promptLen + decodingIter - 1))
+                    * crossAttentionMaskRequestDim1;
+            if (promptLen + decodingIter - 1 >= crossAttentionMaskRequestDim0)
+            {
+                TLLM_LOG_WARNING(
+                    "The provided crossAttentionMask input is not complete for generation phases, the last row will be "
+                    "used by default.");
+            }
+            batchedCopyDstOffsets.begin()[numTokens]
+                = numTokens * static_cast<SizeType64>(maxEncoderInputLengthInBatch);
+            batchedCopySizes.begin()[numTokens] = crossAttentionMaskRequestDim1;
+            numTokens++;
+        }
+        else
+        {
+            TLLM_LOG_WARNING(
+                "CrossAttentionMask is not provided for the generation request. Full valid attentionMask will be used "
+                "by default.");
+        }
+    }
+
+    // Copy all requests' attention mask in one kernel.
+    if (attentionMaskSrc != nullptr)
+    {
+        runtime::kernels::invokeCopyBatch(*attentionMaskSrc, *crossAttentionMaskDevice,
+            *crossAttentionMaskCopySrcOffsets, *crossAttentionMaskCopyDstOffsets, *crossAttentionMaskCopySizes,
+            maxEncoderInputLengthInBatch, stream);
+    }
+    sync_check_cuda_error();
+
+    // The packed mask is only needed by context requests now.
+    if (!contextRequests.empty())
+    {
+        // Set the parameters for creating packed mask for context FMHA.
+        tk::PackedMaskParams<bool> maskParams;
+        memset((void*) &maskParams, 0, sizeof(maskParams));
+        maskParams.maskInput = bufferCastOrNull<bool>(crossAttentionMaskDevice);
+        maskParams.cuQSeqLens = bufferCastOrNull<SizeType32>(crossAttentionCuQSeqLensDevice);
+        maskParams.packedMask = bufferCastOrNull<uint32_t>(crossAttentionPackedMaskDevice);
+        maskParams.cuMaskRows = bufferCastOrNull<SizeType32>(crossAttentionPackedMaskCuMaskRowsDevice);
+        maskParams.actualQSeqLens = bufferCastOrNull<SizeType32>(decoderContextLengthsDevice);
+        maskParams.actualKvSeqLens = bufferCastOrNull<SizeType32>(encoderInputLengths);
+        maskParams.batchSize = contextRequests.size();
+        maskParams.maxQSeqLen = maxDecoderContextLength;
+        maskParams.maxKvSeqLen = maxEncoderInputLengthInBatch;
+        maskParams.attentionMaskType = tk::ContextAttentionMaskType::CUSTOM_MASK;
+        maskParams.validPosVal = true;
+
+        // Launch the pack mask kernel.
+        tk::invokeBuildPackedMask(maskParams, stream.get());
+        sync_check_cuda_error();
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

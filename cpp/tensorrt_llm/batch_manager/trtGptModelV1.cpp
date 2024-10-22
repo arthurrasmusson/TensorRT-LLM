@@ -420,6 +420,11 @@ std::tuple<runtime::GenerationInput, runtime::SamplingConfig> TrtGptModelV1::fil
     return {generationInput, batchSamplingConfig};
 }
 
+void TrtGptModelV1::resetIterationStats()
+{
+    mLastIterationStatsV1 = fillIterationStats({}, 0, {});
+}
+
 void TrtGptModelV1::forwardSync() {}
 
 void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)

@@ -109,6 +109,11 @@ private:
 public:
     void create(SizeType32 maxBatchSize, ModelConfig const& modelConfig, TllmRuntime const& runtime);
 
+    SizeType32 getMaxInputLengthInBatch() const
+    {
+        return maxInputLengthInBatch;
+    };
+
     void setMaxBufferSizes(SizeType32 maxBatchSize, runtime::ModelConfig const& modelConfig);
 
     void setBufferSizes(RequestVector const& contextRequests, RequestVector const& genRequests);
