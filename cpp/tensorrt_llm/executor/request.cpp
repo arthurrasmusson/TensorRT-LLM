@@ -25,17 +25,18 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
     std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig, std::optional<PromptTuningConfig> pTuningConfig,
     std::optional<LoraConfig> loraConfig, std::optional<LookaheadDecodingConfig> lookaheadConfig,
-    std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
-    std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
-    std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
-    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
-    SizeType32 numReturnSequences)
+    std::optional<KvCacheRetentionConfig> kvCacheRetentionConfig, std::optional<std::string> logitsPostProcessorName,
+    std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
+    float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
+    std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
+    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
-        std::move(lookaheadConfig), std::move(logitsPostProcessorName), std::move(encoderInputTokenIds), clientId,
-        returnAllGeneratedTokens, priority, type, std::move(contextPhaseParams), std::move(encoderInputFeatures),
-        encoderOutputLength, crossAttentionMask, numReturnSequences))
+        std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
+        std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
+        std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
+        numReturnSequences))
 {
 }
 
@@ -140,6 +141,11 @@ std::optional<LookaheadDecodingConfig> Request::getLookaheadConfig() const
     return mImpl->getLookaheadConfig();
 }
 
+std::optional<KvCacheRetentionConfig> Request::getKvCacheRetentionConfig() const
+{
+    return mImpl->getKvCacheRetentionConfig();
+}
+
 std::optional<std::string> Request::getLogitsPostProcessorName() const
 {
     return mImpl->getLogitsPostProcessorName();
@@ -195,7 +201,7 @@ SizeType32 Request::getNumReturnSequences() const
     TLLM_LOG_WARNING(
         "'Request.getNumReturnSequences' will be deprecated. Please directly use "
         "'SamplingConfig.getNumReturnSequences' instead.");
-    return mImpl->getSamplingConfig().getNumReturnSequences().value_or(1);
+    return mImpl->getNumReturnSequences().value_or(1);
 }
 
 void Request::setStreaming(bool streaming)
@@ -263,6 +269,11 @@ void Request::setLookaheadConfig(LookaheadDecodingConfig const& lookaheadConfig)
     return mImpl->setLookaheadConfig(lookaheadConfig);
 }
 
+void Request::setKvCacheRetentionConfig(KvCacheRetentionConfig const& kvCacheRetentionConfig)
+{
+    return mImpl->setKvCacheRetentionConfig(kvCacheRetentionConfig);
+}
+
 void Request::setLogitsPostProcessorName(std::string const& logitsPostProcessorName)
 {
     return mImpl->setLogitsPostProcessorName(logitsPostProcessorName);
@@ -318,7 +329,7 @@ void Request::setNumReturnSequences(SizeType32 numReturnSequences)
     TLLM_LOG_WARNING(
         "'Request.setNumReturnSequences' will be deprecated. Please directly use "
         "'SamplingConfig.setNumReturnSequences' instead.");
-    mImpl->getSamplingConfig().setNumReturnSequences(numReturnSequences);
+    mImpl->setNumReturnSequences(numReturnSequences);
 }
 
 } // namespace tensorrt_llm::executor

@@ -49,7 +49,6 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
 
     if (worldConfig.isPipelineParallel())
     {
-
         mMpiGroupPipeParaComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(
             mMpiGroupComm->split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
     }
@@ -96,7 +95,6 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
 
         if (mMpiGroupComm->getSize() > 1)
         {
-            // updata
             mMpiGroupComm->barrier();
             executor::kv_cache::CommState commState = mDataResponder->getCommState();
             std::ostringstream oStream;
@@ -227,7 +225,6 @@ void CacheTransceiver::checkTranferStatus(bool blocking)
                 {
                     it->second.get();
                     it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
-                    ;
                     it = mResponderFutures.erase(it);
                 }
                 else

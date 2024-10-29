@@ -335,7 +335,8 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
     blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), 2 * tokensPerBlock);
-    EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
+    // Block 7 only has 1 token, so it gets put at the front of the list for eviction
+    EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 7}));
     numTokens = llmRequest4->getNumTokens(beamIdx);
     numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
@@ -428,9 +429,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     LlmRequest::RequestIdType requestId{0};
     auto llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
 
     GenerationRequest seq0{requestId, inputLength, beamWidth, maxBlocksPerSeq};
 
@@ -460,9 +461,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     requestId = 1;
     auto llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
     GenerationRequest seq1{requestId, inputLength, beamWidth, maxBlocksPerSeq};
 
     // reuse blocks 0, 1 and get new block 3
@@ -486,9 +487,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     // reuse blocks 0, 1 and get new block 4
     llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds, numReturnSequences);
     llmRequest0->addNewToken(3, beamIdx);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
@@ -505,9 +506,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     inputTokenExtraIds1->push_back(0);
     llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens1, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1, numReturnSequences);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
     blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
@@ -531,9 +532,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     requestId = 2;
     auto llmRequest2 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds2, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds2, numReturnSequences);
 
     numTokens = llmRequest2->getNumTokens(beamIdx);
     GenerationRequest seq2{requestId, numTokens, beamWidth, maxBlocksPerSeq};
@@ -555,9 +556,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     requestId = 3;
     auto llmRequest3 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3, numReturnSequences);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3, numReturnSequences);
 
     numTokens = llmRequest3->getNumTokens(beamIdx);
     GenerationRequest seq3{requestId, numTokens, beamWidth, maxBlocksPerSeq};
@@ -607,8 +608,8 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     tr::SamplingConfig const samplingConfig{beamWidth};
     bool constexpr isStreaming{false};
 
-    // loraTaskId is 1 for common cases
-    LlmRequest::LoraTaskIdType loraTaskId{1};
+    // loraTaskId is 0 for common cases
+    LlmRequest::LoraTaskIdType loraTaskId{0};
     auto inputTokens = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7, 8});
     auto const inputLength = static_cast<SizeType32>(inputTokens->size());
     LlmRequest::RequestIdType requestId{0};
@@ -700,8 +701,8 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
 
     ///////////////////////////////////////////////////////////////////////////
-    // add request with loraTaskId 2
-    loraTaskId = static_cast<LlmRequest::LoraTaskIdType>(2);
+    // add request with loraTaskId 1
+    loraTaskId = static_cast<LlmRequest::LoraTaskIdType>(1);
     requestId = 2;
     auto llmRequest2 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
@@ -720,13 +721,13 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numBlocks);
-    // blocks 5, 6, 7 are stored with loraTaskId 2
+    // blocks 5, 6, 7 are stored with loraTaskId 1
     blockManager.releaseBlocks(seq2, llmRequest2);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), 0);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
 
     ///////////////////////////////////////////////////////////////////////////
-    // add request with loraTaskId 2 and more tokens
+    // add request with loraTaskId 1 and more tokens
     auto inputLength3 = 11;
     auto inputTokens3 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11});
     requestId = 3;
@@ -747,14 +748,14 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numBlocks);
-    // blocks 8 is stored with [8, 9, 11] and loraTaskId 2
+    // blocks 8 is stored with [8, 9, 11] and loraTaskId 1
     blockManager.releaseBlocks(seq3, llmRequest3);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), 0);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
 
     ///////////////////////////////////////////////////////////////////////////
-    // add request with loraTaskId 1 again but with less tokens
-    loraTaskId = static_cast<LlmRequest::LoraTaskIdType>(1);
+    // add request with loraTaskId 0 again but with less tokens
+    loraTaskId = static_cast<LlmRequest::LoraTaskIdType>(0);
     auto inputLength4 = 5;
     auto inputTokens4 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4});
     requestId = 4;
@@ -775,8 +776,31 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numBlocks);
-    // blocks 9 is stored with [4] and loraTaskId 1
+    // blocks 9 is stored with [4] and loraTaskId 0
     blockManager.releaseBlocks(seq4, llmRequest4);
+    EXPECT_EQ(blockManager.getNumAllocatedBlocks(), 0);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
+
+    // add request with same tokens as request0 but without loraTaskId
+    requestId = 5;
+    auto llmRequest5 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+
+    numTokens = llmRequest5->getNumTokens(beamIdx);
+    GenerationRequest seq5{requestId, numTokens, beamWidth, maxBlocksPerSeq};
+    // no reuse, get new block 10, 11, 12
+    auto promptLen5 = llmRequest5->getNumTokens(beamIdx);
+    auto numContextBlocks5 = tc::ceilDiv(promptLen5, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, llmRequest5);
+    EXPECT_EQ(llmRequest5->getContextCurrentPosition(), 0);
+    EXPECT_THAT(seq5.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({10, 11, 12}));
+    llmRequest5->addNewToken(9, beamIdx);
+    numTokens = llmRequest5->getNumTokens(beamIdx);
+    numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
+    EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool - numBlocks);
+    // blocks 10, 11, 12 are stored without loraTaskId
+    blockManager.releaseBlocks(seq5, llmRequest5);
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), 0);
     EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
 }
@@ -817,9 +841,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     LlmRequest::RequestIdType requestId{0};
     auto llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
+        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
 
     GenerationRequest seq0{requestId, inputLength, beamWidth, maxBlocksPerSeq};
 
@@ -850,9 +874,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     LlmRequest::LoraTaskIdType loraTaskId2 = static_cast<LlmRequest::LoraTaskIdType>(2);
     auto llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
+        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
     GenerationRequest seq1{requestId, inputLength, beamWidth, maxBlocksPerSeq};
 
     // no reuse, get new block 3, 4, 5
@@ -875,9 +899,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     // add both requests again and then remove them
     llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
+        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds);
     llmRequest0->addNewToken(3, beamIdx);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
@@ -895,9 +919,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     inputTokenExtraIds1->push_back(0);
     llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens1, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1);
+        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
     blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
@@ -920,9 +944,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     requestId = 2;
     auto llmRequest2 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds2);
+        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds2);
 
     numTokens = llmRequest2->getNumTokens(beamIdx);
     GenerationRequest seq2{requestId, numTokens, beamWidth, maxBlocksPerSeq};
@@ -944,9 +968,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     requestId = 3;
     auto llmRequest3 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3);
+        loraTaskId1, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3);
 
     numTokens = llmRequest3->getNumTokens(beamIdx);
     GenerationRequest seq3{requestId, numTokens, beamWidth, maxBlocksPerSeq};
@@ -967,9 +991,9 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     requestId = 4;
     auto llmRequest4 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens, samplingConfig, isStreaming,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt, std::nullopt, false,
-        std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt, std::nullopt,
-        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3);
+        loraTaskId2, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false, false, std::nullopt,
+        std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt, 0.5, std::nullopt, std::nullopt,
+        std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds3);
 
     numTokens = llmRequest4->getNumTokens(beamIdx);
     GenerationRequest seq4{requestId, numTokens, beamWidth, maxBlocksPerSeq};
@@ -1030,6 +1054,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerPerRequestStatsTest)
     EXPECT_EQ(llmRequest0->getReusedBlocksPerRequest(), 0);
     EXPECT_EQ(llmRequest0->getAllocTotalBlocksPerRequest(), numBlocks);
     EXPECT_EQ(llmRequest0->getAllocNewBlocksPerRequest(), numBlocks);
+    EXPECT_EQ(llmRequest0->getMissedBlocksPerRequest(), numBlocks);
 
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest0));
 
@@ -1042,6 +1067,178 @@ TEST_F(KVCacheManagerTest, KVCacheManagerPerRequestStatsTest)
     EXPECT_EQ(llmRequest1->getReusedBlocksPerRequest(), numSharedBlocks);
     EXPECT_EQ(llmRequest1->getAllocTotalBlocksPerRequest(), numBlocks - numSharedBlocks);
     EXPECT_EQ(llmRequest1->getAllocNewBlocksPerRequest(), numBlocks - numSharedBlocks);
+    EXPECT_EQ(llmRequest1->getMissedBlocksPerRequest(), numBlocks - numSharedBlocks);
+    EXPECT_EQ(llmRequest1->getKVCacheHitRatePerRequest(),
+        static_cast<float>(numSharedBlocks) / static_cast<float>(numBlocks));
+}
+
+TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
+{
+    using namespace tensorrt_llm::executor;
+    auto constexpr numLayers = 12;
+    auto constexpr numKvHeads = 6;
+    auto constexpr sizePerHead = 16;
+    auto constexpr tokensPerBlock = 4;
+    auto constexpr maxBlocksPerSeq = 4;
+    auto constexpr blocksInPrimaryPool = 4;
+    auto constexpr blocksInSecondaryPool = 0;
+    auto constexpr maxNumSequences = 4;
+    auto const stream = std::make_shared<tr::CudaStream>();
+    auto constexpr onboardBlocks = true;
+
+    BlockManager blockManager(std::vector<BlockManager::SizeType32>(numLayers, numKvHeads), sizePerHead, tokensPerBlock,
+        blocksInPrimaryPool, blocksInSecondaryPool, maxNumSequences, stream, onboardBlocks);
+
+    EXPECT_EQ(blockManager.getTokensPerBlock(), tokensPerBlock);
+    EXPECT_EQ(blockManager.getMaxNumBlocks(), blocksInPrimaryPool);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), blocksInPrimaryPool);
+
+    SizeType32 constexpr maxNewTokens{0};
+    auto constexpr beamWidth = 1;
+    tr::SamplingConfig const samplingConfig{beamWidth};
+    bool constexpr isStreaming{false};
+
+    // Add a request at a high and very low priority
+    auto inputTokens0 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7});
+    auto const inputLength0 = static_cast<SizeType32>(inputTokens0->size());
+    auto llmRequest0 = std::make_shared<LlmRequest>(0, maxNewTokens, inputTokens0, samplingConfig, isStreaming);
+    llmRequest0->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 4, 90),
+                                   KvCacheRetentionConfig::TokenRangeRetentionPriority(4, 8, 10)},
+            20));
+    GenerationRequest seq0{0, inputLength0, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks0 = tc::ceilDiv(inputLength0, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq0, llmRequest0->getNumTokens(0), numContextBlocks0, llmRequest0);
+
+    // Add another sequence with different tokens, at a low priority
+    auto inputTokens1 = std::make_shared<VecTokens>(VecTokens{8, 9, 10, 11, 12, 13, 14, 15});
+    auto const inputLength1 = static_cast<SizeType32>(inputTokens1->size());
+    auto llmRequest1 = std::make_shared<LlmRequest>(1, maxNewTokens, inputTokens1, samplingConfig, isStreaming);
+    GenerationRequest seq1{1, inputLength1, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks1 = tc::ceilDiv(inputLength1, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq1, llmRequest1->getNumTokens(0), numContextBlocks1, llmRequest1);
+
+    // Release both sequences
+    blockManager.releaseBlocks(seq0, llmRequest0);
+    blockManager.releaseBlocks(seq1, llmRequest1);
+
+    // Add and then release another sequence
+    auto inputTokens2 = std::make_shared<VecTokens>(VecTokens{16, 17, 18, 19, 20, 21, 22, 23});
+    auto const inputLength2 = static_cast<SizeType32>(inputTokens2->size());
+    auto llmRequest2 = std::make_shared<LlmRequest>(2, maxNewTokens, inputTokens2, samplingConfig, isStreaming);
+    llmRequest2->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, std::nullopt, 20)}, 20));
+    GenerationRequest seq2{2, inputLength2, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks2 = tc::ceilDiv(inputLength2, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq2, llmRequest2->getNumTokens(0), numContextBlocks2, llmRequest2);
+    blockManager.releaseBlocks(seq2, llmRequest2);
+
+    // Check that request 1 blocks were overwritten
+    auto inputTokens3 = std::make_shared<VecTokens>(VecTokens{8, 9, 10, 11, 12, 13, 14, 15});
+    auto const inputLength3 = static_cast<SizeType32>(inputTokens3->size());
+    auto llmRequest3 = std::make_shared<LlmRequest>(3, maxNewTokens, inputTokens3, samplingConfig, isStreaming);
+    GenerationRequest seq3{3, inputLength3, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks3 = tc::ceilDiv(inputLength3, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq3, llmRequest3->getNumTokens(0), numContextBlocks3, llmRequest3);
+
+    EXPECT_EQ(llmRequest3->getContextCurrentPosition(), 4);
+
+    blockManager.releaseBlocks(seq3, llmRequest3);
+    EXPECT_EQ(blockManager.getNumFreeBlocks(), 4);
+
+    // Check that request 0 blocks weren't overwritten
+    auto inputTokens4 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7});
+    auto const inputLength4 = static_cast<SizeType32>(inputTokens4->size());
+    auto llmRequest4 = std::make_shared<LlmRequest>(4, maxNewTokens, inputTokens4, samplingConfig, isStreaming);
+    GenerationRequest seq4{4, inputLength3, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks4 = tc::ceilDiv(inputLength4, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq4, llmRequest4->getNumTokens(0), numContextBlocks4, llmRequest4);
+
+    EXPECT_EQ(llmRequest4->getContextCurrentPosition(), 4);
+
+    // Check that request 2 block 0 has been evicted
+    auto inputTokens5 = std::make_shared<VecTokens>(VecTokens{16, 17, 18, 19, 20, 21, 22, 23});
+    auto const inputLength5 = static_cast<SizeType32>(inputTokens5->size());
+    auto llmRequest5 = std::make_shared<LlmRequest>(5, maxNewTokens, inputTokens5, samplingConfig, isStreaming);
+    GenerationRequest seq5{5, inputLength5, beamWidth, maxBlocksPerSeq};
+    auto numContextBlocks5 = tc::ceilDiv(inputLength5, blockManager.getTokensPerBlock());
+    blockManager.addSequence(seq5, llmRequest5->getNumTokens(0), numContextBlocks5, llmRequest5);
+
+    EXPECT_EQ(llmRequest5->getContextCurrentPosition(), 0);
+}
+
+TEST_F(KVCacheManagerTest, KVCacheManagerDecodeBlockPriorityTest)
+{
+
+    using namespace tensorrt_llm::executor;
+
+    auto constexpr numLayers = 12;
+    auto constexpr numHeads = 6;
+    auto constexpr sizePerHead = 16;
+    auto constexpr tokensPerBlock = 4;
+    auto constexpr maxBlocksPerSeq = 8;
+    auto constexpr maxNumSequences = 8;
+    auto constexpr blocksInPrimaryPool = 8;
+    auto constexpr blocksInSecondaryPool = 0;
+    auto constexpr onboardBlocks = true;
+    auto const stream = std::make_shared<tr::CudaStream>();
+
+    auto constexpr beamWidth = 1;
+    SizeType32 constexpr maxNewTokens = 8;
+    tr::SamplingConfig const samplingConfig{beamWidth};
+    bool constexpr isStreaming{false};
+
+    KVCacheManager kvCacheManager(numLayers, numHeads, sizePerHead, tokensPerBlock, blocksInPrimaryPool,
+        blocksInSecondaryPool, maxNumSequences, beamWidth, tokensPerBlock * maxBlocksPerSeq, 0, false, stream, true,
+        onboardBlocks);
+
+    auto const& blockManager = kvCacheManager.getBlockManager();
+
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 8);
+
+    auto inputTokens0 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11});
+    auto const inputLength0 = static_cast<SizeType32>(inputTokens0->size());
+    auto llmRequest0 = std::make_shared<LlmRequest>(0, maxNewTokens, inputTokens0, samplingConfig, isStreaming);
+    llmRequest0->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, std::nullopt, 5)}, 90));
+    kvCacheManager.addSequence(0, inputLength0, beamWidth, llmRequest0);
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 5);
+
+    llmRequest0->addNewToken(0, 0);
+    kvCacheManager.addToken(0);
+
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 4);
+
+    auto inputTokens1 = std::make_shared<VecTokens>(VecTokens{12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23});
+    auto const inputLength1 = static_cast<SizeType32>(inputTokens1->size());
+    auto llmRequest1 = std::make_shared<LlmRequest>(1, maxNewTokens, inputTokens1, samplingConfig, isStreaming);
+    llmRequest1->setKvCacheRetentionConfig(
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, std::nullopt, 90)}, 5));
+    kvCacheManager.addSequence(1, inputLength1, beamWidth, llmRequest1);
+
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 1);
+
+    llmRequest1->addNewToken(0, 0);
+    kvCacheManager.addToken(1);
+
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 0);
+
+    kvCacheManager.removeSequence(0, llmRequest0);
+    kvCacheManager.removeSequence(1, llmRequest1);
+
+    EXPECT_EQ(kvCacheManager.getNumFreeBlocks(), 8);
+
+    auto inputTokens2 = std::make_shared<VecTokens>(VecTokens{24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35});
+    auto const inputLength2 = static_cast<SizeType32>(inputTokens2->size());
+    auto llmRequest2 = std::make_shared<LlmRequest>(2, maxNewTokens, inputTokens2, samplingConfig, isStreaming);
+    kvCacheManager.addSequence(2, inputLength2, beamWidth, llmRequest2);
+    kvCacheManager.removeSequence(2, llmRequest2);
+
+    auto inputTokens3 = std::make_shared<VecTokens>(VecTokens{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11});
+    auto const inputLength3 = static_cast<SizeType32>(inputTokens3->size());
+    auto llmRequest3 = std::make_shared<LlmRequest>(3, maxNewTokens, inputTokens3, samplingConfig, isStreaming);
+    kvCacheManager.addSequence(3, inputLength3, beamWidth, llmRequest3);
+    EXPECT_EQ(llmRequest3->getContextCurrentPosition(), 8);
 }
 
 TEST_P(KVCacheManagerTest, KVCacheManagerAllocationTest)
@@ -1562,7 +1759,8 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithReuseTest)
     kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
     GenerationRequest const& seq2 = kvCacheManager.getSequence(requestId);
     EXPECT_EQ(llmRequest->getContextCurrentPosition(), 2 * tokensPerBlock);
-    EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({4, 5, 7}));
+    // Block 6 only had 1 token, so it was prioritized for eviction.
+    EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({4, 5, 6}));
 
     numTokens = llmRequest->getNumTokens(beamIdx);
     numBlocks = tc::ceilDiv(numTokens, tokensPerBlock);
@@ -1581,13 +1779,13 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithReuseTest)
     kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
     GenerationRequest const& seq3 = kvCacheManager.getSequence(requestId);
     EXPECT_EQ(llmRequest->getContextCurrentPosition(), 2 * tokensPerBlock);
-    EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({4, 5, 8, 9}));
+    EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({4, 5, 7, 8}));
 
     llmRequest->addNewToken(1015, beamIdx);
     kvCacheManager.addToken(requestId);
     llmRequest->addNewToken(1016, beamIdx);
     kvCacheManager.addToken(requestId);
-    EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({10, 5, 8, 9}));
+    EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({9, 5, 7, 8}));
     EXPECT_NO_THROW(kvCacheManager.removeSequence(requestId, llmRequest));
 
     ///////////////////////////////////////////////////////////////////////////
@@ -1600,7 +1798,7 @@ TEST_F(KVCacheManagerTest, KVCacheManagerMaxAttentionWindowWithReuseTest)
     kvCacheManager.addSequence(requestId, inputLength, beamWidth, llmRequest);
     EXPECT_EQ(llmRequest->getContextCurrentPosition(), 0);
     GenerationRequest const& seq4 = kvCacheManager.getSequence(requestId);
-    EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({11, 12, 13, 14}));
+    EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({10, 11, 12, 13}));
 }
 
 TEST_P(KVCacheManagerTest, KVCacheManagerSinkTokenLengthTest)

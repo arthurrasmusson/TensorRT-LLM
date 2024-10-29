@@ -364,7 +364,7 @@ TEST(SerializeUtilsTest, VectorResponses)
 
 TEST(SerializeUtilsTest, KvCacheConfig)
 {
-    texec::KvCacheConfig kvCacheConfig(true, 10, std::vector(1, 100), 2, 0.1, 10000, false);
+    texec::KvCacheConfig kvCacheConfig(true, 10, std::vector(1, 100), 2, 0.1, 10000, false, 0.5, 50);
     auto kvCacheConfig2 = serializeDeserialize(kvCacheConfig);
 
     EXPECT_EQ(kvCacheConfig.getEnableBlockReuse(), kvCacheConfig2.getEnableBlockReuse());
@@ -374,6 +374,8 @@ TEST(SerializeUtilsTest, KvCacheConfig)
     EXPECT_EQ(kvCacheConfig.getFreeGpuMemoryFraction(), kvCacheConfig2.getFreeGpuMemoryFraction());
     EXPECT_EQ(kvCacheConfig.getHostCacheSize(), kvCacheConfig2.getHostCacheSize());
     EXPECT_EQ(kvCacheConfig.getOnboardBlocks(), kvCacheConfig2.getOnboardBlocks());
+    EXPECT_EQ(kvCacheConfig.getCrossKvCacheFraction(), kvCacheConfig2.getCrossKvCacheFraction());
+    EXPECT_EQ(kvCacheConfig.getSecondaryOffloadMinPriority(), kvCacheConfig2.getSecondaryOffloadMinPriority());
 }
 
 TEST(SerializeUtilsTest, SchedulerConfig)
@@ -410,6 +412,27 @@ TEST(SerializeUtilsTest, LookaheadDecodingConfig)
     EXPECT_EQ(lookaheadDecodingConfig.getNgramSize(), lookaheadDecodingConfig2.getNgramSize());
     EXPECT_EQ(lookaheadDecodingConfig.getWindowSize(), lookaheadDecodingConfig2.getWindowSize());
     EXPECT_EQ(lookaheadDecodingConfig.getVerificationSetSize(), lookaheadDecodingConfig2.getVerificationSetSize());
+}
+
+TEST(SerializeUtilsTest, KvCacheRetentionConfig)
+{
+    auto kvCacheRetentionConfig = texec::KvCacheRetentionConfig();
+    auto kvCacheRetentionConfig2 = serializeDeserialize(kvCacheRetentionConfig);
+    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionPriorities(),
+        kvCacheRetentionConfig2.getTokenRangeRetentionPriorities());
+    EXPECT_EQ(
+        kvCacheRetentionConfig.getDecodeRetentionPriority(), kvCacheRetentionConfig2.getDecodeRetentionPriority());
+
+    kvCacheRetentionConfig
+        = texec::KvCacheRetentionConfig({texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 1, 80),
+                                            texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(1, 2, 50),
+                                            texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(2, 3, 30)},
+            5);
+    kvCacheRetentionConfig2 = serializeDeserialize(kvCacheRetentionConfig);
+    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionPriorities(),
+        kvCacheRetentionConfig2.getTokenRangeRetentionPriorities());
+    EXPECT_EQ(
+        kvCacheRetentionConfig.getDecodeRetentionPriority(), kvCacheRetentionConfig2.getDecodeRetentionPriority());
 }
 
 TEST(SerializeUtilsTest, DecodingConfig)

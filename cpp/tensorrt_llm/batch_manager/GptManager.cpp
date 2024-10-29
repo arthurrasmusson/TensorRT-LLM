@@ -420,7 +420,7 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
 
     auto r = std::make_shared<LlmRequest>(newReq->getRequestId(), maxNewTokens, tokens, samplingConfig,
         newReq->isStreaming(), endId, padId, embeddingBias, badWordsList, stopWordsList, positionIds,
-        promptEmbeddingTable, promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig,
+        promptEmbeddingTable, promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig, std::nullopt,
         returnLogProbs.value(), returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
         false /* FIXME: exclude input in output */, newReq->getLogitsPostProcessor());
 
@@ -566,6 +566,8 @@ BatchManagerErrorCode_t GptManager::returnBatchManagerStats()
         statsJson["Allocated total KV cache blocks"] = kvCacheStats.allocTotalBlocks;
         statsJson["Allocated new KV cache blocks"] = kvCacheStats.allocNewBlocks;
         statsJson["Reused KV cache blocks"] = kvCacheStats.reusedBlocks;
+        statsJson["Missed KV cache blocks"] = kvCacheStats.missedBlocks;
+        statsJson["KV cache hit rate"] = kvCacheStats.cacheHitRate;
     }
     auto const modelType = mTrtGptModel->getModelType();
     if (modelType == TrtGptModelType::InflightBatching || modelType == TrtGptModelType::InflightFusedBatching)

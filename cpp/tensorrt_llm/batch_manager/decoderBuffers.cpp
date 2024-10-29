@@ -82,6 +82,10 @@ DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWid
     {
         lookaheadBuffers.emplace(maxNumSequences, maxTokensPerStep, runtime.getBufferManager());
     }
+    if (modelConfig.getSpeculativeDecodingMode().isEagle())
+    {
+        eagleBuffers.create(maxNumSequences, runtime, modelConfig, worldConfig);
+    }
 }
 
 void DecoderBuffers::DraftBuffers::create(

@@ -217,8 +217,8 @@ private:
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
     void createBuffers(executor::DecodingConfig const& decodingConfig,
         executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig);
-    std::shared_ptr<KVCacheManager> createKvCacheManager(
-        KvCacheConfig const& kvCacheConfig, KvCacheType kvCacheType = KvCacheType::kSELF);
+    std::shared_ptr<KVCacheManager> createKvCacheManager(KvCacheConfig const& kvCacheConfig,
+        SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool, KvCacheType kvCacheType = KvCacheType::kSELF);
     void createRnnStateManager();
     void createCustomAllReduceWorkspace();
 

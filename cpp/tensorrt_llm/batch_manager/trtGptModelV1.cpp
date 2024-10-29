@@ -630,6 +630,8 @@ void TrtGptModelV1::getCurrentIterationStats(executor::IterationStats& stats) co
         kvStats.allocTotalBlocks = kvCacheStats.allocTotalBlocks;
         kvStats.allocNewBlocks = kvCacheStats.allocNewBlocks;
         kvStats.reusedBlocks = kvCacheStats.reusedBlocks;
+        kvStats.missedBlocks = kvCacheStats.missedBlocks;
+        kvStats.cacheHitRate = kvCacheStats.cacheHitRate;
         stats.kvCacheStats = kvStats;
     }
     executor::StaticBatchingStats modelStats;

@@ -13,6 +13,7 @@
 #pragma once
 
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/runtime/eagleBuffers.h"
 #include "tensorrt_llm/runtime/explicitDraftTokensBuffers.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/lookaheadBuffers.h"
@@ -114,6 +115,7 @@ public:
 
     DraftBuffers draftBuffers;
     runtime::ExplicitDraftTokensBuffers::Inputs explicitDraftTokensBuffers;
+    runtime::EagleBuffers::Inputs eagleBuffers;
     std::optional<runtime::LookaheadDecodingBuffers> lookaheadBuffers;
 
     DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,

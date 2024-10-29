@@ -19,6 +19,7 @@
 #include "rnnStateBuffers.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/decoderBuffers.h"
+#include "tensorrt_llm/runtime/eagleBuffers.h"
 #include "tensorrt_llm/runtime/explicitDraftTokensBuffers.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/lookaheadBuffers.h"
@@ -147,6 +148,8 @@ public:
     std::optional<runtime::LookaheadRuntimeBuffers> lookaheadBuffers;
     // Explicit draft tokens decoding
     std::optional<runtime::ExplicitDraftTokensBuffers> explicitDraftTokensBuffers;
+    // Eagle decoding
+    std::optional<runtime::EagleBuffers> eagleBuffers;
 
     // decoder
     TensorPtr decoderInputsIds;
@@ -211,6 +214,9 @@ public:
     void prepareBuffersForCudaGraph();
 
     void prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
+
+    void prepareEagleBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     [[nodiscard]] SizeType32 constexpr getNumTokens() const noexcept

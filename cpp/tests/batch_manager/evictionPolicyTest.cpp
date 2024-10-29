@@ -24,6 +24,13 @@ namespace tr = tensorrt_llm::runtime;
 
 using namespace tensorrt_llm::batch_manager::eviction_policy;
 using namespace tensorrt_llm::batch_manager::kv_cache_manager;
+using namespace tensorrt_llm::executor;
+using namespace ::testing;
+
+using ::testing::Return;
+
+using RP = RetentionPriority;
+using KV = KvCacheRetentionConfig;
 
 #define NUM_PRIMARY_BLOCKS 8
 #define NUM_SECONDARY_BLOCKS 4
@@ -46,76 +53,195 @@ public:
             allBlocksById.push_back(
                 std::make_shared<KVCacheBlock>(NUM_PRIMARY_BLOCKS + blockId, tk::KVCacheIndex{blockId, true}));
         }
-        policy->initialize(allBlocksById, NUM_PRIMARY_BLOCKS, NUM_SECONDARY_BLOCKS);
+        policy->initialize(allBlocksById, {NUM_PRIMARY_BLOCKS, NUM_SECONDARY_BLOCKS});
     }
 
     void TearDown() override {}
 
-    std::shared_ptr<BaseEvictionPolicy> policy;
+    std::shared_ptr<LRUEvictionPolicy> policy;
+};
+
+class KvCacheRetentionConfigTest : public ::testing::Test
+{
+public:
+    void SetUp() {}
+
+    void TearDown() {}
 };
 
 TEST_F(LRUPolicyTest, NumFreeBlocksTest)
 {
-    EXPECT_EQ(NUM_PRIMARY_BLOCKS, policy->getNumFreePrimaryBlocks());
-    EXPECT_EQ(NUM_SECONDARY_BLOCKS, policy->getNumFreeSecondaryBlocks());
+    EXPECT_EQ(NUM_PRIMARY_BLOCKS, policy->getNumFreeBlocks(0));
+    EXPECT_EQ(NUM_SECONDARY_BLOCKS, policy->getNumFreeBlocks(1));
 
-    auto primaryBlock = policy->getFreePrimaryBlock();
-    policy->claimBlock(*primaryBlock);
-    EXPECT_EQ(NUM_PRIMARY_BLOCKS - 1, policy->getNumFreePrimaryBlocks());
-    EXPECT_EQ(NUM_SECONDARY_BLOCKS, policy->getNumFreeSecondaryBlocks());
+    auto primaryBlock = std::get<0>(policy->getFreeBlock(0));
+    policy->claimBlock(primaryBlock);
+    EXPECT_EQ(NUM_PRIMARY_BLOCKS - 1, policy->getNumFreeBlocks(0));
+    EXPECT_EQ(NUM_SECONDARY_BLOCKS, policy->getNumFreeBlocks(1));
 
-    auto secondaryBlock = policy->getFreeSecondaryBlock();
-    policy->claimBlock(*secondaryBlock);
-    EXPECT_EQ(NUM_PRIMARY_BLOCKS - 1, policy->getNumFreePrimaryBlocks());
-    EXPECT_EQ(NUM_SECONDARY_BLOCKS - 1, policy->getNumFreeSecondaryBlocks());
+    auto secondaryBlock = std::get<0>(policy->getFreeBlock(1));
+    policy->claimBlock(secondaryBlock);
+    EXPECT_EQ(NUM_PRIMARY_BLOCKS - 1, policy->getNumFreeBlocks(0));
+    EXPECT_EQ(NUM_SECONDARY_BLOCKS - 1, policy->getNumFreeBlocks(1));
 }
 
 TEST_F(LRUPolicyTest, GetFreeBlockTest)
 {
-    auto primaryBlock = policy->getFreePrimaryBlock();
+    auto primaryBlock = std::get<0>(policy->getFreeBlock(0));
     EXPECT_FALSE(primaryBlock->hasRefs());
     EXPECT_TRUE(primaryBlock->isPrimary());
 
-    auto secondaryBlock = policy->getFreeSecondaryBlock();
+    auto secondaryBlock = std::get<0>(policy->getFreeBlock(1));
     EXPECT_FALSE(secondaryBlock->hasRefs());
     EXPECT_FALSE(secondaryBlock->isPrimary());
 }
 
 TEST_F(LRUPolicyTest, ReleaseBlockTest)
 {
-    auto origPrimaryBlock = policy->getFreePrimaryBlock();
-    policy->claimBlock(*origPrimaryBlock);
+    auto origPrimaryBlock = std::get<0>(policy->getFreeBlock(0));
+    policy->claimBlock(origPrimaryBlock);
 
-    EXPECT_NE(origPrimaryBlock->getBlockId(), policy->getFreePrimaryBlock()->getBlockId());
+    EXPECT_NE(origPrimaryBlock->getBlockId(), std::get<0>(policy->getFreeBlock(0))->getBlockId());
 
     policy->releaseBlock(origPrimaryBlock, true);
-    EXPECT_EQ(origPrimaryBlock->getBlockId(), policy->getFreePrimaryBlock()->getBlockId());
+    EXPECT_EQ(origPrimaryBlock->getBlockId(), std::get<0>(policy->getFreeBlock(0))->getBlockId());
 
-    policy->claimBlock(*origPrimaryBlock);
+    policy->claimBlock(origPrimaryBlock);
     policy->releaseBlock(origPrimaryBlock);
 
-    EXPECT_NE(origPrimaryBlock->getBlockId(), policy->getFreePrimaryBlock()->getBlockId());
+    EXPECT_NE(origPrimaryBlock->getBlockId(), std::get<0>(policy->getFreeBlock(0))->getBlockId());
 }
 
 TEST_F(LRUPolicyTest, LRUTest)
 {
-    auto block1 = policy->getFreePrimaryBlock();
-    policy->claimBlock(*block1);
+    auto block1 = std::get<0>(policy->getFreeBlock(0));
+    policy->claimBlock(block1);
 
-    auto block2 = policy->getFreePrimaryBlock();
-    policy->claimBlock(*block2);
+    auto block2 = std::get<0>(policy->getFreeBlock(0));
+    policy->claimBlock(block2);
 
     policy->releaseBlock(block2);
     policy->releaseBlock(block1);
 
     for (int i = 0; i < NUM_PRIMARY_BLOCKS - 2; i++)
     {
-        auto block = policy->getFreePrimaryBlock();
-        policy->claimBlock(*block);
+        auto block = std::get<0>(policy->getFreeBlock(0));
+        policy->claimBlock(block);
     }
-    ASSERT_EQ(policy->getFreePrimaryBlock()->getBlockId(), block2->getBlockId());
+    ASSERT_EQ(std::get<0>(policy->getFreeBlock(0))->getBlockId(), block2->getBlockId());
 
-    policy->claimBlock(*policy->getFreePrimaryBlock());
+    policy->claimBlock(std::get<0>(policy->getFreeBlock(0)));
 
-    ASSERT_EQ(policy->getFreePrimaryBlock()->getBlockId(), block1->getBlockId());
+    ASSERT_EQ(std::get<0>(policy->getFreeBlock(0))->getBlockId(), block1->getBlockId());
+}
+
+TEST_F(LRUPolicyTest, PriorityTest)
+{
+    // Test that min priority blocks don't get offloaded
+    auto [block, shouldOffload] = policy->getFreeBlock(0);
+    EXPECT_TRUE(shouldOffload);
+    policy->claimBlock(block, 5);
+    policy->releaseBlock(block);
+
+    std::tie(block, shouldOffload) = policy->getFreeBlock(0);
+    EXPECT_FALSE(shouldOffload);
+    policy->claimBlock(block);
+    policy->releaseBlock(block);
+
+    auto [block1, shouldOffload1] = policy->getFreeBlock(0);
+    policy->claimBlock(block, 80);
+
+    auto [block2, shouldOffload2] = policy->getFreeBlock(0);
+    policy->claimBlock(block2, 5);
+
+    for (int i = 0; i < NUM_PRIMARY_BLOCKS - 2; i++)
+    {
+        policy->claimBlock(std::get<0>(policy->getFreeBlock(0)));
+    }
+
+    policy->releaseBlock(block1);
+    policy->releaseBlock(block2);
+
+    EXPECT_EQ(std::get<0>(policy->getFreeBlock(0))->getBlockId(), block2->getBlockId());
+}
+
+TEST_F(KvCacheRetentionConfigTest, InitializeTest)
+{
+    // Invalid EOS
+    EXPECT_THROW(KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, std::nullopt, 80),
+                                            KvCacheRetentionConfig::TokenRangeRetentionPriority(64, 128, 80)},
+                     30),
+        std::invalid_argument);
+    // Range must not have negative length
+    EXPECT_THROW(KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 64, 80),
+                                            KvCacheRetentionConfig::TokenRangeRetentionPriority(64, 32, 80)},
+                     30),
+        std::invalid_argument);
+    // Ranges can't overlap
+    EXPECT_THROW(KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 64, 80),
+                                            KvCacheRetentionConfig::TokenRangeRetentionPriority(30, 128, 80)},
+                     30),
+        std::invalid_argument);
+}
+
+TEST_F(KvCacheRetentionConfigTest, BlockConfigTest)
+{
+    auto perBlockPriorities
+        = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 64, 80),
+                                     KvCacheRetentionConfig::TokenRangeRetentionPriority(64, 128, 50)},
+            30)
+              .getPerBlockEvictionPolicy(64, 256);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, 50, std::nullopt, std::nullopt));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 63, 80),
+                                                    KvCacheRetentionConfig::TokenRangeRetentionPriority(63, 127, 30)},
+        30)
+                             .getPerBlockEvictionPolicy(32, 127);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, 80, 30, 30));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 1, 80),
+                                                    KvCacheRetentionConfig::TokenRangeRetentionPriority(1, 2, 5)},
+        30)
+                             .getPerBlockEvictionPolicy(32, 128);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, std::nullopt, std::nullopt, std::nullopt));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 128, 80)}, 30)
+                             .getPerBlockEvictionPolicy(256, 192);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 65, 80),
+                                                    KvCacheRetentionConfig::TokenRangeRetentionPriority(65, 129, 30)},
+        30)
+                             .getPerBlockEvictionPolicy(64, 192);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, 80, 30));
+
+    perBlockPriorities
+        = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 64, 80),
+                                     KvCacheRetentionConfig::TokenRangeRetentionPriority(129, std::nullopt, 50)},
+            30)
+              .getPerBlockEvictionPolicy(64, 256);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, std::nullopt, std::nullopt, 50));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 64, 80),
+                                                    KvCacheRetentionConfig::TokenRangeRetentionPriority(66, 67, 50)},
+        30)
+                             .getPerBlockEvictionPolicy(64, 256);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(80, std::nullopt, std::nullopt, std::nullopt));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(127, 193, 80)}, 30)
+                             .getPerBlockEvictionPolicy(64, 256);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(std::nullopt, std::nullopt, 80, 80));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(127, 193, 80)}, 30)
+                             .getPerBlockEvictionPolicy(64, 256);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(std::nullopt, std::nullopt, 80, 80));
+
+    perBlockPriorities = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(127, 193, 80)}, 30)
+                             .getPerBlockEvictionPolicy(64, 32);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(std::nullopt));
+
+    perBlockPriorities
+        = KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(1, std::nullopt, 80)}, 30)
+              .getPerBlockEvictionPolicy(64, 128);
+    ASSERT_THAT(perBlockPriorities, ElementsAre(std::nullopt, 80));
 }

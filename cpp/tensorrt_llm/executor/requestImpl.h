@@ -33,11 +33,13 @@ public:
         std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
         std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-        std::optional<LookaheadDecodingConfig> lookaheadConfig, std::optional<std::string> logitsPostProcessorName,
-        std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
-        PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
-        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
-        std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences)
+        std::optional<LookaheadDecodingConfig> lookaheadConfig,
+        std::optional<KvCacheRetentionConfig> kvCacheRetentionConfig,
+        std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
+        std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority, RequestType type,
+        std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
+        std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
+        SizeType32 numReturnSequences)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -53,6 +55,7 @@ public:
         , mPTuningConfig(std::move(pTuningConfig))
         , mLoraConfig(std::move(loraConfig))
         , mLookaheadConfig(std::move(lookaheadConfig))
+        , mKvCacheRetentionConfig(std::move(kvCacheRetentionConfig))
         , mLogitsPostProcessorName(std::move(logitsPostProcessorName))
         , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
         , mClientId(clientId)
@@ -155,6 +158,11 @@ public:
     std::optional<LookaheadDecodingConfig> getLookaheadConfig() const
     {
         return mLookaheadConfig;
+    }
+
+    std::optional<KvCacheRetentionConfig> getKvCacheRetentionConfig() const
+    {
+        return mKvCacheRetentionConfig;
     }
 
     std::optional<std::string> getLogitsPostProcessorName() const
@@ -280,6 +288,11 @@ public:
         mLookaheadConfig = lookaheadConfig;
     }
 
+    void setKvCacheRetentionConfig(KvCacheRetentionConfig const& kvCacheRetentionConfig)
+    {
+        mKvCacheRetentionConfig = kvCacheRetentionConfig;
+    }
+
     void setLogitsPostProcessorName(std::string const& logitsPostProcessorName)
     {
         mLogitsPostProcessorName = logitsPostProcessorName;
@@ -383,6 +396,7 @@ private:
         lambda(mPTuningConfig);
         lambda(mLoraConfig);
         lambda(mLookaheadConfig);
+        lambda(mKvCacheRetentionConfig);
         lambda(mLogitsPostProcessorName);
         lambda(mEncoderInputTokenIds);
         lambda(mClientId);
@@ -411,6 +425,7 @@ private:
     std::optional<PromptTuningConfig> mPTuningConfig;
     std::optional<LoraConfig> mLoraConfig;
     std::optional<LookaheadDecodingConfig> mLookaheadConfig;
+    std::optional<KvCacheRetentionConfig> mKvCacheRetentionConfig;
     std::optional<std::string> mLogitsPostProcessorName;
     std::optional<VecTokens> mEncoderInputTokenIds;
     std::optional<IdType> mClientId;

@@ -518,7 +518,7 @@ private:
 
         // TODO: for same reqId , need select specific generationLeader
         static int leaderRank = 0;
-        leaderRank = (leaderRank + 1) % mContextLeaderRanks.size();
+        leaderRank = (leaderRank + 1) % mGenerationLeaderRanks.size();
         return mGenerationLeaderRanks[leaderRank];
     }
 

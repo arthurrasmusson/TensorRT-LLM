@@ -16,6 +16,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/tllmBuffers.h"
@@ -309,7 +310,8 @@ public:
 
     void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm,
         tensorrt_llm::executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        tensorrt_llm::executor::kv_cache::CacheState const& destConfig) override
+        tensorrt_llm::executor::kv_cache::CacheState const& destConfig,
+        tensorrt_llm::runtime::BufferManager const&) override
     {
         mockTransfer(llmRequest, comm);
     }
@@ -390,7 +392,7 @@ TEST_F(MockTransceiverTest, UcxSenderBasic)
         factory->addMockComm(std::move(mockComm));
     }
     EXPECT_CALL(*factory, create).Times(1);
-    tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{0, 0, 0, 0, 0, 0, nvinfer1::DataType::kFLOAT};
+    tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT};
     auto sender = UcxDataSender<tle::kv_cache::CacheState>(std::move(factory), fakeCacheState, 0, std::move(formatter));
 
     // Expect recvRequestInfo will be blocking until a connection has been initialized
@@ -555,7 +557,7 @@ protected:
             auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
             for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
             {
-                TLLM_CUDA_CHECK(cudaMemsetAsync(it->data(), llmRequest->mRequestId, it->getSizeInBytes()));
+                TLLM_CUDA_CHECK(cudaMemset(it->data(), llmRequest->mRequestId, it->getSizeInBytes()));
             }
             return mResponder->respondAndSendAsync(*llmRequest);
         }

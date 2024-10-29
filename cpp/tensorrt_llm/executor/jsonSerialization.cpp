@@ -54,7 +54,7 @@ namespace tensorrt_llm::executor
 {
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(KvCacheStats, maxNumBlocks, freeNumBlocks, usedNumBlocks, tokensPerBlock,
-    allocTotalBlocks, allocNewBlocks, reusedBlocks);
+    allocTotalBlocks, allocNewBlocks, reusedBlocks, missedBlocks, cacheHitRate);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     StaticBatchingStats, numScheduledRequests, numContextRequests, numCtxTokens, numGenTokens, emptyGenSlots);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(InflightBatchingStats, numScheduledRequests, numContextRequests, numGenRequests,
@@ -69,7 +69,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(RequestStage,
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisServingRequestStats, kvCacheTransferMS);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStats, id, stage, contextPrefillPosition, numGeneratedTokens,
     avgNumDecodedTokensPerIter, scheduled, paused, disServingStats, allocTotalBlocksPerRequest,
-    allocNewBlocksPerRequest, reusedBlocksPerRequest);
+    allocNewBlocksPerRequest, reusedBlocksPerRequest, missedBlocksPerRequest, kvCacheHitRatePerRequest);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(RequestStatsPerIteration, iter, requestStats);
 
 std::string JsonSerialization::toJsonStr(IterationStats const& iterationStats)

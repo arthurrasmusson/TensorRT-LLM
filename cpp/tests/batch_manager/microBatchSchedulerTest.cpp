@@ -57,7 +57,8 @@ protected:
             /*badWordsList=*/std::nullopt, /*stopWordsList=*/std::nullopt, /*positionIds=*/std::nullopt,
             /*promptEmbeddingTable=*/std::nullopt, /*promptVocabSize=*/std::nullopt,
             /*loraTaskId=*/std::nullopt, /*loraWeights=*/std::nullopt,
-            /*loraConfig=*/std::nullopt, /*lookaheadConfig=*/std::nullopt, /*returnLogProbs=*/false,
+            /*loraConfig=*/std::nullopt, /*lookaheadConfig=*/std::nullopt, /*kvCacheRetentionConfig=*/std::nullopt,
+            /*returnLogProbs=*/false,
             /*returnContextLogits=*/false, /*returnGenerationLogits=*/false,
             draftTokens /*,std::optional<TensorPtr> draftLogits = std::nullopt*/);
     }
@@ -935,4 +936,40 @@ TEST_F(ContextChunkingTest, DraftTokensNoDiscard)
     setExpectedPositions<Policy::kFIRST_COME_FIRST_SERVED>({{25, 0}, {25, 25}});
     setExpectedFinalDraftLengths<Policy::kEQUAL_PROGRESS>({5, 5});
     setExpectedFinalDraftLengths<Policy::kFIRST_COME_FIRST_SERVED>({5, 5});
+}
+
+TEST_F(ContextChunkingTest, DraftTokensNoChunkingDiscardAll)
+{
+    setContextLengths({4128});
+    setDraftLengths({3});
+    setChunkUnitSize(64);
+    setMaxContextLength(4128);
+    setExpectedPositions<Policy::kEQUAL_PROGRESS>({{4128}});
+    setExpectedPositions<Policy::kFIRST_COME_FIRST_SERVED>({{4128}});
+    setExpectedFinalDraftLengths<Policy::kEQUAL_PROGRESS>({0});
+    setExpectedFinalDraftLengths<Policy::kFIRST_COME_FIRST_SERVED>({0});
+}
+
+TEST_F(ContextChunkingTest, DraftTokensNoChunkingDiscardSome)
+{
+    setContextLengths({4127});
+    setDraftLengths({3});
+    setChunkUnitSize(64);
+    setMaxContextLength(4128);
+    setExpectedPositions<Policy::kEQUAL_PROGRESS>({{4127}});
+    setExpectedPositions<Policy::kFIRST_COME_FIRST_SERVED>({{4127}});
+    setExpectedFinalDraftLengths<Policy::kEQUAL_PROGRESS>({1});
+    setExpectedFinalDraftLengths<Policy::kFIRST_COME_FIRST_SERVED>({1});
+}
+
+TEST_F(ContextChunkingTest, DraftTokensNoChunkingDiscardNone)
+{
+    setContextLengths({4125});
+    setDraftLengths({3});
+    setChunkUnitSize(64);
+    setMaxContextLength(4128);
+    setExpectedPositions<Policy::kEQUAL_PROGRESS>({{4125}});
+    setExpectedPositions<Policy::kFIRST_COME_FIRST_SERVED>({{4125}});
+    setExpectedFinalDraftLengths<Policy::kEQUAL_PROGRESS>({3});
+    setExpectedFinalDraftLengths<Policy::kFIRST_COME_FIRST_SERVED>({3});
 }

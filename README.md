@@ -10,8 +10,8 @@ TensorRT-LLM
 
 [![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/TensorRT-LLM/)
 [![python](https://img.shields.io/badge/python-3.10.12-green)](https://www.python.org/downloads/release/python-31012/)
-[![cuda](https://img.shields.io/badge/cuda-12.5.1-green)](https://developer.nvidia.com/cuda-downloads)
-[![trt](https://img.shields.io/badge/TRT-10.4.0-green)](https://developer.nvidia.com/tensorrt)
+[![cuda](https://img.shields.io/badge/cuda-12.6.1-green)](https://developer.nvidia.com/cuda-downloads)
+[![trt](https://img.shields.io/badge/TRT-10.5.0-green)](https://developer.nvidia.com/tensorrt)
 [![version](https://img.shields.io/badge/release-0.15.0.dev-green)](./tensorrt_llm/version.py)
 [![license](https://img.shields.io/badge/license-NVIDIA%20TensorRT%20Source%20Code%20License%20Agreement-blue)](./NVIDIA%20TensorRT%20Source%20Code%20License%20Agreement.pdf)
 

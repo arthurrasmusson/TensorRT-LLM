@@ -15,6 +15,7 @@
 #include "ucxDataTransceiver.h"
 
 #include "tensorrt_llm/batch_manager/cacheFormatter.h"
+#include <chrono>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -147,7 +148,7 @@ void UcxComm::sendRequestInfo(RequestInfo const& info) const
     }
 }
 
-void UcxComm::initializeEndpointTag()
+void UcxComm::initializeEndpointTag(int maxTryTimes)
 {
     // [FIXME] IP exchange seems to be more robust to ensure tag establishment,
     // i.e. different peers can use the same port number to connect with self worker
@@ -178,7 +179,17 @@ void UcxComm::initializeEndpointTag()
     else
     {
         // [FIXME] better message
-        TLLM_LOG_WARNING("UCX data transceiver is not created by connecting to a socket address.");
+        if (status == UCS_ERR_NOT_CONNECTED && maxTryTimes > 0)
+        {
+            TLLM_LOG_WARNING("UCX connection has not been established yet. wait 100 ms before retrying. maxTryTimes:%d",
+                maxTryTimes);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            initializeEndpointTag(maxTryTimes - 1);
+        }
+        else
+        {
+            TLLM_LOG_WARNING("UCX data transceiver is not created by connecting to a socket address.");
+        }
     }
 }
 

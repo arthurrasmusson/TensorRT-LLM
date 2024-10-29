@@ -48,4 +48,9 @@ if(ENABLE_UCX)
     PRIVATE $<TARGET_PROPERTY:ucxx::ucxx,INTERFACE_INCLUDE_DIRECTORIES>)
   target_link_libraries(ucxDataTransceiverTest PUBLIC tensorrt_llm_ucx_wrapper
                                                       ucx::ucs)
+  target_include_directories(
+    cacheTransceiverTest
+    PRIVATE $<TARGET_PROPERTY:ucxx::ucxx,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(cacheTransceiverTest PUBLIC tensorrt_llm_ucx_wrapper
+                                                    ucx::ucs)
 endif()

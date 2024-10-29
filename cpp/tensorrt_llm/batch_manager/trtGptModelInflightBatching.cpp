@@ -26,6 +26,7 @@
 #include "tensorrt_llm/batch_manager/utils/inflightBatchingUtils.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
+#include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
@@ -198,13 +199,43 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     }
     if (mModelConfig.isTransformerBased() && modelConfig.isKVCacheEnabled())
     {
-        mKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig, KvCacheType::kSELF);
+        auto const [blocksInPrimaryPool, blocksInSecondaryPool]
+            = KVCacheManager::calculateMaxNumBlocks(optionalParams.kvCacheConfig, mModelConfig.getKvDataType(),
+                mModelConfig, mWorldConfig, mRuntime->getBufferManager());
         if (mModelConfig.useCrossAttention())
         {
-            // assume encoder and decoder configs are the same
-            mCrossKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig, KvCacheType::kCROSS);
+            TLLM_CHECK_WITH_INFO(optionalParams.kvCacheConfig.crossKvCacheFraction.has_value(),
+                "Must set crossKvCacheFraction for encoder-decoder model");
+            auto const crossKvCacheFraction = optionalParams.kvCacheConfig.crossKvCacheFraction.value();
+            auto selfCacheSizePerToken
+                = kv_cache_manager::KVCacheManager::calculateCacheSizePerToken(mModelConfig, mWorldConfig, false);
+            auto crossCacheSizePerToken
+                = kv_cache_manager::KVCacheManager::calculateCacheSizePerToken(mModelConfig, mWorldConfig, true);
+            mKvCacheManager = createKvCacheManager(optionalParams.kvCacheConfig,
+                blocksInPrimaryPool * (1.0f - crossKvCacheFraction),
+                blocksInSecondaryPool * (1.0f - crossKvCacheFraction), KvCacheType::kSELF);
+            auto const numCrossBlocks
+                = (float) blocksInPrimaryPool * crossKvCacheFraction * selfCacheSizePerToken / crossCacheSizePerToken;
+            auto const numCrossSecondaryBlocks
+                = (float) blocksInSecondaryPool * crossKvCacheFraction * selfCacheSizePerToken / crossCacheSizePerToken;
+            mCrossKvCacheManager = createKvCacheManager(
+                optionalParams.kvCacheConfig, numCrossBlocks, numCrossSecondaryBlocks, KvCacheType::kCROSS);
+            TLLM_LOG_INFO("This is an Encoder-Decoder model, set %0.1f cross KV cache fraction based on the config.",
+                crossKvCacheFraction);
+            TLLM_LOG_INFO("Number of blocks in self KV cache primary pool: %d, in cross KV cache primary pool: %d",
+                (SizeType32) (blocksInPrimaryPool * (1.0f - crossKvCacheFraction)), (SizeType32) (numCrossBlocks));
+            TLLM_LOG_INFO("Number of blocks in self KV cache secondary pool: %d, in cross KV cache secondary pool: %d",
+                (SizeType32) (blocksInSecondaryPool * (1.0f - crossKvCacheFraction)),
+                (SizeType32) (numCrossSecondaryBlocks));
         }
-        if (std::getenv("TLLM_USE_UCX_KVCACHE"))
+        else
+        {
+            TLLM_CHECK_WITH_INFO(!optionalParams.kvCacheConfig.crossKvCacheFraction.has_value(),
+                "Do not set crossKvCacheFraction for decoder-only model");
+            mKvCacheManager = createKvCacheManager(
+                optionalParams.kvCacheConfig, blocksInPrimaryPool, blocksInSecondaryPool, KvCacheType::kSELF);
+        }
+        if (common::getEnvUseUCXKvCache())
         {
             TLLM_LOG_INFO("Enable UCX KV cache transport.");
             mCacheTransceiver = std::make_unique<CacheTransceiver>(
@@ -330,7 +361,8 @@ TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
 
 void TrtGptModelInflightBatching::setupSpeculativeDecodingModule(executor::DecodingConfig const& decodingConfig)
 {
-    if (mModelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
+    if (mModelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens()
+        || mModelConfig.getSpeculativeDecodingMode().isEagle())
     {
         TLLM_CHECK_WITH_INFO(mCtxGenFusion, "Current speculative decoding mode requires context-gen fusion IFB");
     }
@@ -497,10 +529,11 @@ std::optional<TrtGptModelInflightBatching::TensorPtr> TrtGptModelInflightBatchin
 }
 
 std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::createKvCacheManager(
-    KvCacheConfig const& kvCacheConfig, KvCacheType kvCacheType)
+    KvCacheConfig const& kvCacheConfig, SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool,
+    KvCacheType kvCacheType)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-
+    bool isCrossAttention = kvCacheType == KvCacheType::kCROSS;
     TLLM_CHECK_WITH_INFO(
         mModelConfig.isTransformerBased(), "KvCacheManager is only needed by transformer based model.");
 
@@ -519,14 +552,12 @@ std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::c
     TLLM_CHECK_WITH_INFO(
         getMaxBeamWidth() == 1 || !enableCyclicKvCache, "Can't support cyclic kv cache with beam search.");
 
-    auto const [blocksInPrimaryPool, blocksInSecondaryPool] = KVCacheManager::calculateMaxNumBlocks(
-        kvCacheConfig, kvDtype, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
-
     auto const useOneMoreBlock = false;
 
     // init KV cache block manager
     auto [numKvHeadsPerLayerBegin, numKvHeadsPerLayerEnd] = mModelConfig.getNumKvHeadsPerLayerLocalRange(
-        mWorldConfig.getPipelineParallelism(), mWorldConfig.getPipelineParallelRank());
+        mWorldConfig.getPipelineParallelism(), mWorldConfig.getPipelineParallelRank(), isCrossAttention);
+    auto numKvHeadsPerLayer = std::vector<SizeType32>(numKvHeadsPerLayerBegin, numKvHeadsPerLayerEnd);
     auto const sizePerHead = mModelConfig.getSizePerHead();
 
     // now we check if maxAttentionWindow is too large for at least one sequence to fit in kvCache
@@ -563,11 +594,11 @@ std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::c
             "Thus, KV cache reuse is disabled for cross KV cache.");
     }
     auto const enableBlockReuse = kvCacheType == KvCacheType::kSELF ? kvCacheConfig.enableBlockReuse : false;
-    auto kvCacheManager
-        = std::make_shared<KVCacheManager>(std::vector<SizeType32>(numKvHeadsPerLayerBegin, numKvHeadsPerLayerEnd),
-            sizePerHead, tokensPerBlock, blocksInPrimaryPool, blocksInSecondaryPool, getMaxNumSequences(),
-            getMaxBeamWidth(), maxKvCacheLength, getSinkTokenLen(), useOneMoreBlock, mRuntime->getStreamPtr(),
-            enableBlockReuse, kvCacheConfig.onboardBlocks, kvCacheType);
+
+    auto kvCacheManager = std::make_shared<KVCacheManager>(numKvHeadsPerLayer, sizePerHead, tokensPerBlock,
+        blocksInPrimaryPool, blocksInSecondaryPool, getMaxNumSequences(), getMaxBeamWidth(), maxKvCacheLength,
+        getSinkTokenLen(), useOneMoreBlock, mRuntime->getStreamPtr(), enableBlockReuse, kvCacheConfig.onboardBlocks,
+        kvCacheType, kvCacheConfig.secondaryOffloadMinPriority);
 
     reshapeKvTensors(*kvCacheManager);
 
@@ -1195,6 +1226,18 @@ executor::DecodingMode getDecodingMode(SpeculativeDecodingMode specDecodingMode,
             "mode to default.");
         decodingMode = getDefaultDecodingMode(decodingModeOpt);
     }
+    // Overwrite decoding mode when EAGLE is used.
+    if (specDecodingMode.isEagle() && !decodingMode.isEagle())
+    {
+        TLLM_LOG_WARNING("Model is Eagle, but decoding mode is not Eagle. Overwriting decoding mode to Eagle.");
+        decodingMode = executor::DecodingMode::Eagle();
+    }
+    // Overwrite decoding mode when Eagle is not used.
+    if (!specDecodingMode.isEagle() && decodingMode.isEagle())
+    {
+        TLLM_LOG_WARNING("Model is not Eagle, but decoding mode is Eagle. Overwriting decoding mode.");
+        decodingMode = getDefaultDecodingMode(decodingModeOpt);
+    }
     if (specDecodingMode.isDraftTokensExternal())
     {
         TLLM_LOG_WARNING("Overwriting decoding mode to external draft token");
@@ -1237,6 +1280,10 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
         if (decodingMode.isLookahead())
         {
             mDecoder->setupLookahead(mDecoderBuffers->lookaheadBuffers.value());
+        }
+        if (decodingMode.isEagle())
+        {
+            mDecoder->setupEagle(mDecoderBuffers->eagleBuffers);
         }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -1339,6 +1386,14 @@ RequestVector TrtGptModelInflightBatching::scheduleDistGenInitRequests(RequestLi
 void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& activeRequests)
 {
     NVTX3_SCOPED_RANGE(prepareDistGenInitRequests);
+    auto const toPrepare = std::any_of(activeRequests.begin(), activeRequests.end(),
+        [](auto const& req) { return req->isDisaggGenerationInitState(); });
+
+    if (!toPrepare)
+    {
+        return;
+    }
+
     auto newGenReqs = scheduleDistGenInitRequests(activeRequests);
 
     for (auto& newGenReq : newGenReqs)
@@ -1437,6 +1492,10 @@ TrtGptModelInflightBatching::prepareBuffers(
         {
             mBuffers[bufferId]->prepareExplicitDraftTokenBuffers(
                 *mDecoderBuffers, *mRuntime, mModelConfig, mWorldConfig);
+        }
+        if (mModelConfig.getSpeculativeDecodingMode().isEagle())
+        {
+            mBuffers[bufferId]->prepareEagleBuffers(*mDecoderBuffers, *mRuntime, mModelConfig, mWorldConfig);
         }
     }
 
@@ -1562,6 +1621,7 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
         {
             if (!llmReq->isLastContextChunk())
             {
+                ++batchIdx;
                 continue;
             }
 
@@ -1836,7 +1896,7 @@ TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching
     {
         auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
         auto const numContextLogits = contextRuntimeBuffers.numContextLogits.at(batchIndex);
-        auto const draftLength = llmReq->getNumDraftTokens();
+        auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
 
         TLLM_LOG_DEBUG("logitsIndex: %d", logitsIndex);
         TLLM_LOG_DEBUG("numContextLogits %d", numContextLogits);
@@ -2541,6 +2601,8 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
         kvStats.allocTotalBlocks = kvCacheStats.allocTotalBlocks;
         kvStats.allocNewBlocks = kvCacheStats.allocNewBlocks;
         kvStats.reusedBlocks = kvCacheStats.reusedBlocks;
+        kvStats.missedBlocks = kvCacheStats.missedBlocks;
+        kvStats.cacheHitRate = kvCacheStats.cacheHitRate;
         stats.kvCacheStats = kvStats;
     }
     auto const& crossKvCacheManager = getCrossKVCacheManager();
@@ -2555,6 +2617,8 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
         kvStats.allocTotalBlocks = kvCacheStats.allocTotalBlocks;
         kvStats.allocNewBlocks = kvCacheStats.allocNewBlocks;
         kvStats.reusedBlocks = kvCacheStats.reusedBlocks;
+        kvStats.missedBlocks = kvCacheStats.missedBlocks;
+        kvStats.cacheHitRate = kvCacheStats.cacheHitRate;
         stats.crossKvCacheStats = kvStats;
     }
     executor::InflightBatchingStats modelStats;

@@ -19,6 +19,7 @@
 #include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/trtGptModel.h"
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
@@ -739,7 +740,7 @@ using ParamStatsType = std::tuple<int, bool>;
 using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool, bool, int>;
 using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32>;
 using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
-using DisaggParamsType = std::tuple<int, std::string, std::string, std::vector<std::vector<int>>,
+using DisaggParamsType = std::tuple<int, std::vector<std::string>, std::vector<std::vector<int>>,
     std::vector<std::vector<int>>, std::vector<int>, int>;
 
 // requestSize, beam_width
@@ -932,12 +933,11 @@ std::string generateTestNameEncDec(testing::TestParamInfo<EncDecParamsType> cons
 std::string generateTestNameDisaggParams(testing::TestParamInfo<DisaggParamsType> const& info)
 {
     auto const processNum = std::get<0>(info.param);
-    auto const contextModel = std::get<1>(info.param);
-    auto const genModel = std::get<2>(info.param);
-    auto const participantIdsEachInstance = std::get<3>(info.param);       // std::vector<std::vector<int>>
-    auto const participantDeviceIdsEachInstance = std::get<4>(info.param); // std::vector<std::vector<int>>;
-    auto const instanceRoles = std::get<5>(info.param); // std::vector<int> ; //1 is context , 0 is generation
-    auto const controllerRank = std::get<6>(info.param);
+    auto const modelNames = std::get<1>(info.param);
+    auto const participantIdsEachInstance = std::get<2>(info.param);       // std::vector<std::vector<int>>
+    auto const participantDeviceIdsEachInstance = std::get<3>(info.param); // std::vector<std::vector<int>>;
+    auto const instanceRoles = std::get<4>(info.param); // std::vector<int> ; //1 is context , 0 is generation
+    auto const controllerRank = std::get<5>(info.param);
 
     auto convertToString = [](std::vector<std::vector<int>> const& vec)
     {
@@ -966,7 +966,13 @@ std::string generateTestNameDisaggParams(testing::TestParamInfo<DisaggParamsType
     std::string name = "DisaggExecutorTest_";
 
     name.append("ProcessNum_" + std::to_string(processNum));
-    name.append("_contextModel_" + contextModel + "_genModel_" + genModel);
+    // name.append("_contextModel_" + contextModel + "_genModel_" + genModel);
+    name.append("_modelNames_");
+    for (auto&& modelName : modelNames)
+    {
+        name.append(modelName).append("_");
+    }
+
     name.append("_controllerRank_" + std::to_string(controllerRank));
 
     name.append("_ranks_").append(convertToString(participantIdsEachInstance));
@@ -1083,6 +1089,8 @@ TEST_F(GptExecutorTest, GetLatestStats)
         EXPECT_GT(kvStats.allocTotalBlocks, 0);
         EXPECT_GT(kvStats.allocNewBlocks, 0);
         EXPECT_GE(kvStats.reusedBlocks, 0);
+        EXPECT_GE(kvStats.missedBlocks, 0);
+        EXPECT_GE(kvStats.cacheHitRate, 0);
 
         // Stats for inflight batching
         EXPECT_TRUE(stat.inflightBatchingStats.has_value() && !stat.staticBatchingStats.has_value());
@@ -2296,6 +2304,9 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
     bool returnAllGeneratedTokens)
 {
 
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
     auto const beamWidth = beamResult.beamWidth;
 
     std::unordered_map<IdType, SizeType32> reqIdToBatchId;
@@ -2334,10 +2345,6 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
         request.setRequestType(RequestType::REQUEST_TYPE_CONTEXT_ONLY);
         requests.emplace_back(std::move(request));
     }
-
-    auto& comm = tensorrt_llm::mpi::MpiComm::world();
-    auto const worldRank = comm.getRank();
-    auto const worldSize = comm.getSize();
 
     if (executor.isController())
     {
@@ -2624,17 +2631,16 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
 
     // using DisaggParamsType =
     // std::tuple<int,std::string,std::string,std::vector<std::vector<int>>,std::vector<std::vector<int>>,std::vector<int>,int>;
-    if (!(std::getenv("TLLM_USE_UCX_KVCACHE")))
+    if (!(tensorrt_llm::common::getEnvUseUCXKvCache()))
     {
         setenv("UCX_TLS", "^cuda_ipc", 1); // disable cuda_ipc for testing for mpi
     }
     auto const processNum = std::get<0>(GetParam());
-    auto const contextModel = std::get<1>(GetParam());
-    auto const genModel = std::get<2>(GetParam());
-    auto const participantIdsEachInstance = std::get<3>(GetParam());       // std::vector<std::vector<int>>
-    auto const participantDeviceIdsEachInstance = std::get<4>(GetParam()); // std::vector<std::vector<int>>;
-    auto const instanceRoles = std::get<5>(GetParam()); // std::vector<int> ; //1 is context , 0 is generation
-    auto const controllerRank = std::get<6>(GetParam());
+    auto const modelNames = std::get<1>(GetParam());
+    auto const participantIdsEachInstance = std::get<2>(GetParam());       // std::vector<std::vector<int>>
+    auto const participantDeviceIdsEachInstance = std::get<3>(GetParam()); // std::vector<std::vector<int>>;
+    auto const instanceRoles = std::get<4>(GetParam()); // std::vector<int> ; //1 is context , 0 is generation
+    auto const controllerRank = std::get<5>(GetParam());
 
     // params_check
     auto const& world_comm = tensorrt_llm::mpi::MpiComm::world();
@@ -2645,9 +2651,9 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         GTEST_SKIP() << " need " << processNum << " processes but got " << commSize << " mpi processes, skip test.";
     }
     ASSERT_EQ(participantIdsEachInstance.size(), participantDeviceIdsEachInstance.size());
-
     SizeType32 instanceNum = participantIdsEachInstance.size();
     ASSERT_EQ(instanceNum, instanceRoles.size());
+    ASSERT_EQ(instanceNum, modelNames.size());
     ASSERT_GE(controllerRank, 0);
     ASSERT_LT(controllerRank, commSize);
     int ranksNum = 0;
@@ -2682,7 +2688,8 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
                 participatntIds = ranksThisInstance;
                 deviceIds = devicesThisInstance;
                 isContext = (instanceRoles[i] > 0);
-                modelName = isContext ? contextModel : genModel;
+                // modelName = isContext ? contextModel : genModel;
+                modelName = modelNames[i];
             }
         }
     }
@@ -2733,10 +2740,12 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         }
     }
     else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1")
+        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1" || modelName == "llama_tp1_pp1")
     {
         auto const resultsPath
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
+        modelIds.padId = 2;
+        modelIds.endId = 2;
         if (modelName == "llama_tp4_pp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
@@ -2761,6 +2770,11 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
             modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+        }
+        else if (modelName == "llama_tp1_pp1")
+        {
+            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
         }
     }
     else if (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
@@ -5066,8 +5080,10 @@ TEST_P(EncDecParamsTest, validEncDecCtor)
     std::filesystem::path encEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "encoder";
     std::filesystem::path decEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "decoder";
     ExecutorConfig executorConfig{};
-    FloatType freeGpuMemoryFraction = 0.45f;
+    FloatType freeGpuMemoryFraction = 0.5f;
+    FloatType crossKvCacheFraction = 0.5f;
     KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
+    kvCacheConfig.setCrossKvCacheFraction(crossKvCacheFraction);
     executorConfig.setKvCacheConfig(kvCacheConfig);
     auto executor = Executor(encEnginePath, decEnginePath, ModelType::kENCODER_DECODER, executorConfig);
 }
@@ -5108,8 +5124,10 @@ TEST_P(EncDecParamsTest, Forward)
 
     // create executor
     BatchingType const batchingType = BatchingType::kINFLIGHT;
-    FloatType freeGpuMemoryFraction = 0.45f;
+    FloatType freeGpuMemoryFraction = 0.5f;
+    FloatType crossKvCacheFraction = 0.5f;
     KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
+    kvCacheConfig.setCrossKvCacheFraction(crossKvCacheFraction);
 
     ExecutorConfig executorConfig{beamWidth};
     executorConfig.setBatchingType(batchingType);
@@ -5389,90 +5407,124 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LogitsProcParamsTest,
     generateTestNameLogitsProc);
 
 INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values("gpt"), testing::Values("gpt"),
+    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest2, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values("gpt"), testing::Values("gpt"),
+    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(1)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(GptSingleDeviceDisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values("gpt"), testing::Values("gpt"),
+    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {0}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(ChatGlm2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values("chatglm2"), testing::Values("chatglm2"),
+    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"chatglm2", "chatglm2"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaTP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values("llama_tp2_pp1"), testing::Values("llama_tp2_pp1"),
+    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 INSTANTIATE_TEST_SUITE_P(LlamaPP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values("llama_tp1_pp2"), testing::Values("llama_tp1_pp2"),
+    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp1_pp2", "llama_tp1_pp2"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaTP2PP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(8), testing::Values("llama_tp2_pp2"), testing::Values("llama_tp2_pp2"),
+    testing::Combine(testing::Values(8), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp2_pp2"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5, 6, 7}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {0, 1, 2, 3}}),
         testing::Values(std::vector<int>{1, 0}), testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConPP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values("llama_tp1_pp2"), testing::Values("llama_tp2_pp1"),
+    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp1_pp2", "llama_tp2_pp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (1,0) (2,3)
         testing::Values(std::vector<std::vector<int>>{{1, 0}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values("llama_tp2_pp1"), testing::Values("llama_tp1_pp2"),
+    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp1_pp2"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (0,1), (3,2)
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values("llama_tp2_pp2"), testing::Values("llama_tp1_pp2"),
+    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp1_pp2"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1) , (5,4)
         testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {1, 0}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values("llama_tp2_pp2"), testing::Values("llama_tp2_pp1"),
+    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp2_pp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1), (4,5)
         testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {0, 1}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP1GenTP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values("llama_tp2_pp1"), testing::Values("llama_tp2_pp2"),
+    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp2"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3, 4, 5}}), // (0,1) , (4,5,2,3)%4
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {0, 1, 2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values("llama_tp2_pp1"), testing::Values("llama_tp1_pp4"),
+    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp1_pp4"}),
         testing::Values(std::vector<std::vector<int>>{{4, 5}, {0, 1, 2, 3}}), // (4,5) ,(3,2,1,0)
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2, 1, 0}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
+    testing::Combine(testing::Values(8),
+        testing::Values(std::vector<std::string>{
+            "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp4_pp1"}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
+        testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2AndPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp1", "llama_tp1_pp2"}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
+        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp2", "llama_tp1_pp2"}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
+        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
+    testing::Combine(testing::Values(8),
+        testing::Values(std::vector<std::string>{
+            "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp2"}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
+        testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
     generateTestNameDisaggParams);

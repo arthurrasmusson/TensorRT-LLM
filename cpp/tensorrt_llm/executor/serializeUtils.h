@@ -102,6 +102,7 @@ static_assert(hasSerializedSize<ParallelConfig>(size_t()));
 static_assert(hasSerializedSize<PeftCacheConfig>(size_t()));
 static_assert(hasSerializedSize<DecodingMode>(size_t()));
 static_assert(hasSerializedSize<LookaheadDecodingConfig>(size_t()));
+static_assert(hasSerializedSize<KvCacheRetentionConfig>(size_t()));
 static_assert(hasSerializedSize<DecodingConfig>(size_t()));
 static_assert(hasSerializedSize<DebugConfig>(size_t()));
 static_assert(!hasSerializedSize<std::string>(size_t()));
@@ -185,6 +186,7 @@ static_assert(hasSerialize<ParallelConfig>(nullptr));
 static_assert(hasSerialize<PeftCacheConfig>(nullptr));
 static_assert(hasSerialize<DecodingMode>(nullptr));
 static_assert(hasSerialize<LookaheadDecodingConfig>(nullptr));
+static_assert(hasSerialize<KvCacheRetentionConfig>(nullptr));
 static_assert(hasSerialize<DecodingConfig>(nullptr));
 static_assert(hasSerialize<kv_cache::CommState>(nullptr));
 static_assert(hasSerialize<kv_cache::SocketState>(nullptr));
@@ -376,6 +378,15 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::LookaheadDecodingConfig>::value)
     {
         return Serialization::deserializeLookaheadDecodingConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheRetentionConfig>::value)
+    {
+        return Serialization::deserializeKvCacheRetentionConfig(is);
+    }
+    else if constexpr (std::is_same<T,
+                           tensorrt_llm::executor::KvCacheRetentionConfig::TokenRangeRetentionPriority>::value)
+    {
+        return Serialization::deserializeTokenRangeRetentionPriority(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::DecodingConfig>::value)
     {

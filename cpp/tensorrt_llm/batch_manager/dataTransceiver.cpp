@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
 #include "tensorrt_llm/batch_manager/utils/staticThreadPool.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/utils.h"
 #include <map>
 
@@ -98,9 +99,9 @@ public:
         return mSender->getCommState();
     }
 
-    void setCommState(executor::kv_cache::CommState const& commState)
+    void setCommState(executor::kv_cache::CommState commState)
     {
-        mSender->setCommState(commState);
+        mSender->setCommState(std::move(commState));
     }
 
     ~Impl()
@@ -149,6 +150,13 @@ private:
                 }
                 else
                 {
+                    if (mCurrentRequest.has_value())
+                    {
+                        TLLM_LOG_WARNING(
+                            "this executor does not have a prepared kvCache for the request id :%ld and "
+                            "mReadyResponses size is :%ld ",
+                            mCurrentRequest.value(), mReadyResponses.size());
+                    }
                     std::unique_lock lk(mCondMutex);
                     mResponderCv.wait(lk, [this]() { return (mAnyReady || mTerminate); });
                 }
@@ -226,7 +234,8 @@ public:
 
     [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest)
     {
-        return mThreadPool.execute(&DataRequester::Impl::requestSync, this, std::cref(llmRequest));
+        // TODO: Modify the implementation here to avoid frequent thread creation.
+        return std::async(std::launch::async, &DataRequester::Impl::requestSync, this, std::cref(llmRequest));
     }
 
 private:
@@ -238,7 +247,6 @@ private:
     }
 
     std::unique_ptr<DataReceiver> mReceiver;
-    utils::StaticThreadPool mThreadPool{10};
     int mDeviceId{-1};
 };
 
@@ -257,9 +265,9 @@ executor::kv_cache::CommState const& DataResponder::getCommState() const
     return mImpl->getCommState();
 }
 
-void DataResponder::setCommState(executor::kv_cache::CommState const& commState)
+void DataResponder::setCommState(executor::kv_cache::CommState commState)
 {
-    mImpl->setCommState(commState);
+    mImpl->setCommState(std::move(commState));
 }
 
 DataResponder::~DataResponder() = default;

@@ -342,11 +342,11 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
         }
     }
 
-    auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
-    int32_t const worldSize = worldComm.getSize();
+    auto const& commComm = COMM_SESSION;
+    int32_t const commSize = commComm.getSize();
     if (mIsWorker)
     {
-        if (worldSize > 1)
+        if (commSize > 1)
         {
             auto const& worldConfig = mModel->getWorldConfig();
             auto const& commSession = COMM_SESSION;
@@ -1124,6 +1124,14 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
                     mQueuedRequests.pop_front();
                 };
 
+                if (mQueuedRequests.size() > 0)
+                {
+                    if (mQueuedRequests.front().id == mTerminateReqId)
+                    {
+                        insertQueuedRequestIntoReqWithIds();
+                    }
+                }
+
                 for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests;)
                 {
                     req += (getNumChildRequests(mQueuedRequests.front().req) + 1);
@@ -1547,6 +1555,8 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.allocTotalBlocksPerRequest = request->getAllocTotalBlocksPerRequest();
         requestStats.allocNewBlocksPerRequest = request->getAllocNewBlocksPerRequest();
         requestStats.reusedBlocksPerRequest = request->getReusedBlocksPerRequest();
+        requestStats.missedBlocksPerRequest = request->getMissedBlocksPerRequest();
+        requestStats.kvCacheHitRatePerRequest = request->getKVCacheHitRatePerRequest();
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1564,6 +1574,8 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
             requestStats.allocTotalBlocksPerRequest = 0;
             requestStats.allocNewBlocksPerRequest = 0;
             requestStats.reusedBlocksPerRequest = 0;
+            requestStats.missedBlocksPerRequest = 0;
+            requestStats.kvCacheHitRatePerRequest = 0;
             requestStatsVec.emplace_back(requestStats);
         }
     }
@@ -1581,6 +1593,8 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
         requestStats.allocTotalBlocksPerRequest = request->getAllocTotalBlocksPerRequest();
         requestStats.allocNewBlocksPerRequest = request->getAllocNewBlocksPerRequest();
         requestStats.reusedBlocksPerRequest = request->getReusedBlocksPerRequest();
+        requestStats.missedBlocksPerRequest = request->getMissedBlocksPerRequest();
+        requestStats.kvCacheHitRatePerRequest = request->getKVCacheHitRatePerRequest();
         requestStatsVec.emplace_back(requestStats);
     }
 
@@ -1880,7 +1894,7 @@ void Executor::Impl::executionLoop()
         auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
         auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
         RequestList finishedRequests;
-        if (!activeRequests.empty() || !inTransmissionRequests.empty())
+        if (!activeRequests.empty())
         {
             forwardSync(activeRequests);
             terminateCancelledRequests(activeRequests);
@@ -1921,8 +1935,8 @@ void Executor::Impl::executionLoop()
                     newActiveRequestsQueueLatencyMS, static_cast<SizeType32>(finishedRequests.size()));
                 updateRequestStats(activeRequests, finishedRequests);
             }
-            auto [newRequests, newActiveRequestsQueueLatency] = fetchNewRequests(
-                static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()), lowestPriority);
+            auto [newRequests, newActiveRequestsQueueLatency]
+                = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()), lowestPriority);
             newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatency;
             numNewActiveRequests = newRequests.size();
 
@@ -1937,7 +1951,7 @@ void Executor::Impl::executionLoop()
             }
         }
 
-        if (!activeRequests.empty() || !inTransmissionRequests.empty())
+        if (!activeRequests.empty())
         {
             forwardAsync(activeRequests);
             updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS,

@@ -18,10 +18,12 @@ namespace tensorrt_llm::executor
 KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> const& maxTokens,
     std::optional<std::vector<SizeType32>> const& maxAttentionWindowVec,
     std::optional<SizeType32> const& sinkTokenLength, std::optional<FloatType> const& freeGpuMemoryFraction,
-    std::optional<size_t> const& hostCacheSize, bool onboardBlocks)
+    std::optional<size_t> const& hostCacheSize, bool onboardBlocks,
+    std::optional<FloatType> const& crossKvCacheFraction, std::optional<RetentionPriority> secondaryOffloadMinPriority)
     : mEnableBlockReuse(enableBlockReuse)
     , mHostCacheSize(hostCacheSize)
     , mOnboardBlocks(onboardBlocks)
+    , mSecondaryOffloadMinPriority(secondaryOffloadMinPriority)
 {
     if (maxTokens)
     {
@@ -38,6 +40,10 @@ KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> co
     if (freeGpuMemoryFraction)
     {
         setFreeGpuMemoryFraction(freeGpuMemoryFraction.value());
+    }
+    if (crossKvCacheFraction)
+    {
+        setCrossKvCacheFraction(crossKvCacheFraction.value());
     }
 }
 
@@ -66,6 +72,11 @@ std::optional<FloatType> KvCacheConfig::getFreeGpuMemoryFraction() const
     return mFreeGpuMemoryFraction;
 }
 
+std::optional<FloatType> KvCacheConfig::getCrossKvCacheFraction() const
+{
+    return mCrossKvCacheFraction;
+}
+
 std::optional<size_t> KvCacheConfig::getHostCacheSize() const
 {
     return mHostCacheSize;
@@ -74,6 +85,11 @@ std::optional<size_t> KvCacheConfig::getHostCacheSize() const
 bool KvCacheConfig::getOnboardBlocks() const
 {
     return mOnboardBlocks;
+}
+
+std::optional<RetentionPriority> KvCacheConfig::getSecondaryOffloadMinPriority() const
+{
+    return mSecondaryOffloadMinPriority;
 }
 
 void KvCacheConfig::setEnableBlockReuse(bool enableBlockReuse)
@@ -109,6 +125,14 @@ void KvCacheConfig::setFreeGpuMemoryFraction(FloatType freeGpuMemoryFraction)
     mFreeGpuMemoryFraction = freeGpuMemoryFraction;
 }
 
+void KvCacheConfig::setCrossKvCacheFraction(FloatType crossKvCacheFraction)
+
+{
+    TLLM_CHECK(crossKvCacheFraction > 0.f);
+    TLLM_CHECK(crossKvCacheFraction < 1.f);
+    mCrossKvCacheFraction = crossKvCacheFraction;
+}
+
 void KvCacheConfig::setHostCacheSize(size_t hostCacheSize)
 {
     mHostCacheSize = hostCacheSize;
@@ -117,6 +141,11 @@ void KvCacheConfig::setHostCacheSize(size_t hostCacheSize)
 void KvCacheConfig::setOnboardBlocks(bool onboardBlocks)
 {
     mOnboardBlocks = onboardBlocks;
+}
+
+void KvCacheConfig::setSecondaryOffloadMinPriority(std::optional<RetentionPriority> secondaryOffloadMinPriority)
+{
+    mSecondaryOffloadMinPriority = secondaryOffloadMinPriority;
 }
 
 } // namespace tensorrt_llm::executor

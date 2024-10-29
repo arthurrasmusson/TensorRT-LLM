@@ -59,7 +59,9 @@ public:
     TensorPtr crossAttentionMaskCopySrcOffsets = nullptr; // [maxNumRequest] pinned memory.
     TensorPtr crossAttentionMaskCopyDstOffsets = nullptr; // [maxNumRequest] pinned memory.
     TensorPtr crossAttentionMaskCopySizes = nullptr;      // [maxNumRequest] pinned memory.
-    TensorPtr crossAttentionMaskDevice = nullptr;         // [maxBatchSize, maxInputLengthInBatch, maxEncoderOutputLen]
+    TensorPtr crossAttentionMaskDevice = nullptr;         // [maxNumTokens, maxEncoderOutputLen]
+    // This is created to allow mixed memory types of crossAttentionMask (i.e. CPU and GPU).
+    TensorPtr crossAttentionMaskPinnedHost = nullptr; // [maxNumTokens, maxEncoderOutputLen]
     // See more details in tensorrt_llm/kernels/contextFusedMultiHeadAttention/fmhaPackedMask.cu.
     // The attention packed mask for FMHA where each bit represents one mask.
     TensorPtr crossAttentionPackedMaskDevice

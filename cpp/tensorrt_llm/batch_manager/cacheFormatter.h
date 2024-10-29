@@ -18,7 +18,11 @@
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/cache_transmission/cacheConcatenate.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/iTensor.h"
+#include <NvInferRuntimeBase.h>
 #include <cstddef>
+#include <cstdint>
 #include <iterator>
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager
@@ -38,7 +42,7 @@ public:
 
     void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& srcs,
         executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        executor::kv_cache::CacheState const& destConfig) override
+        executor::kv_cache::CacheState const& destConfig, runtime::BufferManager const& bufferManager) override
     {
 
         TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
@@ -47,20 +51,32 @@ public:
         std::vector<runtime::ITensor::SharedPtr> outputBuffers;
         auto const numPools = mCacheManager->getBlockManager().getNumPools();
         // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
+        int blockNum = 0;
         for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
         {
             auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
             for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
             {
-                for (size_t i = 0; i < srcs.size(); i++)
-                {
-                    recvBufferTmps.emplace_back(mCacheManager->getBlockManager().getBufferManager().gpu(
-                        executor::kv_cache::makeShapeFromCacheState(destConfig), it->getDataType()));
-                }
+                blockNum++;
             }
         }
+        auto cacheShape = executor::kv_cache::makeShapeFromCacheState(destConfig);
+
+        size_t bufferNum = blockNum * srcs.size();
+        auto dataType = getBlockBeginIt(*mCacheManager, llmRequest, beam, 0)->getDataType();
+        runtime::ITensor::SharedPtr recvBufferTemp = bufferManager.gpu(
+            runtime::ITensor::makeShape(
+                {static_cast<long>(tensorrt_llm::runtime::ITensor::volume(cacheShape) * bufferNum)}),
+            dataType);
+        recvBufferTmps.resize(bufferNum);
+        for (size_t i = 0; i < bufferNum; i++)
+        {
+            recvBufferTmps[i]
+                = runtime::ITensor::slice(recvBufferTemp, i * tensorrt_llm::runtime::ITensor::volume(cacheShape),
+                    tensorrt_llm::runtime::ITensor::volume(cacheShape));
+        }
         // sync to alloc buffer
-        TLLM_CUDA_CHECK(cudaStreamSynchronize(mCacheManager->getBlockManager().getBufferManager().getStream().get()));
+        bufferManager.getStream().synchronize();
 
         int idx = 0;
         for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
@@ -79,8 +95,8 @@ public:
 
         executor::kv_cache::concatenateKVCacheDispatch(recvBufferTmps.data(), recvBufferTmps.size(),
             getCounterparts(selfconfig, selfIdx, destConfig), destConfig, outputBuffers.data(), outputBuffers.size(),
-            selfIdx, selfconfig, mCacheManager->getBlockManager().getBufferManager());
-        TLLM_CUDA_CHECK(cudaStreamSynchronize(mCacheManager->getBlockManager().getBufferManager().getStream().get()));
+            selfIdx, selfconfig, bufferManager);
+        bufferManager.getStream().synchronize();
     }
 
     [[nodiscard]] bool inquireSupport(executor::kv_cache::CacheState const& selfconfig,
@@ -103,24 +119,12 @@ public:
         if (selfconfig.getModelConfig().mTokensPerBlock != destConfig.getModelConfig().mTokensPerBlock
             || selfconfig.getModelConfig().mSizePerHead != destConfig.getModelConfig().mSizePerHead)
         {
-
             return false;
         }
         if (selfconfig.getModelConfig().mNbKvHeadsPerLayer.size()
             != destConfig.getModelConfig().mNbKvHeadsPerLayer.size())
         {
             return false;
-        }
-        if (std::getenv("TLLM_USE_UCX_KVCACHE"))
-        {
-            if ((selfconfig.getParallelConfig().mPipelineParallelism
-                    != destConfig.getParallelConfig().mPipelineParallelism)
-                || (selfconfig.getParallelConfig().mTensorParallelism
-                    != destConfig.getParallelConfig().mTensorParallelism))
-            {
-                TLLM_LOG_WARNING("Only symmetric parallelism is supported with UCX_KVCACHE_TRANSFER");
-                return false;
-            }
         }
 
         int selfNumHeads
@@ -154,10 +158,8 @@ public:
 
     void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& dsts,
         executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        executor::kv_cache::CacheState const& destConfig) override
+        executor::kv_cache::CacheState const& destConfig, runtime::BufferManager const& /*bufferManager*/) override
     {
-        TLLM_CHECK(dsts.size() == 1);
-        auto const& dst = dsts.front();
         TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
         constexpr SizeType32 beam{0};
         auto const numPools = mCacheManager->getBlockManager().getNumPools();
@@ -167,7 +169,10 @@ public:
             auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
             for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
             {
-                dst->sendBuffer(*it);
+                for (auto&& dst : dsts)
+                {
+                    dst->sendBuffer(*it);
+                }
             }
         }
     }
@@ -192,7 +197,6 @@ public:
         if (selfconfig.getModelConfig().mTokensPerBlock != destConfig.getModelConfig().mTokensPerBlock
             || selfconfig.getModelConfig().mSizePerHead != destConfig.getModelConfig().mSizePerHead)
         {
-
             return false;
         }
         if (selfconfig.getModelConfig().mNbKvHeadsPerLayer.size()
@@ -201,17 +205,6 @@ public:
             return false;
         }
 
-        if (std::getenv("TLLM_USE_UCX_KVCACHE"))
-        {
-            if ((selfconfig.getParallelConfig().mPipelineParallelism
-                    != destConfig.getParallelConfig().mPipelineParallelism)
-                || (selfconfig.getParallelConfig().mTensorParallelism
-                    != destConfig.getParallelConfig().mTensorParallelism))
-            {
-                TLLM_LOG_WARNING("Only symmetric parallelism is supported with UCX_KVCACHE_TRANSFER");
-                return false;
-            }
-        }
         int selfNumHeads
             = selfconfig.getModelConfig().mNbKvHeadsPerLayer[0] * selfconfig.getParallelConfig().mTensorParallelism;
         int destNumHeads

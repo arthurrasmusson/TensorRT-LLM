@@ -24,6 +24,7 @@ set(SRCS
     extendedRuntimePerfKnobConfig.cpp
     jsonSerialization.cpp
     kvCacheConfig.cpp
+    kvCacheRetentionConfig.cpp
     logitsPostProcessorConfig.cpp
     loraConfig.cpp
     orchestratorConfig.cpp
@@ -68,6 +69,3 @@ set_property(TARGET ${EXECUTOR_STATIC_TARGET}
 set(TOP_LEVEL_DIR "${PROJECT_SOURCE_DIR}/..")
 target_compile_definitions(${EXECUTOR_STATIC_TARGET}
                            PUBLIC TOP_LEVEL_DIR="${TOP_LEVEL_DIR}")
-
-target_compile_options(${EXECUTOR_STATIC_TARGET}
-                       PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)

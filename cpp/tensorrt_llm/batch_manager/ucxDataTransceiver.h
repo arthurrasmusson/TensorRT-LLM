@@ -16,7 +16,11 @@
 
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/peftCacheManagerConfig.h"
+#include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/envUtils.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/cache_transmission/cacheConcatenate.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/runtime/common.h"
 #include <condition_variable>
@@ -26,7 +30,10 @@
 #include <ucxx/api.h>
 #include <ucxx/utils/sockaddr.h>
 #include <ucxx/utils/ucx.h>
-
+#if __linux__
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#endif
 namespace tensorrt_llm::batch_manager
 {
 class UcxComm
@@ -54,7 +61,7 @@ public:
     virtual void sendRequestInfo(RequestInfo const& info) const;
 
 private:
-    void initializeEndpointTag();
+    void initializeEndpointTag(int maxTryTimes = 10);
     void setRequestTag(LlmRequest::RequestIdType const requestId);
 
     static constexpr ucxx::Tag kID_TAG{1};
@@ -103,6 +110,7 @@ public:
         SizeType32 selfIndex, TFormatter formatter, uint16_t listenerPort = 0)
         : mFactory{std::move(factory)}
         , mFormatter{std::move(formatter)}
+        , mBufferManager{std::make_shared<runtime::CudaStream>()}
     {
         mSelfState.setCommState(
             executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
@@ -125,7 +133,10 @@ public:
         std::unique_ptr<UcxComm> comm;
         {
             std::unique_lock<std::mutex> lk(mMtx);
-            mRequestCv.wait(lk, [this]() { return !mIncomingRequests.empty(); });
+            if (mIncomingRequests.empty())
+            {
+                mRequestCv.wait(lk, [this]() { return !mIncomingRequests.empty(); });
+            }
             comm = std::move(mIncomingRequests.front());
             mIncomingRequests.pop_front();
         }
@@ -134,38 +145,73 @@ public:
         TLLM_CHECK_WITH_INFO(mFormatter->inquireSupport(
                                  mSelfState.getCacheState().value(), info.getTransState().getCacheState().value()),
             "Disagg server does not currently support these cacheState.");
-        std::lock_guard<std::mutex> lk(mMtx);
-        mRequestToComm.emplace(info.getRequestId(), std::move(comm));
 
+        std::unique_lock<std::mutex> lk(mMtxForMap);
+        auto peerTargetRanks
+            = tensorrt_llm::executor::kv_cache::targetIRanks(info.getTransState().getCacheState().value(),
+                mSelfState.getCacheState().value(), getCommState().getSelfIdx());
+        if (mRequestRemainSendCount.find(info.getRequestId()) == mRequestRemainSendCount.end()
+            || (mRequestRemainSendCount[info.getRequestId()] == 0))
+        {
+            mRequestRemainSendCount[info.getRequestId()] = peerTargetRanks.size();
+            mRequestToComms.emplace(info.getRequestId(), std::vector<std::unique_ptr<UcxComm>>());
+            mRequestToComms[info.getRequestId()].resize(mRequestRemainSendCount[info.getRequestId()]);
+        }
+        int peerIdx = std::distance(peerTargetRanks.begin(),
+            std::find(
+                peerTargetRanks.begin(), peerTargetRanks.end(), info.getTransState().getCommState()->getSelfIdx()));
+        TLLM_CHECK_WITH_INFO((peerIdx >= 0) && (peerIdx < static_cast<int>(peerTargetRanks.size())),
+            "Peer idx should be found in peerTargetRanks");
+        mRequestToComms[info.getRequestId()].at(peerIdx) = std::move(comm);
         return info;
     }
 
     void sendSync(LlmRequest const& llmRequest) override
     {
-        UcxComm* comm;
+
+        std::vector<UcxComm const*> comms;
         {
-            std::lock_guard<std::mutex> lk(mMtx);
-            auto it = mRequestToComm.find(llmRequest.mRequestId);
+            std::unique_lock<std::mutex> lk(mMtxForMap);
+            if (mRequestRemainSendCount.find(llmRequest.mRequestId) != mRequestRemainSendCount.end())
+            {
+                TLLM_CHECK_WITH_INFO(mRequestRemainSendCount[llmRequest.mRequestId] > 0,
+                    "sendSync kvcache  with request id %ld count should >0 but get %d ", llmRequest.mRequestId,
+                    mRequestRemainSendCount[llmRequest.mRequestId]);
+                mRequestRemainSendCount[llmRequest.mRequestId]--;
+            }
+            else
+            {
+                TLLM_THROW("Sender does not receive the requstInfo message before sending the data");
+            }
+            if (mRequestRemainSendCount[llmRequest.mRequestId] > 0)
+            {
+                return; // Wait until  the requests from all rank of the gen instance have been received.
+            }
+
+            auto it = mRequestToComms.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
-                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
-            comm = it->second.get();
+                (it != mRequestToComms.end()), "sendSync() must be called with request returned by recvRequestInfo().");
+            for (auto&& comm : it->second)
+            {
+                comms.push_back(comm.get());
+            }
         }
 
         // TODO: fake destCacheState
 
-        (*mFormatter)(llmRequest, {comm}, mSelfState.getCacheState().value(),
-            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value());
+        (*mFormatter)(llmRequest, comms, mSelfState.getCacheState().value(),
+            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value(), mBufferManager);
 
         {
             // For now, the connection will be dropped once the transfer is completed
-            std::lock_guard<std::mutex> lk(mMtx);
+            std::lock_guard<std::mutex> lk(mMtxForMap);
             {
                 // [WAR] Releasing endpoint soon after tagSend results in hanging,
                 // postponing release at the moment to avoid that.
-                auto it = mRequestToComm.find(llmRequest.mRequestId);
+                auto it = mRequestToComms.find(llmRequest.mRequestId);
                 reapFinishedComm(std::move(it->second));
             }
-            mRequestToComm.erase(llmRequest.mRequestId);
+            mRequestToComms.erase(llmRequest.mRequestId);
         }
     }
 
@@ -174,14 +220,26 @@ public:
         return mSelfState.getCommState().value();
     }
 
-    void setCommState(executor::kv_cache::CommState const& commState) override
+    void setCommState(executor::kv_cache::CommState commState) override
     {
-        mSelfState.setCommState(commState);
+        mSelfState.setCommState(std::move(commState));
     }
 
     [[nodiscard]] bool availableRelease(LlmRequest const& llmRequest)
     {
-        return true;
+        std::unique_lock<std::mutex> lk(mMtxForMap);
+
+        if (mRequestRemainSendCount.find(llmRequest.mRequestId) == mRequestRemainSendCount.end())
+        {
+            return true;
+        }
+        if (mRequestRemainSendCount[llmRequest.mRequestId] == 0)
+        {
+            mRequestRemainSendCount.erase(llmRequest.mRequestId);
+            mRequestToComms.erase(llmRequest.mRequestId);
+            return true;
+        }
+        return false;
     }
 
 private:
@@ -196,7 +254,89 @@ private:
     void startListener(uint16_t listenerPort)
     {
         mListener = mWorker->createListener(listenerPort, listenerCallback, this);
+#if __linux__
+        // query network interface
+
+        struct ifaddrs *ifa, *ifaddr;
+        void* tmpAddrPtr;
+
+        TLLM_CHECK_WITH_INFO(getifaddrs(&ifaddr) == 0, " UCX startListener getifaddrs call failed\n");
+        TLLM_CHECK_WITH_INFO((ifaddr != NULL), "UCX startListener getifaddrs call failed\n");
+        int idx = 0;
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+        {
+            // exclude docker intrface and loopback
+            if (strcmp(ifa->ifa_name, "docker0") == 0 || strcmp(ifa->ifa_name, "lo") == 0)
+            {
+                continue;
+            }
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
+            {
+                tmpAddrPtr = &((struct sockaddr_in*) ifa->ifa_addr)->sin_addr;
+                char buffer[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, tmpAddrPtr, buffer, INET_ADDRSTRLEN);
+                mNetInfoMap[std::string(ifa->ifa_name)].interface = std::string(ifa->ifa_name);
+                mNetInfoMap[std::string(ifa->ifa_name)].ipv4 = std::string(buffer);
+                if (mNetInfoMap[std::string(ifa->ifa_name)].idx == -1)
+                {
+                    mNetInfoMap[std::string(ifa->ifa_name)].idx = idx;
+                    idx++;
+                }
+            }
+            else if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET6)
+            {
+                tmpAddrPtr = &((struct sockaddr_in6*) ifa->ifa_addr)->sin6_addr;
+                char buffer[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, tmpAddrPtr, buffer, INET6_ADDRSTRLEN);
+                mNetInfoMap[std::string(ifa->ifa_name)].interface = ifa->ifa_name;
+                mNetInfoMap[std::string(ifa->ifa_name)].ipv6 = std::string(buffer);
+                if (mNetInfoMap[std::string(ifa->ifa_name)].idx == -1)
+                {
+                    mNetInfoMap[std::string(ifa->ifa_name)].idx = idx;
+                    idx++;
+                }
+            }
+        }
+        std::string selectedIp;
+        std::string userUCXInterface = common::getEnvUCXInterface();
+        if (!userUCXInterface.empty())
+        {
+            if (mNetInfoMap.find(userUCXInterface) != mNetInfoMap.end())
+            {
+                selectedIp = mNetInfoMap[userUCXInterface].ipv4;
+                if (selectedIp.empty())
+                {
+                    selectedIp = mNetInfoMap[userUCXInterface].ipv6;
+                }
+                TLLM_LOG_INFO("UCX listener started on interface:%s address: %s:%u",
+                    mNetInfoMap[userUCXInterface].interface.c_str(), selectedIp.c_str(), mListener->getPort());
+                mSelfState.setCommState(executor::kv_cache::CommState{mListener->getPort(), selectedIp});
+                freeifaddrs(ifaddr);
+                return;
+            }
+
+            TLLM_LOG_WARNING(
+                "Invalid UCX interface specified: %s will use default interface", userUCXInterface.c_str());
+        }
+        std::map<int, NetINfoT> netInfoSortedMap;
+        for (auto&& [key, netInfo] : mNetInfoMap)
+        {
+            netInfoSortedMap[netInfo.idx] = netInfo;
+        }
+
+        selectedIp = netInfoSortedMap[0].ipv4;
+        if (selectedIp.empty())
+        {
+            selectedIp = netInfoSortedMap[0].ipv6;
+        }
+        TLLM_LOG_INFO("UCX listener started on interface:%s address: %s:%u", netInfoSortedMap[0].interface.c_str(),
+            selectedIp.c_str(), mListener->getPort());
+
+        mSelfState.setCommState(executor::kv_cache::CommState{mListener->getPort(), selectedIp});
+        freeifaddrs(ifaddr);
+#else
         mSelfState.setCommState(executor::kv_cache::CommState{mListener->getPort(), mListener->getIp()});
+#endif
     }
 
     void addIncomingRequests(std::unique_ptr<UcxComm>&& incomingRequest)
@@ -208,13 +348,16 @@ private:
         mRequestCv.notify_all();
     }
 
-    void reapFinishedComm(std::unique_ptr<UcxComm>&& comm)
+    void reapFinishedComm(std::vector<std::unique_ptr<UcxComm>>&& comms)
     {
         // this WAR function assumes 'mMtx' is being held
         auto now = std::chrono::steady_clock::now();
-        if (comm != nullptr)
+        for (auto&& comm : comms)
         {
-            mReapingComm.emplace_back(now, std::move(comm));
+            if (comm != nullptr)
+            {
+                mReapingComm.emplace_back(now, std::move(comm));
+            }
         }
         while (!mReapingComm.empty())
         {
@@ -227,6 +370,15 @@ private:
         }
     }
 
+    struct NetINfoT
+    {
+        std::string interface;
+        std::string ipv4;
+        std::string ipv6;
+        int idx = -1;
+    };
+
+    std::unordered_map<std::string, NetINfoT> mNetInfoMap;
     std::unique_ptr<UcxCommFactory> mFactory;
     TFormatter mFormatter;
 
@@ -237,9 +389,12 @@ private:
     std::mutex mMtx;
     std::condition_variable mRequestCv;
     std::deque<std::unique_ptr<UcxComm>> mIncomingRequests;
-    std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
-    executor::DataTransceiverState mSelfState;
+    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxComm>>> mRequestToComms;
+    std::unordered_map<LlmRequest::RequestIdType, int> mRequestRemainSendCount;
+    std::mutex mMtxForMap;
 
+    executor::DataTransceiverState mSelfState;
+    runtime::BufferManager mBufferManager;
     std::deque<std::pair<decltype(std::chrono::steady_clock::now()), std::unique_ptr<UcxComm>>> mReapingComm;
 };
 
@@ -253,6 +408,7 @@ public:
         SizeType32 selfIndex, TFormatter formatter)
         : mFactory{std::move(factory)}
         , mFormatter{std::move(formatter)}
+        , mBufferManager{std::make_shared<runtime::CudaStream>()}
     {
         mSelfState.setCommState(
             executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
@@ -266,6 +422,7 @@ public:
         mWorker->setProgressThreadStartCallback(
             [device](void* arg) { TLLM_CUDA_CHECK(cudaSetDevice(device)); }, nullptr);
         mWorker->startProgressThread();
+        initSelfIps();
     }
 
     void sendRequestInfo(LlmRequest const& llmRequest) override
@@ -274,46 +431,102 @@ public:
         auto requestId = llmRequest.getContextPhaseParams().value().getReqId();
         auto const& contextState = llmRequest.getDataTransceiverState();
         auto const& socketState = contextState.getCommState().value().getSocketState();
-        std::vector<SizeType32> targetRanks{};
 
         auto const& destCacheState = contextState.getCacheState().value();
+        //
 
-        targetRanks = mFormatter->getCounterparts(
+        auto targetRanks = mFormatter->getCounterparts(
             mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState);
         TLLM_CHECK_WITH_INFO(mFormatter->inquireSupport(mSelfState.getCacheState().value(), destCacheState),
             "Disagg server does not currently support these cacheState.");
-        auto& socketComm = socketState.at(targetRanks[0]);
-        auto comm = mFactory->create(mWorker->createEndpointFromHostname(socketComm.mIp, socketComm.mPort));
-        RequestInfo info{requestId, mSelfState};
-        comm->sendRequestInfo(std::move(info));
-        std::lock_guard<std::mutex> lk(mMtx);
-        mRequestToComm.emplace(llmRequest.mRequestId, std::move(comm));
+        std::vector<std::unique_ptr<UcxComm>> comms;
+
+        for (auto index : targetRanks)
+        {
+            auto& socketComm = socketState.at(index);
+            if (mSelfIps.find(socketComm.mIp) != mSelfIps.end())
+            {
+                auto comm
+                    = mFactory->create(mWorker->createEndpointFromHostname(std::string("127.0.0.1"), socketComm.mPort));
+                comms.push_back(std::move(comm));
+            }
+            else
+            {
+                auto comm = mFactory->create(mWorker->createEndpointFromHostname(socketComm.mIp, socketComm.mPort));
+                comms.push_back(std::move(comm));
+            }
+        }
+        for (auto&& comm : comms)
+        {
+            comm->sendRequestInfo({requestId, mSelfState});
+        }
+        std::unique_lock<std::mutex> lk(mMtx);
+        mRequestToComms.emplace(llmRequest.mRequestId, std::move(comms));
     }
 
     void receiveSync(LlmRequest const& llmRequest) override
     {
-        UcxComm* comm;
+        std::vector<UcxComm const*> comms;
         {
-            std::lock_guard<std::mutex> lk(mMtx);
-            auto it = mRequestToComm.find(llmRequest.mRequestId);
+            std::unique_lock<std::mutex> lk(mMtx);
+            auto it = mRequestToComms.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
-                (it != mRequestToComm.end()), "sendSync() must be called with request returned by recvRequestInfo().");
-            comm = it->second.get();
+                (it != mRequestToComms.end()), "sendSync() must be called with request returned by recvRequestInfo().");
+            // comm = it->second.get();
+            for (auto&& comm : it->second)
+            {
+                comms.push_back(comm.get());
+            }
         }
         auto const& contextState = llmRequest.getDataTransceiverState();
-
+        TLLM_CHECK(contextState.getCommState());
+        TLLM_CHECK(contextState.getCacheState());
         auto const& destCacheState = contextState.getCacheState().value();
-
-        (*mFormatter)(llmRequest, {comm}, mSelfState.getCacheState().value(),
-            mSelfState.getCommState().value().getSelfIdx(), destCacheState);
+        (*mFormatter)(llmRequest, comms, mSelfState.getCacheState().value(),
+            mSelfState.getCommState().value().getSelfIdx(), destCacheState, mBufferManager);
         {
             // For now, the connection will be dropped once the transfer is completed
-            std::lock_guard<std::mutex> lk(mMtx);
-            mRequestToComm.erase(llmRequest.mRequestId);
+            std::unique_lock<std::mutex> lk(mMtx);
+            mRequestToComms.erase(llmRequest.mRequestId);
         }
     }
 
 private:
+    void initSelfIps()
+    {
+
+#if __linux__
+        struct ifaddrs *ifa, *ifaddr;
+        void* tmpAddrPtr;
+
+        TLLM_CHECK_WITH_INFO(getifaddrs(&ifaddr) == 0, " UCX initSelfIps getifaddrs call failed\n");
+        TLLM_CHECK_WITH_INFO((ifaddr != NULL), "UCX initSelfIps getifaddrs call failed\n");
+
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+        {
+
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET)
+            {
+                tmpAddrPtr = &((struct sockaddr_in*) ifa->ifa_addr)->sin_addr;
+                char buffer[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, tmpAddrPtr, buffer, INET_ADDRSTRLEN);
+
+                mSelfIps.insert(std::string(buffer));
+            }
+            else if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET6)
+            {
+                tmpAddrPtr = &((struct sockaddr_in6*) ifa->ifa_addr)->sin6_addr;
+                char buffer[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, tmpAddrPtr, buffer, INET6_ADDRSTRLEN);
+                mSelfIps.insert(std::string(buffer));
+            }
+        }
+
+        freeifaddrs(ifaddr);
+
+#endif
+    }
+
     std::unique_ptr<UcxCommFactory> mFactory;
     executor::DataTransceiverState mSelfState;
     TFormatter mFormatter;
@@ -322,7 +535,9 @@ private:
     std::shared_ptr<ucxx::Worker> mWorker;
 
     std::mutex mMtx;
-    std::map<LlmRequest::RequestIdType, std::unique_ptr<UcxComm>> mRequestToComm;
+    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxComm>>> mRequestToComms;
+    runtime::BufferManager mBufferManager;
+    std::unordered_set<std::string> mSelfIps;
 };
 
 // specify C linkage to allow isolating UCX features into separate shared library

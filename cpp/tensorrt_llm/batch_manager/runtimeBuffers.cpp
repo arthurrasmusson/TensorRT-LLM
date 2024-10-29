@@ -158,6 +158,11 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         explicitDraftTokensBuffers->reshape(numContextRequests, numGenRequests, modelConfig);
     }
 
+    if (eagleBuffers)
+    {
+        eagleBuffers->reshape(numContextRequests, numGenRequests, modelConfig);
+    }
+
     seqSlots->reshape(ITensor::makeShape({numRequests}));
     sortedSeqSlots->reshape(ITensor::makeShape({numRequests}));
     seqSlotRemappingHost->reshape(ITensor::makeShape({numRequests}));
@@ -290,6 +295,11 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     {
         explicitDraftTokensBuffers.emplace(
             maxBatchSize, maxBeamWidth, manager, modelConfig, worldConfig, decodingConfig, runtime);
+    }
+
+    if (modelConfig.getSpeculativeDecodingMode().isEagle())
+    {
+        eagleBuffers.emplace(maxBatchSize, maxBeamWidth, manager, modelConfig, worldConfig, decodingConfig, runtime);
     }
 }
 
@@ -796,6 +806,19 @@ void RuntimeBuffers::prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuf
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void RuntimeBuffers::prepareEagleBuffers(DecoderBuffers& decoderBuffers, TllmRuntime const& runtime,
+    ModelConfig const& modelConfig, WorldConfig const& worldConfig)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+
+    TLLM_CHECK(eagleBuffers);
+
+    eagleBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
+        decoderBuffers.eagleBuffers, *transformerBuffers->positionIds, runtime, modelConfig, worldConfig);
+
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 std::tuple<SizeType32, RuntimeBuffers::TensorMap const&, RuntimeBuffers::TensorMap&> RuntimeBuffers::prepareStep(
     RequestVector const& contextRequests, RequestVector const& genRequests, SizeType32 maxBeamWidth,
     SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers, kv_cache_manager::KVCacheManager* kvCacheManager,
@@ -905,6 +928,11 @@ void RuntimeBuffers::fillIOMaps(
     if (explicitDraftTokensBuffers)
     {
         explicitDraftTokensBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
+    }
+
+    if (eagleBuffers)
+    {
+        eagleBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
     }
 
     // runtime::utils::printTensorMap(std::cerr, inputBuffers);
