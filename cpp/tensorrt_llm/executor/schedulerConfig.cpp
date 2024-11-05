@@ -15,10 +15,11 @@
 namespace tensorrt_llm::executor
 {
 
-SchedulerConfig::SchedulerConfig(
-    CapacitySchedulerPolicy capacitySchedulerPolicy, std::optional<ContextChunkingPolicy> contextChunkingPolicy)
+SchedulerConfig::SchedulerConfig(CapacitySchedulerPolicy capacitySchedulerPolicy,
+    std::optional<ContextChunkingPolicy> contextChunkingPolicy, std::optional<DynamicBatchConfig> dynamicBatchConfig)
     : mCapacitySchedulerPolicy(capacitySchedulerPolicy)
     , mContextChunkingPolicy(std::move(contextChunkingPolicy))
+    , mDynamicBatchConfig(std::move(dynamicBatchConfig))
 {
 }
 
@@ -36,6 +37,11 @@ bool SchedulerConfig::operator==(SchedulerConfig const& other) const
 [[nodiscard]] std::optional<ContextChunkingPolicy> SchedulerConfig::getContextChunkingPolicy() const
 {
     return mContextChunkingPolicy;
+}
+
+[[nodiscard]] std::optional<DynamicBatchConfig> SchedulerConfig::getDynamicBatchConfig() const
+{
+    return mDynamicBatchConfig;
 }
 
 } // namespace tensorrt_llm::executor

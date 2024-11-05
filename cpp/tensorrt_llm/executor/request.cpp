@@ -29,14 +29,14 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
     float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
     std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
-    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences)
+    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
-        numReturnSequences))
+        numReturnSequences, eagleConfig))
 {
 }
 
@@ -204,6 +204,11 @@ SizeType32 Request::getNumReturnSequences() const
     return mImpl->getNumReturnSequences().value_or(1);
 }
 
+std::optional<EagleConfig> Request::getEagleConfig() const
+{
+    return mImpl->getEagleConfig();
+}
+
 void Request::setStreaming(bool streaming)
 {
     return mImpl->setStreaming(streaming);
@@ -330,6 +335,11 @@ void Request::setNumReturnSequences(SizeType32 numReturnSequences)
         "'Request.setNumReturnSequences' will be deprecated. Please directly use "
         "'SamplingConfig.setNumReturnSequences' instead.");
     mImpl->setNumReturnSequences(numReturnSequences);
+}
+
+void Request::setEagleConfig(std::optional<EagleConfig> const& eagleConfig)
+{
+    mImpl->setEagleConfig(eagleConfig);
 }
 
 } // namespace tensorrt_llm::executor

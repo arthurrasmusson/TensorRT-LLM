@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
@@ -414,6 +415,14 @@ TEST(SerializeUtilsTest, LookaheadDecodingConfig)
     EXPECT_EQ(lookaheadDecodingConfig.getVerificationSetSize(), lookaheadDecodingConfig2.getVerificationSetSize());
 }
 
+TEST(SerializeUtilsTest, EagleConfig)
+{
+    texec::EagleChoices eagleChoices{{{0, 1, 2}}};
+    auto eagleConfig = texec::EagleConfig(eagleChoices);
+    auto eagleConfig2 = serializeDeserialize(eagleConfig);
+    EXPECT_EQ(eagleConfig.getEagleChoices(), eagleConfig2.getEagleChoices());
+}
+
 TEST(SerializeUtilsTest, KvCacheRetentionConfig)
 {
     auto kvCacheRetentionConfig = texec::KvCacheRetentionConfig();
@@ -454,6 +463,17 @@ TEST(SerializeUtilsTest, DecodingConfig)
         EXPECT_EQ(specDecodingConfig.getDecodingMode(), specDecodingConfig2.getDecodingMode());
         EXPECT_EQ(specDecodingConfig.getMedusaChoices(), specDecodingConfig2.getMedusaChoices());
     }
+
+    {
+        texec::DecodingMode decodingMode{texec::DecodingMode::Eagle()};
+        texec::EagleChoices eagleChoices{{{0, 1, 2}}};
+        texec::EagleConfig eagleConfig{eagleChoices};
+        auto specDecodingConfig = texec::DecodingConfig(decodingMode, std::nullopt, std::nullopt, eagleConfig);
+        auto specDecodingConfig2 = serializeDeserialize(specDecodingConfig);
+        EXPECT_EQ(specDecodingConfig.getDecodingMode(), specDecodingConfig2.getDecodingMode());
+        EXPECT_EQ(specDecodingConfig.getEagleConfig()->getEagleChoices(),
+            specDecodingConfig2.getEagleConfig()->getEagleChoices());
+    }
 }
 
 TEST(SerializeUtilsTest, DebugConfig)
@@ -468,10 +488,11 @@ TEST(SerializeUtilsTest, DebugConfig)
 
 TEST(SerializeUtilsTest, OrchestratorConfig)
 {
-    auto orchConfig = texec::OrchestratorConfig(false, std::filesystem::current_path().string());
+    auto orchConfig = texec::OrchestratorConfig(false, std::filesystem::current_path().string(), nullptr, false);
     auto orchConfig2 = serializeDeserialize(orchConfig);
     EXPECT_EQ(orchConfig.getIsOrchestrator(), orchConfig2.getIsOrchestrator());
     EXPECT_EQ(orchConfig.getWorkerExecutablePath(), orchConfig2.getWorkerExecutablePath());
+    EXPECT_EQ(orchConfig.getSpawnProcesses(), orchConfig2.getSpawnProcesses());
 }
 
 TEST(SerializeUtilsTest, KvCacheStats)
@@ -506,6 +527,9 @@ TEST(SerializeUtilsTest, IterationStats)
     auto numQueuedRequests = texec::SizeType32{30};
     auto numCompletedRequests = texec::SizeType32{10};
     auto maxNumActiveRequests = texec::SizeType32{30};
+    auto maxBatchSizeStatic = texec::SizeType32{100};
+    auto maxBatchSizeTunerRecommended = texec::SizeType32{50};
+    auto maxBatchSizeRuntime = texec::SizeType32{50};
     auto gpuMemUsage = size_t{1024};
     auto cpuMemUsage = size_t{2048};
     auto pinnedMemUsage = size_t{4096};
@@ -516,8 +540,8 @@ TEST(SerializeUtilsTest, IterationStats)
         {
             auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
                 numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests,
-                gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats,
-                ifbBatchingStats};
+                maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime, gpuMemUsage, cpuMemUsage,
+                pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats, ifbBatchingStats};
 
             // serialize and deserialize using std::vector<char>
             {
@@ -543,8 +567,8 @@ TEST(SerializeUtilsTest, IterationStats)
             {
                 auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
                     numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests,
-                    maxNumActiveRequests, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats,
-                    ifbBatchStats};
+                    maxNumActiveRequests, maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime,
+                    gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats, ifbBatchStats};
                 {
                     auto buffer = texec::Serialization::serialize(stats);
                     auto stats2 = texec::Serialization::deserializeIterationStats(buffer);

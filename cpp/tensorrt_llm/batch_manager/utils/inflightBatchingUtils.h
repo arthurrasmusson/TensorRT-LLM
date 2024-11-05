@@ -13,13 +13,20 @@
 #pragma once
 
 #include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/runtimeBuffers.h"
+#include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
+#include "tensorrt_llm/common/optionalRef.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 
 namespace tensorrt_llm::batch_manager::utils
 {
 using SizeType32 = runtime::SizeType32;
 using TensorPtr = runtime::ITensor::SharedPtr;
+
+template <typename T>
+using OptionalRef = common::OptionalRef<T>;
 
 TensorPtr collectRequestIds(RequestVector const& contextRequests, RequestVector const& generationRequests);
 
@@ -42,6 +49,11 @@ void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, 
 
 void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
     kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr);
+
+void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmRequest, SizeType32 maxInputLen,
+    OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager = std::nullopt,
+    OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager = std::nullopt,
+    OptionalRef<BasePeftCacheManager> peftCacheManager = std::nullopt, bool pause = false);
 
 class CudaGraphExecutor
 {

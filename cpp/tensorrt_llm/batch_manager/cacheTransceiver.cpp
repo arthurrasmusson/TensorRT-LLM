@@ -25,6 +25,7 @@
 #endif // defined(_WIN32)
 
 #include "cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/contextProgress.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/logger.h"
@@ -173,6 +174,30 @@ void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
     llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS;
     auto future = mDataResponder->respondAndSendAsync(*llmRequest);
     mResponderFutures.insert({llmRequest, std::move(future)});
+}
+
+// RequestVector are passed by value (move construct) to avoid dangling reference
+void CacheTransceiver::respondAndSendLayerWise(RequestVector requests, std::unique_ptr<ContextProgress> progress)
+{
+    // TODO: send layer-wise request early in gen instances, and check future here
+
+    int const numLayers = progress->getNumLayers();
+    TLLM_LOG_DEBUG("CacheTransceiver::respondAndSendLayerWise - expect %d layers", numLayers);
+    for (int i = 0; i < numLayers; i++)
+    {
+        TLLM_LOG_TRACE("CacheTransceiver::respondAndSendLayerWise - waiting kv cache for layer %d", i);
+        progress->wait(i);
+        // TODO: actually send the cache per request
+        for (auto& llmRequest : requests)
+        {
+            TLLM_CHECK(llmRequest);
+            TLLM_LOG_INFO("CacheTransceiver::respondAndSendLayerWise - sending kv cache for layer %d of request %zu", i,
+                llmRequest->mRequestId);
+            // TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
+
+            // TODO: actually send the cache per request
+        }
+    }
 }
 
 void CacheTransceiver::requestAndReceiveSync(LlmRequest* llmRequest)

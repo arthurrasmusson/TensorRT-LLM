@@ -13,6 +13,7 @@
 #include "medusaBuffers.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/medusaModule.h"
+#include "tensorrt_llm/runtime/utils/speculativeChoicesUtils.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -59,8 +60,6 @@ MedusaBuffers::MedusaBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, r
     medusaPathsHost = runtime::BufferManager::pinned(
         ITensor::makeShape({maxNumSequences, maxDecodingTokens, maxPathLen}), nvinfer1::DataType::kINT32);
 
-    SizeType32 totalPaths = 0;
-
     TensorPtr medusaPositionOffsetsHostSlice = ITensor::slice(medusaPositionOffsetsHost, 0, 1);
     medusaPositionOffsetsHostSlice->squeeze(0);
     TensorPtr medusaTreeIdsHostSlice = ITensor::slice(medusaTreeIdsHost, 0, 1);
@@ -72,9 +71,8 @@ MedusaBuffers::MedusaBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, r
 
     // Init buffers for 1 request
     auto const& choices = decodingConfig.getMedusaChoices().value_or(medusaModule->getMedusaChoices());
-    medusaModule->initMedusaTensorsFromChoices(choices, mTopKs, medusaGenerationLengthsHost,
-        medusaPositionOffsetsHostSlice, medusaTreeIdsHostSlice, medusaPathsHostSlice, attentionPackedMaskHostSlice,
-        totalPaths);
+    runtime::utils::initTensorsFromChoices(*medusaModule, choices, mTopKs, medusaGenerationLengthsHost,
+        medusaPositionOffsetsHostSlice, medusaTreeIdsHostSlice, medusaPathsHostSlice, attentionPackedMaskHostSlice);
 
     auto scatterToBatch = [maxBatchSize, &manager](TensorPtr& data)
     {

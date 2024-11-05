@@ -13,6 +13,7 @@
 #pragma once
 
 #include "mpiDataTransceiver.h"
+#include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/mpiUtils.h"
@@ -22,6 +23,8 @@
 
 namespace tensorrt_llm::batch_manager
 {
+
+class ContextProgress;
 
 class CacheTransceiver
 {
@@ -39,6 +42,8 @@ public:
     ~CacheTransceiver();
 
     void respondAndSendAsync(LlmRequest* llmRequest);
+
+    void respondAndSendLayerWise(RequestVector requests, std::unique_ptr<ContextProgress> progress);
 
     void requestAndReceiveSync(LlmRequest* llmRequest);
 

@@ -37,6 +37,8 @@ set(SRCS
     requestWithId.cpp
     response.cpp
     samplingConfig.cpp
+    dynamicBatchConfig.cpp
+    dynamicBatchTuner.cpp
     schedulerConfig.cpp
     serialization.cpp
     speculativeDecodingConfig.cpp

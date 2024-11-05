@@ -179,7 +179,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     auto constexpr beamIdx = 0;
     auto promptLen0 = llmRequest0->getNumTokens(beamIdx);
     auto numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest0->addNewToken(9, beamIdx);
@@ -204,7 +204,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse blocks 0, 1 and get new block 3
     auto promptLen1 = llmRequest1->getNumTokens(beamIdx);
     auto numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
     llmRequest1->addNewToken(9, beamIdx);
@@ -225,7 +225,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     llmRequest0 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens0, samplingConfig, isStreaming);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 4}));
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
@@ -236,7 +236,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     llmRequest1 = std::make_shared<LlmRequest>(requestId, maxNewTokens, inputTokens1, samplingConfig, isStreaming);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), llmRequest1->getNumTokens(beamIdx) - 1);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest1->addNewToken(10, beamIdx);
@@ -264,7 +264,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse block 0, get new block 5
     auto promptLen2 = llmRequest2->getNumTokens(beamIdx);
     auto numContextBlocks2 = tc::ceilDiv(promptLen2, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, llmRequest2);
+    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, *llmRequest2);
     EXPECT_EQ(llmRequest2->getContextCurrentPosition(), tokensPerBlock);
     EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 5}));
     llmRequest2->addNewToken(5, beamIdx);
@@ -285,7 +285,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse blocks 0, 1, get new block 6
     auto promptLen3 = llmRequest3->getNumTokens(beamIdx);
     auto numContextBlocks3 = tc::ceilDiv(promptLen3, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, llmRequest3);
+    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, *llmRequest3);
     EXPECT_EQ(llmRequest3->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 6}));
     llmRequest3->addNewToken(11, beamIdx);
@@ -313,7 +313,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse blocks 0, 1 and add new block 7
     auto promptLen4 = llmRequest4->getNumTokens(beamIdx);
     auto numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, *llmRequest4);
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 7}));
     numTokens = llmRequest4->getNumTokens(beamIdx);
@@ -333,7 +333,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // reuse blocks 0, 1 and add block 3
     promptLen4 = llmRequest4->getNumTokens(beamIdx);
     numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, *llmRequest4);
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), 2 * tokensPerBlock);
     // Block 7 only has 1 token, so it gets put at the front of the list for eviction
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 7}));
@@ -358,7 +358,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // no reuse, all blocks need to be freed
     auto promptLen5 = llmRequest5->getNumTokens(beamIdx);
     auto numContextBlocks5 = tc::ceilDiv(promptLen5, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, llmRequest5);
+    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, *llmRequest5);
     llmRequest5->addNewToken(0, beamIdx);
     EXPECT_EQ(llmRequest5->getContextCurrentPosition(), 0);
 
@@ -381,7 +381,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseTest)
     // no reuse, all blocks need to be freed
     auto promptLen6 = llmRequest6->getNumTokens(beamIdx);
     auto numContextBlocks6 = tc::ceilDiv(promptLen6, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq6, promptLen6, numContextBlocks6, llmRequest6);
+    blockManager.addSequence(seq6, promptLen6, numContextBlocks6, *llmRequest6);
     llmRequest6->addNewToken(0, beamIdx);
     EXPECT_EQ(llmRequest6->getContextCurrentPosition(), 0);
 
@@ -440,7 +440,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     auto constexpr beamIdx = 0;
     auto promptLen0 = llmRequest0->getNumTokens(beamIdx);
     auto numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest0->addNewToken(3, beamIdx);
@@ -469,7 +469,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     // reuse blocks 0, 1 and get new block 3
     auto promptLen1 = llmRequest1->getNumTokens(beamIdx);
     auto numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
     llmRequest1->addNewToken(3, beamIdx);
@@ -493,7 +493,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     llmRequest0->addNewToken(3, beamIdx);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 4}));
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
@@ -511,7 +511,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
         std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1, numReturnSequences);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), llmRequest1->getNumTokens(beamIdx) - 1);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest1->addNewToken(5, beamIdx);
@@ -541,7 +541,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     // no reuse, get new block 5, 6, 7
     auto promptLen2 = llmRequest2->getNumTokens(beamIdx);
     auto numContextBlocks2 = tc::ceilDiv(promptLen2, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, llmRequest2);
+    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, *llmRequest2);
     EXPECT_EQ(llmRequest2->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({5, 6, 7}));
     llmRequest2->addNewToken(3, beamIdx);
@@ -565,7 +565,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdTest)
     // reuse block 0, get new block 8, 9
     auto promptLen3 = llmRequest3->getNumTokens(beamIdx);
     auto numContextBlocks3 = tc::ceilDiv(promptLen3, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, llmRequest3);
+    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, *llmRequest3);
     EXPECT_EQ(llmRequest3->getContextCurrentPosition(), tokensPerBlock);
     EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 8, 9}));
     llmRequest3->addNewToken(3, beamIdx);
@@ -623,7 +623,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     auto constexpr beamIdx = 0;
     auto promptLen0 = llmRequest0->getNumTokens(beamIdx);
     auto numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest0->addNewToken(9, beamIdx);
@@ -650,7 +650,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     // reuse blocks 0, 1 and get new block 3
     auto promptLen1 = llmRequest1->getNumTokens(beamIdx);
     auto numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 3}));
     llmRequest1->addNewToken(9, beamIdx);
@@ -672,7 +672,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     llmRequest0->addNewToken(9, beamIdx);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 4}));
     EXPECT_EQ(blockManager.getNumAllocatedBlocks(), numBlocks);
@@ -685,7 +685,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
         loraTaskId);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), llmRequest1->getNumTokens(beamIdx) - 1);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest1->addNewToken(10, beamIdx);
@@ -713,7 +713,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     // no reuse, get new block 5, 6, 7
     auto promptLen2 = llmRequest2->getNumTokens(beamIdx);
     auto numContextBlocks2 = tc::ceilDiv(promptLen2, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, llmRequest2);
+    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, *llmRequest2);
     EXPECT_EQ(llmRequest2->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({5, 6, 7}));
     llmRequest2->addNewToken(9, beamIdx);
@@ -740,7 +740,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     // reuse blocks 5, 6, get new block 8
     auto promptLen3 = llmRequest3->getNumTokens(beamIdx);
     auto numContextBlocks3 = tc::ceilDiv(promptLen3, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, llmRequest3);
+    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, *llmRequest3);
     EXPECT_EQ(llmRequest3->getContextCurrentPosition(), 2 * tokensPerBlock);
     EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({5, 6, 8}));
     llmRequest3->addNewToken(11, beamIdx);
@@ -768,7 +768,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     // reuse blocks 0, get new block 9
     auto promptLen4 = llmRequest4->getNumTokens(beamIdx);
     auto numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, *llmRequest4);
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), tokensPerBlock);
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 9}));
     llmRequest4->addNewToken(5, beamIdx);
@@ -791,7 +791,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithLoraTaskIdTest)
     // no reuse, get new block 10, 11, 12
     auto promptLen5 = llmRequest5->getNumTokens(beamIdx);
     auto numContextBlocks5 = tc::ceilDiv(promptLen5, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, llmRequest5);
+    blockManager.addSequence(seq5, promptLen5, numContextBlocks5, *llmRequest5);
     EXPECT_EQ(llmRequest5->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq5.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({10, 11, 12}));
     llmRequest5->addNewToken(9, beamIdx);
@@ -852,7 +852,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     auto constexpr beamIdx = 0;
     auto promptLen0 = llmRequest0->getNumTokens(beamIdx);
     auto numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 2}));
     llmRequest0->addNewToken(3, beamIdx);
@@ -882,7 +882,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     // no reuse, get new block 3, 4, 5
     auto promptLen1 = llmRequest1->getNumTokens(beamIdx);
     auto numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({3, 4, 5}));
     llmRequest1->addNewToken(3, beamIdx);
@@ -905,7 +905,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     llmRequest0->addNewToken(3, beamIdx);
     promptLen0 = llmRequest0->getNumTokens(beamIdx);
     numContextBlocks0 = tc::ceilDiv(promptLen0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, promptLen0, numContextBlocks0, *llmRequest0);
     EXPECT_EQ(llmRequest0->getContextCurrentPosition(), 2 * tokensPerBlock);
     // reuse blocks 0, 1 and get new block 6
     EXPECT_THAT(seq0.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 1, 6}));
@@ -924,7 +924,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
         std::nullopt, LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, inputTokenExtraIds1);
     promptLen1 = llmRequest1->getNumTokens(beamIdx);
     numContextBlocks1 = tc::ceilDiv(promptLen1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, promptLen1, numContextBlocks1, *llmRequest1);
     EXPECT_EQ(llmRequest1->getContextCurrentPosition(), llmRequest1->getNumTokens(beamIdx) - 1);
     EXPECT_THAT(seq1.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({3, 4, 5}));
     llmRequest1->addNewToken(5, beamIdx);
@@ -953,7 +953,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     // no reuse, get new block 7, 8, 9
     auto promptLen2 = llmRequest2->getNumTokens(beamIdx);
     auto numContextBlocks2 = tc::ceilDiv(promptLen2, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, llmRequest2);
+    blockManager.addSequence(seq2, promptLen2, numContextBlocks2, *llmRequest2);
     EXPECT_EQ(llmRequest2->getContextCurrentPosition(), 0);
     EXPECT_THAT(seq2.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({7, 8, 9}));
     llmRequest2->addNewToken(3, beamIdx);
@@ -977,7 +977,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     // reuse block 0, get new block 10, 11
     auto promptLen3 = llmRequest3->getNumTokens(beamIdx);
     auto numContextBlocks3 = tc::ceilDiv(promptLen3, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, llmRequest3);
+    blockManager.addSequence(seq3, promptLen3, numContextBlocks3, *llmRequest3);
     EXPECT_EQ(llmRequest3->getContextCurrentPosition(), tokensPerBlock);
     EXPECT_THAT(seq3.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({0, 10, 11}));
     llmRequest3->addNewToken(3, beamIdx);
@@ -1000,7 +1000,7 @@ TEST_F(KVCacheManagerTest, BlockManagerReuseWithExtraIdAndLoraTaskIdTest)
     // reuse block 3, get new block 12, 13
     auto promptLen4 = llmRequest4->getNumTokens(beamIdx);
     auto numContextBlocks4 = tc::ceilDiv(promptLen4, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, llmRequest4);
+    blockManager.addSequence(seq4, promptLen4, numContextBlocks4, *llmRequest4);
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), tokensPerBlock);
     EXPECT_THAT(seq4.getCacheBlockIds().at(beamIdx), ::testing::ElementsAreArray({3, 12, 13}));
     llmRequest4->addNewToken(3, beamIdx);
@@ -1108,7 +1108,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
             20));
     GenerationRequest seq0{0, inputLength0, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks0 = tc::ceilDiv(inputLength0, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq0, llmRequest0->getNumTokens(0), numContextBlocks0, llmRequest0);
+    blockManager.addSequence(seq0, llmRequest0->getNumTokens(0), numContextBlocks0, *llmRequest0);
 
     // Add another sequence with different tokens, at a low priority
     auto inputTokens1 = std::make_shared<VecTokens>(VecTokens{8, 9, 10, 11, 12, 13, 14, 15});
@@ -1116,7 +1116,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
     auto llmRequest1 = std::make_shared<LlmRequest>(1, maxNewTokens, inputTokens1, samplingConfig, isStreaming);
     GenerationRequest seq1{1, inputLength1, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks1 = tc::ceilDiv(inputLength1, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq1, llmRequest1->getNumTokens(0), numContextBlocks1, llmRequest1);
+    blockManager.addSequence(seq1, llmRequest1->getNumTokens(0), numContextBlocks1, *llmRequest1);
 
     // Release both sequences
     blockManager.releaseBlocks(seq0, llmRequest0);
@@ -1130,7 +1130,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
         KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, std::nullopt, 20)}, 20));
     GenerationRequest seq2{2, inputLength2, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks2 = tc::ceilDiv(inputLength2, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq2, llmRequest2->getNumTokens(0), numContextBlocks2, llmRequest2);
+    blockManager.addSequence(seq2, llmRequest2->getNumTokens(0), numContextBlocks2, *llmRequest2);
     blockManager.releaseBlocks(seq2, llmRequest2);
 
     // Check that request 1 blocks were overwritten
@@ -1139,7 +1139,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
     auto llmRequest3 = std::make_shared<LlmRequest>(3, maxNewTokens, inputTokens3, samplingConfig, isStreaming);
     GenerationRequest seq3{3, inputLength3, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks3 = tc::ceilDiv(inputLength3, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq3, llmRequest3->getNumTokens(0), numContextBlocks3, llmRequest3);
+    blockManager.addSequence(seq3, llmRequest3->getNumTokens(0), numContextBlocks3, *llmRequest3);
 
     EXPECT_EQ(llmRequest3->getContextCurrentPosition(), 4);
 
@@ -1152,7 +1152,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
     auto llmRequest4 = std::make_shared<LlmRequest>(4, maxNewTokens, inputTokens4, samplingConfig, isStreaming);
     GenerationRequest seq4{4, inputLength3, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks4 = tc::ceilDiv(inputLength4, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq4, llmRequest4->getNumTokens(0), numContextBlocks4, llmRequest4);
+    blockManager.addSequence(seq4, llmRequest4->getNumTokens(0), numContextBlocks4, *llmRequest4);
 
     EXPECT_EQ(llmRequest4->getContextCurrentPosition(), 4);
 
@@ -1162,7 +1162,7 @@ TEST_F(KVCacheManagerTest, BlockManagerBlockPriorityTest)
     auto llmRequest5 = std::make_shared<LlmRequest>(5, maxNewTokens, inputTokens5, samplingConfig, isStreaming);
     GenerationRequest seq5{5, inputLength5, beamWidth, maxBlocksPerSeq};
     auto numContextBlocks5 = tc::ceilDiv(inputLength5, blockManager.getTokensPerBlock());
-    blockManager.addSequence(seq5, llmRequest5->getNumTokens(0), numContextBlocks5, llmRequest5);
+    blockManager.addSequence(seq5, llmRequest5->getNumTokens(0), numContextBlocks5, *llmRequest5);
 
     EXPECT_EQ(llmRequest5->getContextCurrentPosition(), 0);
 }

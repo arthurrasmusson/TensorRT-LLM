@@ -65,12 +65,12 @@ std::list<std::vector<T>> chopVectorIntoBlocks(
     return blockedVectors;
 }
 
-std::list<BlockKey> buildBlockKeys(std::list<VecUniqueTokens>& blockedUniqueTokens,
-    std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> const& llmRequest)
+std::list<BlockKey> buildBlockKeys(
+    std::list<VecUniqueTokens>& blockedUniqueTokens, tensorrt_llm::batch_manager::LlmRequest const& llmRequest)
 {
     std::list<BlockKey> blockKeys;
-    bool hasLora = llmRequest->getLoraTaskId().has_value();
-    LoraTaskIdType loraTaskId = hasLora ? llmRequest->getLoraTaskId().value() : 0;
+    bool hasLora = llmRequest.getLoraTaskId().has_value();
+    LoraTaskIdType loraTaskId = hasLora ? llmRequest.getLoraTaskId().value() : 0;
     for (auto& uniqueTokens : blockedUniqueTokens)
     {
         blockKeys.push_back({hasLora, loraTaskId, std::move(uniqueTokens)});
@@ -243,18 +243,18 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
     : mNumPrimaryBlocks{blocksInPrimaryPool}
     , mNumSecondaryBlocks{blocksInSecondaryPool}
     , mOnboardBlocks(onboardBlocks)
-    , mBufferManager{stream}
+    , mBufferManager{std::move(stream)}
     , mSizePerHead{sizePerHead}
     , mNumLayers{static_cast<SizeType32>(numKvHeadsPerLayer.size())}
     , mSchedulingNumFreeBlocks{0}
     , mTokensPerBlock{tokensPerBlock}
     , mCachedBlocksRoot{std::make_shared<KVCacheBlock>(-1, tk::KVCacheIndex{0})}
+    , mCacheType{cacheType}
     , mAllocTotalBlocks{0}
     , mAllocNewBlocks{0}
     , mReusedBlocks{0}
-    , mMissedBlocks{0}
     , mReusedUniqueBlocks{0}
-    , mCacheType{cacheType}
+    , mMissedBlocks{0}
 {
     std::map<SizeType32, SizeType32> numLayersPerPool;
 
@@ -312,7 +312,7 @@ BlockManager::~BlockManager()
     TLLM_LOG_DEBUG("BlockManager - missed blocks:                       %lu  ", mMissedBlocks);
     TLLM_LOG_DEBUG("BlockManager - reused blocks:                       %lu  ", mReusedBlocks);
     TLLM_LOG_DEBUG("BlockManager - reused unique blocks:                %lu  ", mReusedUniqueBlocks);
-    TLLM_LOG_DEBUG("BlockManager - reused unique blocks percentage (%): %.2f ", reusedUniqueBlocksPercentage);
+    TLLM_LOG_DEBUG("BlockManager - reused unique blocks percentage (%%): %.2f ", reusedUniqueBlocksPercentage);
     TLLM_LOG_DEBUG("BlockManager - cache hit rate:                      %.2f ", cacheHitRate);
 }
 
@@ -458,15 +458,14 @@ void BlockManager::onboardBlock(BlockPtr offloadBlock)
     }
 }
 
-BlockKey BlockManager::findNewContextBlock(
-    VecUniqueTokens const& uniqueTokens, std::shared_ptr<LlmRequest> const& llmRequest) const
+BlockKey BlockManager::findNewContextBlock(VecUniqueTokens const& uniqueTokens, LlmRequest const& llmRequest) const
 {
     auto blockedUniqueTokens
         = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size(), mTokensPerBlock, false);
     auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
     BlockKey ret;
-    ret.hasLora = llmRequest->getLoraTaskId().has_value();
-    ret.loraTaskId = llmRequest->getLoraTaskId() ? llmRequest->getLoraTaskId().value() : 0;
+    ret.hasLora = llmRequest.getLoraTaskId().has_value();
+    ret.loraTaskId = llmRequest.getLoraTaskId() ? llmRequest.getLoraTaskId().value() : 0;
     auto searchRoot = mCachedBlocksRoot;
     for (auto const& blockKey : blockKeys)
     {
@@ -537,18 +536,16 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::list<BlockKey> const& blockKe
     return numMatchedTokens;
 }
 
-void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLength, SizeType32 numContextBlocks,
-    std::shared_ptr<LlmRequest> const& llmRequest)
+void BlockManager::addSequence(
+    GenerationRequest& sequence, SizeType32 inputLength, SizeType32 numContextBlocks, LlmRequest& llmRequest)
 {
-    TLLM_CHECK(llmRequest);
-
     auto const requestId = sequence.getRequestId();
     auto const [seqIt, emplaceSucess] = mAllocatedBlocksPerSeq.emplace(requestId, std::vector<BlockPtr>{});
     TLLM_CHECK(emplaceSucess);
 
     auto constexpr beamIdx = 0;
-    auto const& uniqueTokens = mCacheType == CacheType::kSELF ? llmRequest->getUniqueTokens(beamIdx)
-                                                              : *(llmRequest->getEncoderUniqueTokens().value());
+    auto const& uniqueTokens = mCacheType == CacheType::kSELF ? llmRequest.getUniqueTokens(beamIdx)
+                                                              : *(llmRequest.getEncoderUniqueTokens().value());
 
     // Ignore last token because it can't be recovered
     auto blockedUniqueTokens = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, inputLength - 1, mTokensPerBlock, true);
@@ -560,7 +557,7 @@ void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLeng
 
     auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
 
-    auto config = llmRequest->getKvCacheRetentionConfig();
+    auto config = llmRequest.getKvCacheRetentionConfig();
 
     auto retentionPriorityList = config.value_or(executor::KvCacheRetentionConfig())
                                      .getPerBlockEvictionPolicy(getTokensPerBlock(), inputLength);
@@ -569,8 +566,8 @@ void BlockManager::addSequence(GenerationRequest& sequence, SizeType32 inputLeng
 
     auto const prepopulatedPromptLen
         = loadOrAllocateBlocks(blockKeys, numContextBlocks, sequence, retentionPriorityList);
-    llmRequest->setPrepopulatedPromptLen(prepopulatedPromptLen, getTokensPerBlock());
-    TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest->mRequestId,
+    llmRequest.setPrepopulatedPromptLen(prepopulatedPromptLen, getTokensPerBlock());
+    TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest.mRequestId,
         inputLength, prepopulatedPromptLen);
 }
 
@@ -735,7 +732,7 @@ void BlockManager::releaseLastBlock(GenerationRequest& sequence)
     return mEvictionPolicy->getNumFreeBlocks(kPrimaryLevel);
 }
 
-void BlockManager::releaseBlocks(GenerationRequest& sequence, std::shared_ptr<LlmRequest> const& llmRequest)
+void BlockManager::releaseBlocks(GenerationRequest& sequence, OptionalRef<LlmRequest const> llmRequest)
 {
     auto const requestId = sequence.getRequestId();
 
@@ -749,7 +746,7 @@ void BlockManager::releaseBlocks(GenerationRequest& sequence, std::shared_ptr<Ll
             auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
             auto blockedUniqueTokens
                 = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, mTokensPerBlock, true);
-            auto blockKeys = buildBlockKeys(blockedUniqueTokens, llmRequest);
+            auto blockKeys = buildBlockKeys(blockedUniqueTokens, *llmRequest);
             if (cacheBlockIds[beamIdx].size() > blockKeys.size())
             {
                 BlockPtr last = mAllBlocksById[cacheBlockIds[beamIdx].back()];
@@ -810,12 +807,14 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     // The sink tokens are stored in blocks separate from other tokens.
     // If the last block of sink tokens is only partially filled,
     // we fill that block with a "bubble" to reach the number of tokens per block.
+    mTokensPerBlock = tokensPerBlock;
     mSinkBubbleLength = getSinkBubbleLength(sinkTokenLength, tokensPerBlock);
 
     mSinkBlockTokenLength = mSinkBubbleLength + sinkTokenLength;
     TLLM_CHECK(mSinkBlockTokenLength % tokensPerBlock == 0);
 
     mMaxTokenNum = mMaxAttentionWindow + mSinkBubbleLength;
+    mUseOneMoreBlock = useOneMoreBlock;
     if (useOneMoreBlock)
     {
         mMaxTokenNum += tokensPerBlock;
@@ -823,6 +822,7 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
 
     mMaxBlocksPerSeq = tc::ceilDiv(mMaxTokenNum, tokensPerBlock);
 
+    mBlocksInPrimaryPool = blocksInPrimaryPool;
     auto const maxNumTokens = blocksInPrimaryPool * tokensPerBlock;
 
     TLLM_LOG_INFO("Max KV cache pages per sequence: %d", mMaxBlocksPerSeq);
@@ -1107,15 +1107,14 @@ void KVCacheManager::addToken(RequestIdType requestId)
     updateToken(sequence, true);
 }
 
-BlockKey KVCacheManager::findNewContextBlock(
-    VecUniqueTokens const& uniqueTokens, std::shared_ptr<LlmRequest> const& llmRequest) const
+BlockKey KVCacheManager::findNewContextBlock(VecUniqueTokens const& uniqueTokens, LlmRequest const& llmRequest) const
 {
     auto newContextBlocks = mBlockManager.findNewContextBlock(uniqueTokens, llmRequest);
     return newContextBlocks;
 }
 
-void KVCacheManager::addSequence(RequestIdType requestId, SizeType32 inputLength, SizeType32 beamWidth,
-    std::shared_ptr<LlmRequest> const& llmRequest)
+void KVCacheManager::addSequence(
+    RequestIdType requestId, SizeType32 inputLength, SizeType32 beamWidth, OptionalRef<LlmRequest> llmRequest)
 {
     // Need to add the bubble after the sink tokens to use even block size
     inputLength += mSinkBubbleLength;
@@ -1159,7 +1158,7 @@ void KVCacheManager::addSequence(RequestIdType requestId, SizeType32 inputLength
 
     if (!enableCyclicKvCache && mEnableBlockReuse)
     {
-        mBlockManager.addSequence(sequence, inputLength, numContextBlocks, llmRequest);
+        mBlockManager.addSequence(sequence, inputLength, numContextBlocks, *llmRequest);
     }
     else
     {
@@ -1178,16 +1177,16 @@ void KVCacheManager::addSequence(RequestIdType requestId, SizeType32 inputLength
     }
 }
 
-void KVCacheManager::storeContextBlocks(std::shared_ptr<LlmRequest> const& llmRequest)
+void KVCacheManager::storeContextBlocks(LlmRequest const& llmRequest)
 {
-    auto const requestId = llmRequest->mRequestId;
+    auto const requestId = llmRequest.mRequestId;
     if (mEnableBlockReuse)
     {
         auto& sequence = mSequences.at(requestId);
 
         constexpr int beamIdx = 0; // no need to consider more than one beam for input tokens
         auto cacheBlockIds = sequence.getCacheBlockIds();
-        auto const& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
+        auto const& uniqueTokens = llmRequest.getUniqueTokens(beamIdx);
 
         auto blockedUniqueTokens
             = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, getTokensPerBlock(), false);
@@ -1196,7 +1195,7 @@ void KVCacheManager::storeContextBlocks(std::shared_ptr<LlmRequest> const& llmRe
     }
 }
 
-void KVCacheManager::removeSequence(RequestIdType requestId, std::shared_ptr<LlmRequest> const& llmRequest)
+void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)
 {
     TLLM_LOG_TRACE("[%s]::%s stop", isCrossKv() ? "CROSS" : "SELF", __PRETTY_FUNCTION__);
     auto node = mSequences.extract(requestId);
@@ -1374,6 +1373,25 @@ SizeType32 KVCacheManager::getMaxAttentionWindowUpperBound(SizeType32 blocksInPr
     }
     TLLM_CHECK_WITH_INFO(maxAttentionWindowUpperBound > 0, "Impossibe to fit in any sequence in kvCache");
     return maxAttentionWindowUpperBound;
+}
+
+SizeType32 KVCacheManager::getMaxCapacityBatchSize(SizeType32 seqLen)
+{
+
+    auto const actualSeqLen = std::min(seqLen, mMaxAttentionWindow);
+    auto actualMaxTokenNum = actualSeqLen + mSinkBubbleLength;
+    if (mUseOneMoreBlock)
+    {
+        actualMaxTokenNum += mTokensPerBlock;
+    }
+
+    auto const actualBlocksPerSeq = tc::ceilDiv(actualMaxTokenNum, mTokensPerBlock);
+
+    auto const maxNumTokens = mBlocksInPrimaryPool * mTokensPerBlock;
+
+    auto const maxBatchSize = maxNumTokens / (mMaxBeamWidth * actualBlocksPerSeq * mTokensPerBlock);
+
+    return maxBatchSize;
 }
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

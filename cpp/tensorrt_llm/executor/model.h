@@ -48,6 +48,18 @@ public:
     /// @param activeRequests The list of request to try to advance
     virtual void forwardAsync(batch_manager::RequestList const& activeRequests) = 0;
 
+    /// @brief Override the runtime batch size for the model
+    virtual void setRuntimeBatchSize(SizeType32 runtimeBatchSize)
+    {
+        // By default, we ignore the runtimeBatchSize unless the model actively supports it
+    }
+
+    /// @brieft Override the runtime max num tokens for the model
+    virtual void setRuntimeMaxNumTokens(SizeType32 runtimeMaxNumTokens)
+    {
+        // By default, we ignore the runtimeMaxNumTokens unless the model actively supports it
+    }
+
     virtual void updatePeftCache(LlmRequestPtr const& llmRequest) = 0;
 
     /// @brief Reset the iteration stats when there are no inflight requests
@@ -87,6 +99,14 @@ public:
     virtual void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched)
         = 0;
     virtual void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) = 0;
+
+    //! \brief Get the batch size that can fill the kv cache to the maximum capacity give the sequence length
+    //! \param seqLen The sequence length
+    //! \return The batch size that can fill the kv cache to the maximum capacity. If unsuporrted, return 0.
+    [[nodiscard]] virtual SizeType32 getMaxCapacityBatchSize(SizeType32 seqLen)
+    {
+        return 0;
+    }
 };
 
 } // namespace tensorrt_llm::executor

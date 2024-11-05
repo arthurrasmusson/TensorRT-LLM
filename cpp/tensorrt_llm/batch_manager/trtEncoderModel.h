@@ -46,7 +46,7 @@ public:
         runtime::RawEngine const& rawEngine, std::shared_ptr<nvinfer1::ILogger> logger,
         TrtGptModelOptionalParams const& optionalParams);
 
-    void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false) override;
+    void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false);
     void forward(RequestVector& activeRequests);
 
     void forwardSync() override;

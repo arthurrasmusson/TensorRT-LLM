@@ -39,13 +39,13 @@ void prefillWithChunkedContextsAlreadyExecuting(RequestList const& activeRequest
             if (mKvCacheManager && mKvCacheManager->isEnableBlockReuse())
             {
                 auto uniqueTokens = req->getUniqueTokens(0);
-                auto newContextBlock = mKvCacheManager->findNewContextBlock(uniqueTokens, req);
+                auto newContextBlock = mKvCacheManager->findNewContextBlock(uniqueTokens, *req);
                 newlyContributedContextBlocks.insert(newContextBlock);
             }
             if (mCrossKvCacheManager && mCrossKvCacheManager->isEnableBlockReuse())
             {
                 auto uniqueTokens = *(req->getEncoderUniqueTokens().value());
-                auto newContextBlock = mCrossKvCacheManager->findNewContextBlock(uniqueTokens, req);
+                auto newContextBlock = mCrossKvCacheManager->findNewContextBlock(uniqueTokens, *req);
                 newlyContributedCrossContextBlocks.insert(newContextBlock);
             }
         }
@@ -58,7 +58,7 @@ bool oneManagerBeneficialToSkip(
     std::unordered_set<BlockKey, BlockKeyHasher>& newlyContributedContextBlocks)
 {
     // check with kvCacheManager
-    auto newContextBlock = kvCacheManager->findNewContextBlock(uniqueTokens, llmRequest);
+    auto newContextBlock = kvCacheManager->findNewContextBlock(uniqueTokens, *llmRequest);
     bool shouldSkip = false;
     if (newlyContributedContextBlocks.count(newContextBlock) > 0)
     {

@@ -224,7 +224,7 @@ Executor::Impl::Impl(std::filesystem::path const& modelPath,
     // for now, assume encoder & decoder models share the same MPI config
     auto const tp = decoderJsonConfig.getTensorParallelism();
     auto const pp = decoderJsonConfig.getPipelineParallelism();
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType, modelPath);
+    initializeCommAndWorkers(tp, pp, executorConfig, modelType, modelPath, std::nullopt, decoderJsonConfig);
 
     if (mIsWorker)
     {
@@ -266,7 +266,7 @@ Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& json
     // for now, assume encoder & decoder models share the same MPI config
     auto const tp = decoderJsonConfig.getTensorParallelism();
     auto const pp = decoderJsonConfig.getPipelineParallelism();
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType);
+    initializeCommAndWorkers(tp, pp, executorConfig, modelType, std::nullopt, std::nullopt, decoderJsonConfig);
 
     if (mIsWorker)
     {
@@ -301,7 +301,7 @@ Executor::Impl::Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr
     auto const tp = worldConfig.getTensorParallelism();
     auto const pp = worldConfig.getPipelineParallelism();
     auto const modelType = encoderModel.has_value() ? ModelType::kENCODER_DECODER : ModelType::kDECODER_ONLY;
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType);
+    initializeCommAndWorkers(tp, pp, executorConfig, modelType, std::nullopt, worldConfig);
     if (modelType == ModelType::kENCODER_DECODER)
     {
         mEncoderModel = encoderModel.value();
@@ -374,6 +374,13 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     }
 
     mEnableBlockReuse = executorConfig.getKvCacheConfig().getEnableBlockReuse();
+
+    auto const& dynamicBatchConfig = executorConfig.getSchedulerConfig().getDynamicBatchConfig();
+    if (dynamicBatchConfig)
+    {
+        mDynamicBatchTuner = std::make_shared<DynamicBatchTuner>(dynamicBatchConfig.value());
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -463,7 +470,9 @@ void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelCon
 }
 
 void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
-    std::optional<ModelType> modelType, std::optional<std::filesystem::path> const& modelPath)
+    std::optional<ModelType> modelType, std::optional<std::filesystem::path> const& modelPath,
+    std::optional<runtime::WorldConfig> const& worldConfig,
+    std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig)
 {
     if (modelType.has_value() && modelType.value() == ModelType::kENCODER_DECODER)
     {
@@ -495,7 +504,7 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
     }
     else
     {
-        initializeWorkers(tp, pp, parallelConfig);
+        initializeWorkers(tp, pp, parallelConfig, worldConfig, decoderGptJsonConfig);
     }
 }
 
@@ -583,7 +592,9 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
 #endif // ENABLE_MULTI_DEVICE
 }
 
-void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig)
+void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig,
+    std::optional<runtime::WorldConfig> const& worldConfig,
+    std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig)
 {
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
     int32_t const worldSize = worldComm.getSize();
@@ -684,6 +695,17 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
         }
         TLLM_CHECK(mOrchLeaderComm.get() != nullptr);
 
+        TLLM_CHECK(worldConfig.has_value() || decoderGptJsonConfig.has_value());
+        if (worldConfig.has_value())
+        {
+            mDeviceId = worldConfig->getDevice();
+        }
+        else
+        {
+            auto gpusPerNode = decoderGptJsonConfig->getGpusPerNode();
+            auto worldConfig = runtime::WorldConfig::mpi(gpusPerNode, tp, pp, parallelConfig.getDeviceIds());
+            mDeviceId = worldConfig.getDevice();
+        }
         // Spawn the thread responsible for receiving new requests from the orchestrator
         mLeaderRecvReqThread = std::thread(&Impl::leaderRecvReqThread, this);
 
@@ -1461,6 +1483,19 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
     {
         TLLM_LOG_DEBUG("num active requests in scope: %d", activeRequests.size());
 
+        if (mDynamicBatchTuner)
+        {
+            auto const seqLen
+                = mDynamicBatchTuner->getAverageInputLength() + mDynamicBatchTuner->getAverageOutputLength();
+            auto const maxCapacityBatchSize = mModel->getMaxCapacityBatchSize(seqLen);
+
+            if (mDynamicBatchTuner->isBatchSizeTuningEnabled())
+            {
+                auto runtimeBatchSize = mDynamicBatchTuner->getRuntimeBatchSize(maxCapacityBatchSize);
+                mModel->setRuntimeBatchSize(runtimeBatchSize);
+            }
+        }
+
         if (mEncoderModel)
         {
             mEncoderModel->forwardAsync(activeRequests);
@@ -1949,6 +1984,17 @@ void Executor::Impl::executionLoop()
             {
                 insertRequestInOrder(activeRequests, newRequest);
             }
+
+            // Update dynamic tuning stats
+            if (mDynamicBatchTuner)
+            {
+                for (auto const& req : activeRequests)
+                {
+                    auto inputLength = req->mPromptLen;
+                    auto outputLength = req->mMaxNewTokens;
+                    mDynamicBatchTuner->updateStats(inputLength, outputLength);
+                }
+            }
         }
 
         if (!activeRequests.empty())
@@ -2021,6 +2067,7 @@ void Executor::Impl::enqueueNewResponses(std::vector<Response>&& newResponses)
 void Executor::Impl::orchSendReqThread()
 {
     tensorrt_llm::common::setThreadName("orchSendReq");
+    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 
     while (true)
     {
@@ -2079,7 +2126,7 @@ void Executor::Impl::orchSendReqThread()
 void Executor::Impl::leaderRecvReqThread()
 {
     tensorrt_llm::common::setThreadName("leaderRecvReq");
-
+    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
@@ -2170,6 +2217,7 @@ void Executor::Impl::leaderRecvReqThread()
 void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTag, int32_t dataTag)
 {
     tensorrt_llm::common::setThreadName("leaderSend");
+    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 
 #if ENABLE_MULTI_DEVICE
     while (true)
@@ -2209,6 +2257,7 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
 void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
 {
     tensorrt_llm::common::setThreadName("orchRecv");
+    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 
 #if ENABLE_MULTI_DEVICE
     while (true)

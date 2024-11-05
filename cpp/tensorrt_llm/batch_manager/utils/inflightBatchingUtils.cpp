@@ -11,8 +11,6 @@
  */
 
 #include "inflightBatchingUtils.h"
-
-#include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
@@ -174,6 +172,40 @@ void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manage
         {
             kvCacheManager.addToken(requestId);
         }
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, SizeType32 maxInputLen,
+    OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager,
+    OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+    OptionalRef<BasePeftCacheManager> peftCacheManager, bool pause)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    // If a sequence slot is associated with this request id, free it
+    seqSlotManager.freeSequenceSlot(llmReq.mRequestId);
+    // Remove the sequence from kvCacheManager
+    auto const requestId = llmReq.mRequestId;
+    if (kvCacheManager)
+    {
+        kvCacheManager->removeSequence(requestId, llmReq);
+    }
+    if (crossKvCacheManager)
+    {
+        crossKvCacheManager->removeSequence(requestId, llmReq);
+    }
+    if (pause && !llmReq.isGenerationCompleteState())
+    {
+        llmReq.pause(maxInputLen);
+    }
+    else
+    {
+        TLLM_LOG_DEBUG("terminated: request %lu, paused: %d", requestId, pause);
+    }
+
+    if (peftCacheManager)
+    {
+        peftCacheManager->markRequestDone(llmReq, pause);
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }

@@ -32,10 +32,12 @@
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
 #include "tensorrt_llm/plugins/api/tllmPlugin.h"
+#include "tensorrt_llm/runtime/gptJsonConfig.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
+
 #include "tests/utils/common.h"
 
 #include <gmock/gmock.h>
@@ -798,6 +800,474 @@ private:
             }
         }
     }
+};
+
+class DisaggOrchestratorExecutor
+{
+
+public:
+    DisaggOrchestratorExecutor(std::vector<std::filesystem::path> const& contextEnginePaths,
+        std::vector<std::filesystem::path> const& genEnginePaths,
+        std::optional<std::vector<std::vector<SizeType32>>> const& deviceIdsForInstance, int32_t maxBeamWidth,
+        tensorrt_llm::executor::CapacitySchedulerPolicy capacitySchedulerPolicy, bool hasContextAwaitThreads,
+        bool hasGenAwaitThreads)
+        : mShutdown(false)
+        , mhasContextAwaitThreads(hasContextAwaitThreads)
+        , mhasGenAwaitThreads(hasGenAwaitThreads)
+    {
+
+        int worldRank = tensorrt_llm::mpi::MpiComm::world().getRank();
+        int worldSize = tensorrt_llm::mpi::MpiComm::world().getSize();
+        mIsOrchestrator = (worldRank == 0);
+        auto contextNum = contextEnginePaths.size();
+        mContextReqIdToGlobalId
+            = std::vector<std::unordered_map<batch_manager::RequestIdType, batch_manager::RequestIdType>>(contextNum);
+        mContextMapMutexs = std::vector<std::mutex>(contextNum);
+        auto genNum = genEnginePaths.size();
+        mGenerationReqIdToGlobalId
+            = std::vector<std::unordered_map<batch_manager::RequestIdType, batch_manager::RequestIdType>>(genNum);
+        mGenerationMapMutexs = std::vector<std::mutex>(genNum);
+        int deviceCount = -1;
+        TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+
+        std::vector<std::unique_ptr<tensorrt_llm::executor::Executor>> instances;
+        int instanceNum = genNum + contextNum;
+        int startRank = 0;
+        for (int in = 0; in < instanceNum; in++)
+        {
+            auto&& enginePath = in < contextNum ? contextEnginePaths.at(in) : genEnginePaths.at(in - contextNum);
+            auto decoderJsonConfig = tensorrt_llm::runtime::GptJsonConfig::parse(enginePath / "config.json");
+            size_t instanceRanks = decoderJsonConfig.getWorldSize();
+            std::vector<SizeType32> participateRank(instanceRanks);
+            std::vector<SizeType32> deviceIds;
+            if (deviceIdsForInstance.has_value())
+            {
+                deviceIds = deviceIdsForInstance.value().at(in);
+            }
+            for (int i = 0; i < instanceRanks; i++)
+            {
+                startRank++;
+                participateRank.at(i) = startRank;
+                if (!deviceIdsForInstance.has_value())
+                {
+                    deviceIds.push_back((startRank - 1) % deviceCount);
+                }
+            }
+            tensorrt_llm::executor::SchedulerConfig schedulerConfig(capacitySchedulerPolicy);
+
+            KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, 0.2};
+
+            tensorrt_llm::executor::ExecutorConfig executorConfig(maxBeamWidth, schedulerConfig, kvCacheConfig);
+
+            tensorrt_llm::executor::OrchestratorConfig orchestratorConfig{mIsOrchestrator, "", nullptr, false};
+            tensorrt_llm::executor::ParallelConfig parallelConfig{tensorrt_llm::executor::CommunicationType::kMPI,
+                tensorrt_llm::executor::CommunicationMode::kORCHESTRATOR, deviceIds, participateRank,
+                orchestratorConfig};
+            executorConfig.setParallelConfig(parallelConfig);
+
+            instances.emplace_back(std::make_unique<tensorrt_llm::executor::Executor>(
+                enginePath, tensorrt_llm::executor::ModelType::kDECODER_ONLY, executorConfig));
+        }
+
+        for (int cN = 0; cN < contextNum; cN++)
+        {
+            mContextExecutors.push_back(std::move(instances.at(cN)));
+        }
+        for (int gN = 0; gN < genNum; gN++)
+        {
+            mGenerationExecutors.push_back(std::move(instances.at(contextNum + gN)));
+        }
+        if (mIsOrchestrator)
+        {
+            if (mhasContextAwaitThreads)
+            {
+                for (int contextIdx = 0; contextIdx < contextNum; contextIdx++)
+                {
+                    mContextThreads.emplace_back(
+                        [this, contextIdx]() { this->waitResponseAndAppendThreadFun(true, contextIdx); });
+                }
+            }
+            if (mhasGenAwaitThreads)
+            {
+
+                for (int genIdx = 0; genIdx < genNum; genIdx++)
+                {
+                    mGenerationThreads.emplace_back(
+                        [this, genIdx]() { this->waitResponseAndAppendThreadFun(false, genIdx); });
+                }
+            }
+        }
+        tensorrt_llm::mpi::MpiComm::world().barrier();
+    }
+
+    std::vector<batch_manager::RequestIdType> enqueueContext(
+        std::vector<tensorrt_llm::executor::Request> requests, std::optional<int> selectContextId)
+    {
+
+        std::vector<batch_manager::RequestIdType> globalReqIds;
+        for (auto const& request : requests)
+        {
+
+            globalReqIds.push_back(generatedControlId());
+        }
+
+        for (size_t i = 0; i < requests.size(); ++i)
+        {
+            int contextId = selectContextId.has_value() ? selectContextId.value() : selectContextExecutor();
+            TLLM_CHECK(requests[i].getRequestType() == tensorrt_llm::executor::RequestType::REQUEST_TYPE_CONTEXT_ONLY);
+
+            auto contextReqId = mContextExecutors[contextId]->enqueueRequest(requests[i]);
+            mGlobalIdToContextReqId[globalReqIds[i]] = {contextId, contextReqId};
+            {
+                std::scoped_lock<std::mutex> lk{mContextMapMutexs[contextId]};
+                mContextReqIdToGlobalId[contextId][contextReqId] = globalReqIds[i];
+            }
+        }
+
+        return globalReqIds;
+    }
+
+    void enqueueGeneration(std::vector<tensorrt_llm::executor::Request> requests,
+        std::vector<batch_manager::RequestIdType> globalRequestIds, std::optional<int> selectGenIdx)
+    {
+
+        for (size_t i = 0; i < requests.size(); ++i)
+        {
+            int genIdx = selectGenIdx.has_value() ? selectGenIdx.value() : selectGenerationExecutor();
+
+            auto genReqId = mGenerationExecutors[genIdx]->enqueueRequest(requests[i]);
+            TLLM_CHECK(
+                requests[i].getRequestType() == tensorrt_llm::executor::RequestType::REQUEST_TYPE_GENERATION_ONLY);
+
+            mGlobalIdToGenerationReqId[globalRequestIds[i]] = {genIdx, genReqId};
+            {
+                std::scoped_lock<std::mutex> lk{mGenerationMapMutexs[genIdx]};
+                mGenerationReqIdToGlobalId[genIdx][genReqId] = globalRequestIds[i];
+            }
+        }
+    }
+
+    std::vector<ResponseWithId> awaitContextResponses(
+        std::optional<int> contextIdx, std::optional<std::chrono::milliseconds> const& timeout)
+    {
+
+        std::vector<ResponseWithId> responses;
+
+        if (mhasContextAwaitThreads)
+        {
+
+            std::unique_lock<std::mutex> lock(mResponsesContextMtx);
+            auto pred = [&mShutdown = mShutdown, &resp = this->mContextResponses]() -> bool
+            { return !resp.empty() || mShutdown; };
+            auto storeResponses
+                = [this, &resp = this->mContextResponses, &responses]() { responses = std::move(resp); };
+            if (timeout)
+            {
+                if (mContextResponsesCV.wait_for(lock, timeout.value(), pred))
+                {
+                    storeResponses();
+                }
+            }
+            else
+            {
+                mContextResponsesCV.wait(lock, pred);
+                storeResponses();
+            }
+            if (contextIdx.has_value())
+            {
+                std::vector<ResponseWithId> retResponses;
+                for (auto&& resp : responses)
+                {
+                    if (mGlobalIdToContextReqId.find(resp.id) != mGlobalIdToContextReqId.end())
+                    {
+                        if (mGlobalIdToContextReqId[resp.id].first == contextIdx.value())
+                        {
+                            retResponses.emplace_back(std::move(resp));
+                        }
+                    }
+                    else
+                    {
+                        TLLM_LOG_WARNING("mGlobalIdToContextReqId not found for id: %lu", resp.id);
+                    }
+                }
+                return retResponses;
+            }
+            return responses;
+        }
+
+        // !mhasGenAwaitThreads0
+        if (contextIdx.has_value())
+        {
+            TLLM_CHECK(!mhasContextAwaitThreads);
+            auto responseFromExecutor = mContextExecutors[contextIdx.value()]->awaitResponses(timeout);
+            for (auto&& resp : responseFromExecutor)
+            {
+
+                auto reqId = resp.getRequestId();
+                batch_manager::RequestIdType globalId{0};
+
+                {
+                    std::scoped_lock<std::mutex> lock{mContextMapMutexs.at(contextIdx.value())};
+                    globalId = mContextReqIdToGlobalId.at(contextIdx.value()).at(reqId);
+                }
+                TLLM_CHECK(globalId != 0);
+                responses.emplace_back(ResponseWithId{std::move(resp), globalId});
+            }
+            return responses;
+        }
+        TLLM_CHECK(timeout.has_value());
+        auto timeouP = timeout.value() / mContextExecutors.size();
+        for (size_t ci = 0; ci < mContextExecutors.size(); ci++)
+        {
+            auto responseFromExecutor = mContextExecutors.at(ci)->awaitResponses(timeouP);
+            for (auto&& resp : responseFromExecutor)
+            {
+
+                auto reqId = resp.getRequestId();
+                batch_manager::RequestIdType globalId{0};
+
+                {
+                    std::scoped_lock<std::mutex> lock{mContextMapMutexs.at(ci)};
+                    globalId = mContextReqIdToGlobalId.at(ci).at(reqId);
+                }
+                TLLM_CHECK(globalId != 0);
+                responses.emplace_back(ResponseWithId{std::move(resp), globalId});
+            }
+        }
+
+        return responses;
+    };
+
+    std::vector<ResponseWithId> awaitGenerationResponses(
+        std::optional<int> genIdx, std::optional<std::chrono::milliseconds> const& timeout)
+    {
+
+        std::vector<ResponseWithId> responses;
+
+        if (mhasGenAwaitThreads)
+        {
+
+            std::unique_lock<std::mutex> lock(mResponseGenerationMtx);
+            auto pred = [&mShutdown = mShutdown, &resp = this->mGenerationResponses]() -> bool
+            { return !resp.empty() || mShutdown; };
+            auto storeResponses
+                = [this, &resp = this->mGenerationResponses, &responses]() { responses = std::move(resp); };
+            if (timeout)
+            {
+                if (mGenerationResponsesCv.wait_for(lock, timeout.value(), pred))
+                {
+                    storeResponses();
+                }
+            }
+            else
+            {
+                mGenerationResponsesCv.wait(lock, pred);
+                storeResponses();
+            }
+            if (genIdx.has_value())
+            {
+                std::vector<ResponseWithId> retResponses;
+                for (auto&& resp : responses)
+                {
+                    if (mGlobalIdToGenerationReqId.find(resp.id) != mGlobalIdToGenerationReqId.end())
+                    {
+                        if (mGlobalIdToGenerationReqId[resp.id].first == genIdx.value())
+                        {
+                            retResponses.emplace_back(std::move(resp));
+                        }
+                    }
+                    else
+                    {
+                        TLLM_LOG_WARNING("mGlobalIdToGenerationReqId not found for id: %lu", resp.id);
+                    }
+                }
+                return retResponses;
+            }
+            return responses;
+        }
+
+        // !mhasGenAwaitThreads0
+        if (genIdx.has_value())
+        {
+            TLLM_CHECK(!mhasGenAwaitThreads);
+            auto responseFromExecutor = mGenerationExecutors[genIdx.value()]->awaitResponses(timeout);
+            for (auto&& resp : responseFromExecutor)
+            {
+
+                auto reqId = resp.getRequestId();
+                batch_manager::RequestIdType globalId{0};
+
+                {
+                    std::scoped_lock<std::mutex> lock{mGenerationMapMutexs.at(genIdx.value())};
+                    globalId = mGenerationReqIdToGlobalId.at(genIdx.value()).at(reqId);
+                }
+                TLLM_CHECK(globalId != 0);
+                responses.emplace_back(ResponseWithId{std::move(resp), globalId});
+            }
+            return responses;
+        }
+        TLLM_CHECK(timeout.has_value());
+        auto timeouP = timeout.value() / mGenerationExecutors.size();
+
+        for (size_t gi = 0; gi < mGenerationExecutors.size(); gi++)
+        {
+            auto responseFromExecutor = mGenerationExecutors.at(gi)->awaitResponses(timeouP);
+            for (auto&& resp : responseFromExecutor)
+            {
+
+                auto reqId = resp.getRequestId();
+                batch_manager::RequestIdType globalId{0};
+
+                {
+                    std::scoped_lock<std::mutex> lock{mGenerationMapMutexs.at(gi)};
+                    globalId = mGenerationReqIdToGlobalId.at(gi).at(reqId);
+                }
+                TLLM_CHECK(globalId != 0);
+                responses.emplace_back(ResponseWithId{std::move(resp), globalId});
+            }
+        }
+
+        return responses;
+    };
+
+    ~DisaggOrchestratorExecutor()
+    {
+        mShutdown = true;
+        mContextResponsesCV.notify_all();
+        mGenerationResponsesCv.notify_all();
+        if (mIsOrchestrator)
+        {
+            if (mhasContextAwaitThreads)
+            {
+                for (auto&& contextThread : mContextThreads)
+                {
+                    contextThread.join();
+                }
+            }
+            if (mhasGenAwaitThreads)
+            {
+                for (auto&& genThread : mGenerationThreads)
+                {
+                    genThread.join();
+                }
+            }
+        }
+    }
+
+private:
+    batch_manager::RequestIdType generatedControlId()
+    {
+        return ((++mLastId) % UINT64_MAX);
+    };
+
+    int selectContextExecutor()
+    {
+        static int contextIdx = 0;
+        contextIdx = (contextIdx + 1) % mContextExecutors.size();
+        return contextIdx;
+    }
+
+    int selectGenerationExecutor()
+    {
+        static int generationIdx = 0;
+        generationIdx = (generationIdx + 1) % mGenerationExecutors.size();
+        return generationIdx;
+    }
+
+    void appendNewContextResponse(std::vector<ResponseWithId>&& newResponses)
+    {
+        std::scoped_lock<std::mutex> lock(mResponsesContextMtx);
+        for (auto&& response : newResponses)
+        {
+            mContextResponses.emplace_back(std::move(response));
+        }
+        mContextResponsesCV.notify_all();
+    }
+
+    void appendNewGenerationResponse(std::vector<ResponseWithId>&& newResponses)
+    {
+        std::scoped_lock<std::mutex> lock(mResponseGenerationMtx);
+        for (auto&& response : newResponses)
+        {
+            mGenerationResponses.emplace_back(std::move(response));
+        }
+        mGenerationResponsesCv.notify_all();
+    }
+
+    void waitResponseAndAppendThreadFun(bool isContext, int executorIdx)
+    {
+        auto& executor = isContext ? mContextExecutors[executorIdx] : mGenerationExecutors[executorIdx];
+        std::chrono::milliseconds waitTime(1);
+
+        while (!mShutdown)
+        {
+            auto responses = executor->awaitResponses(waitTime);
+            if (responses.empty())
+            {
+                continue;
+            }
+            std::vector<ResponseWithId> responseWithIds;
+            if (isContext)
+            {
+                for (auto&& response : responses)
+                {
+                    auto reqId = response.getRequestId();
+                    batch_manager::RequestIdType globalId{0};
+
+                    {
+                        std::scoped_lock<std::mutex> lock{mContextMapMutexs.at(executorIdx)};
+                        globalId = mContextReqIdToGlobalId.at(executorIdx).at(reqId);
+                    }
+                    TLLM_CHECK(globalId != 0);
+                    responseWithIds.emplace_back(ResponseWithId{std::move(response), globalId});
+                }
+                appendNewContextResponse(std::move(responseWithIds));
+            }
+            else
+            {
+
+                for (auto&& response : responses)
+                {
+                    auto reqId = response.getRequestId();
+                    batch_manager::RequestIdType globalId{0};
+
+                    {
+                        std::scoped_lock<std::mutex> lock{mGenerationMapMutexs.at(executorIdx)};
+                        globalId = mGenerationReqIdToGlobalId.at(executorIdx).at(reqId);
+                    }
+                    TLLM_CHECK(globalId != 0);
+                    responseWithIds.emplace_back(ResponseWithId{std::move(response), globalId});
+                }
+                appendNewGenerationResponse(std::move(responseWithIds));
+            }
+        }
+    };
+
+    std::vector<std::unique_ptr<tensorrt_llm::executor::Executor>> mContextExecutors;
+    std::vector<std::unique_ptr<tensorrt_llm::executor::Executor>> mGenerationExecutors;
+    std::vector<std::thread> mContextThreads;
+    std::vector<std::thread> mGenerationThreads;
+    std::atomic<batch_manager::RequestIdType> mLastId{0};
+    std::vector<std::unordered_map<batch_manager::RequestIdType, batch_manager::RequestIdType>> mContextReqIdToGlobalId;
+    std::vector<std::unordered_map<batch_manager::RequestIdType, batch_manager::RequestIdType>>
+        mGenerationReqIdToGlobalId;
+    std::vector<std::mutex> mContextMapMutexs;
+    std::vector<std::mutex> mGenerationMapMutexs;
+    std::unordered_map<batch_manager::RequestIdType, std::pair<int, batch_manager::RequestIdType>>
+        mGlobalIdToContextReqId;
+    std::unordered_map<batch_manager::RequestIdType, std::pair<int, batch_manager::RequestIdType>>
+        mGlobalIdToGenerationReqId;
+    std::vector<ResponseWithId> mContextResponses;
+    std::condition_variable mContextResponsesCV;
+    mutable std::mutex mResponsesContextMtx;
+
+    std::vector<ResponseWithId> mGenerationResponses;
+    std::condition_variable mGenerationResponsesCv;
+    mutable std::mutex mResponseGenerationMtx;
+    std::atomic<bool> mShutdown{false};
+    std::atomic<bool> mhasContextAwaitThreads{false};
+    std::atomic<bool> mhasGenAwaitThreads{false};
+    bool mIsOrchestrator{false};
 };
 
 } // namespace tensorrt_llm::testing::executor::disaggexecutor

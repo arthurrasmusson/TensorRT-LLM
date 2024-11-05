@@ -10,7 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "sequenceSlotManager.h"
+#include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
 #include "tensorrt_llm/common/logger.h"
 
 namespace tensorrt_llm::batch_manager

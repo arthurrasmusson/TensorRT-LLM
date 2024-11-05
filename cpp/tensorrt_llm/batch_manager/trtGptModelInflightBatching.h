@@ -12,11 +12,11 @@
 
 #pragma once
 
-#include "sequenceSlotManager.h"
 #include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
+#include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
@@ -116,7 +116,7 @@ public:
 
     ~TrtGptModelInflightBatching() override;
 
-    void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false) override;
+    void terminateRequest(LlmRequestPtr const& llmRequest, bool pause = false);
 
     /// @brief Function that waits for the decoding of requests in flight.
     ///        When the requests have finished or using speculative decoding, the state of requests
@@ -130,6 +130,9 @@ public:
     ///        LlmRequestState::kGENERATION_IN_PROGRESS or LlmRequestState::kGENERATION_TO_COMPLETE.
     /// @param activeRequests The list of request to try to advance.
     void forwardAsync(RequestList const& activeRequests) override;
+
+    /// @brief Override the runtime batch size for the model
+    void setRuntimeBatchSize(SizeType32 runtimeBatchSize) override;
 
     void updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest) override;
 
@@ -333,6 +336,11 @@ protected:
     void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) override
     {
         mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
+    }
+
+    SizeType32 getMaxCapacityBatchSize(SizeType32 seqLen) override
+    {
+        return mKvCacheManager->getMaxCapacityBatchSize(seqLen);
     }
 
 private:

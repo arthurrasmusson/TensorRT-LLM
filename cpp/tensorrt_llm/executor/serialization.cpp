@@ -424,6 +424,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
     auto crossAttentionMask = su::deserialize<std::optional<Tensor>>(is);
     auto numReturnSequences = su::deserialize<SizeType32>(is);
+    auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
@@ -431,7 +432,7 @@ Request Serialization::deserializeRequest(std::istream& is)
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
-        std::move(crossAttentionMask), numReturnSequences);
+        std::move(crossAttentionMask), numReturnSequences, eagleConfig);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -1005,14 +1006,16 @@ OrchestratorConfig Serialization::deserializeOrchestratorConfig(std::istream& is
 {
     auto isOrchestrator = su::deserialize<bool>(is);
     auto path = su::deserialize<std::string>(is);
+    auto spawnProcesses = su::deserialize<bool>(is);
     // Note we ignore mpiComm since we don't need to exchange it
-    return OrchestratorConfig{isOrchestrator, path};
+    return OrchestratorConfig{isOrchestrator, path, nullptr, spawnProcesses};
 }
 
 void Serialization::serialize(OrchestratorConfig const& orchestratorConfig, std::ostream& os)
 {
     su::serialize(orchestratorConfig.getIsOrchestrator(), os);
     su::serialize(orchestratorConfig.getWorkerExecutablePath(), os);
+    su::serialize(orchestratorConfig.getSpawnProcesses(), os);
 }
 
 size_t Serialization::serializedSize(OrchestratorConfig const& orchestratorConfig)
@@ -1020,6 +1023,7 @@ size_t Serialization::serializedSize(OrchestratorConfig const& orchestratorConfi
     size_t totalSize = 0;
     totalSize += su::serializedSize(orchestratorConfig.getIsOrchestrator());
     totalSize += su::serializedSize(orchestratorConfig.getWorkerExecutablePath());
+    totalSize += su::serializedSize(orchestratorConfig.getSpawnProcesses());
     return totalSize;
 }
 
@@ -1069,8 +1073,27 @@ size_t Serialization::serializedSize(LookaheadDecodingConfig const& lookaheadDec
     return totalSize;
 }
 
-// KV Cache Retention Config
+// EagleConfig
+EagleConfig Serialization::deserializeEagleConfig(std::istream& is)
+{
+    auto eagleChoices = su::deserialize<std::optional<EagleChoices>>(is);
 
+    return EagleConfig{eagleChoices};
+}
+
+void Serialization::serialize(EagleConfig const& eagleConfig, std::ostream& os)
+{
+    su::serialize(eagleConfig.getEagleChoices(), os);
+}
+
+size_t Serialization::serializedSize(EagleConfig const& eagleConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(eagleConfig.getEagleChoices());
+    return totalSize;
+}
+
+// KV Cache Retention Config
 KvCacheRetentionConfig Serialization::deserializeKvCacheRetentionConfig(std::istream& is)
 {
     auto tokenRangeRetentionPriorities
@@ -1129,8 +1152,9 @@ DecodingConfig Serialization::deserializeDecodingConfig(std::istream& is)
     auto decodingMode = su::deserialize<std::optional<DecodingMode>>(is);
     auto lookaheadDecodingConfig = su::deserialize<std::optional<LookaheadDecodingConfig>>(is);
     auto medusaChoices = su::deserialize<std::optional<MedusaChoices>>(is);
+    auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
 
-    return DecodingConfig{decodingMode, lookaheadDecodingConfig, medusaChoices};
+    return DecodingConfig{decodingMode, lookaheadDecodingConfig, medusaChoices, eagleConfig};
 }
 
 void Serialization::serialize(DecodingConfig const& decodingConfig, std::ostream& os)
@@ -1138,6 +1162,7 @@ void Serialization::serialize(DecodingConfig const& decodingConfig, std::ostream
     su::serialize(decodingConfig.getDecodingMode(), os);
     su::serialize(decodingConfig.getLookaheadDecodingConfig(), os);
     su::serialize(decodingConfig.getMedusaChoices(), os);
+    su::serialize(decodingConfig.getEagleConfig(), os);
 }
 
 size_t Serialization::serializedSize(DecodingConfig const& decodingConfig)
@@ -1146,6 +1171,7 @@ size_t Serialization::serializedSize(DecodingConfig const& decodingConfig)
     totalSize += su::serializedSize(decodingConfig.getDecodingMode());
     totalSize += su::serializedSize(decodingConfig.getLookaheadDecodingConfig());
     totalSize += su::serializedSize(decodingConfig.getMedusaChoices());
+    totalSize += su::serializedSize(decodingConfig.getEagleConfig());
     return totalSize;
 }
 
@@ -1307,6 +1333,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto numQueuedRequests = su::deserialize<SizeType32>(is);
     auto numCompletedRequests = su::deserialize<SizeType32>(is);
     auto maxNumActiveRequests = su::deserialize<SizeType32>(is);
+    auto maxBatchSizeStatic = su::deserialize<SizeType32>(is);
+    auto maxBatchSizeTunerRecommended = su::deserialize<SizeType32>(is);
+    auto maxBatchSizeRuntime = su::deserialize<SizeType32>(is);
     auto gpuMemUsage = su::deserialize<size_t>(is);
     auto cpuMemUsage = su::deserialize<size_t>(is);
     auto pinnedMemUsage = su::deserialize<size_t>(is);
@@ -1316,8 +1345,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto inflightBatchingStats = su::deserialize<std::optional<InflightBatchingStats>>(is);
 
     return IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS, numNewActiveRequests,
-        numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage, cpuMemUsage,
-        pinnedMemUsage, kvCacheStats, crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
+        numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, maxBatchSizeStatic,
+        maxBatchSizeTunerRecommended, maxBatchSizeRuntime, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats,
+        crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
 }
 
 IterationStats Serialization::deserializeIterationStats(std::vector<char>& buffer)
@@ -1342,6 +1372,9 @@ size_t Serialization::serializedSize(IterationStats const& iterStats)
     totalSize += su::serializedSize(iterStats.numQueuedRequests);
     totalSize += su::serializedSize(iterStats.numCompletedRequests);
     totalSize += su::serializedSize(iterStats.maxNumActiveRequests);
+    totalSize += su::serializedSize(iterStats.maxBatchSizeStatic);
+    totalSize += su::serializedSize(iterStats.maxBatchSizeTunerRecommended);
+    totalSize += su::serializedSize(iterStats.maxBatchSizeRuntime);
     totalSize += su::serializedSize(iterStats.gpuMemUsage);
     totalSize += su::serializedSize(iterStats.cpuMemUsage);
     totalSize += su::serializedSize(iterStats.pinnedMemUsage);
@@ -1364,6 +1397,9 @@ void Serialization::serialize(IterationStats const& iterStats, std::ostream& os)
     su::serialize(iterStats.numQueuedRequests, os);
     su::serialize(iterStats.numCompletedRequests, os);
     su::serialize(iterStats.maxNumActiveRequests, os);
+    su::serialize(iterStats.maxBatchSizeStatic, os);
+    su::serialize(iterStats.maxBatchSizeTunerRecommended, os);
+    su::serialize(iterStats.maxBatchSizeRuntime, os);
     su::serialize(iterStats.gpuMemUsage, os);
     su::serialize(iterStats.cpuMemUsage, os);
     su::serialize(iterStats.pinnedMemUsage, os);

@@ -39,7 +39,7 @@ public:
         std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority, RequestType type,
         std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
         std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
-        SizeType32 numReturnSequences)
+        SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -67,6 +67,7 @@ public:
         , mEncoderOutputLength(encoderOutputLength)
         , mCrossAttentionMask(crossAttentionMask)
         , mNumReturnSequences(numReturnSequences)
+        , mEagleConfig(eagleConfig)
     {
         validate();
     }
@@ -223,6 +224,11 @@ public:
         return mSamplingConfig.getNumReturnSequences();
     }
 
+    std::optional<EagleConfig> getEagleConfig() const
+    {
+        return mEagleConfig;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -352,6 +358,11 @@ public:
         mSamplingConfig.setNumReturnSequences(numReturnSequences);
     }
 
+    void setEagleConfig(std::optional<EagleConfig> eagleConfig)
+    {
+        mEagleConfig = eagleConfig;
+    }
+
 private:
     void validate()
     {
@@ -408,6 +419,7 @@ private:
         lambda(mEncoderOutputLength);
         lambda(mCrossAttentionMask);
         lambda(mNumReturnSequences);
+        lambda(mEagleConfig);
     }
 
     VecTokens mInputTokenIds;
@@ -437,6 +449,7 @@ private:
     std::optional<SizeType32> mEncoderOutputLength;
     std::optional<Tensor> mCrossAttentionMask;
     SizeType32 mNumReturnSequences;
+    std::optional<EagleConfig> mEagleConfig;
 };
 
 } // namespace tensorrt_llm::executor

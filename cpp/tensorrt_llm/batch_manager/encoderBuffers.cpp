@@ -375,8 +375,8 @@ void EncoderBuffers::setMaxBufferSizes(SizeType32 maxBatchSize, runtime::ModelCo
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
     numRequests = maxBatchSize;
-    encoderInputLen = maxBatchSize * modelConfig.getMaxInputLen();
-    encoderOutputLen = maxBatchSize * modelConfig.getMaxInputLen();
+    encoderInputLen = maxBatchSize * modelConfig.getMaxEncoderLen();
+    encoderOutputLen = maxBatchSize * modelConfig.getMaxEncoderLen();
     maxInputLengthInBatch = modelConfig.getMaxEncoderLen();
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

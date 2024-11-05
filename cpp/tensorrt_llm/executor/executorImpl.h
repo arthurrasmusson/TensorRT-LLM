@@ -15,6 +15,7 @@
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/arrayView.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/dynamicBatchTuner.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/intervalSet.h"
 #include "tensorrt_llm/executor/model.h"
@@ -30,6 +31,7 @@
 #include <condition_variable>
 #include <list>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <unordered_map>
@@ -142,7 +144,9 @@ private:
 
     void initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
         std::optional<ModelType> modelType = std::nullopt,
-        std::optional<std::filesystem::path> const& modelPath = std::nullopt);
+        std::optional<std::filesystem::path> const& modelPath = std::nullopt,
+        std::optional<runtime::WorldConfig> const& worldConfig = std::nullopt,
+        std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig = std::nullopt);
 
     static void validateParallelConfig(ParallelConfig const& parallelConfig, std::optional<ModelType> modelType,
         std::optional<std::filesystem::path> const& modelPath);
@@ -150,7 +154,9 @@ private:
     void initializeOrchestrator(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
         ParallelConfig parallelConfig, ModelType modelType, std::filesystem::path const& modelPath);
 
-    void initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig);
+    void initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig,
+        std::optional<runtime::WorldConfig> const& worldConfig = std::nullopt,
+        std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig = std::nullopt);
 
     void initializeLogitsPostProcessorBatched(LogitsPostProcessorConfig const& logitsProcConfig);
 
@@ -304,6 +310,7 @@ private:
     int32_t mLeaderRank = -1;
     int32_t mOrchRank = 0;
     int32_t mWorldRank = -1;
+    int32_t mDeviceId = 0;
 
     MpiMessageQueue mSendQueue;
 
@@ -317,6 +324,8 @@ private:
 
     inline static std::string const kPROFILE_START_STOP_ENV_VAR_NAME = "TLLM_PROFILE_START_STOP";
     inline static std::string const kLEGACY_PROFILE_START_STOP_ENV_VAR_NAME = "TLLM_GPTM_PROFILE_START_STOP";
+
+    std::shared_ptr<DynamicBatchTuner> mDynamicBatchTuner;
 };
 
 } // namespace tensorrt_llm::executor

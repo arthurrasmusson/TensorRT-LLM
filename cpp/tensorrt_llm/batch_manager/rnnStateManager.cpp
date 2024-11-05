@@ -10,8 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "rnnStateManager.h"
-
+#include "tensorrt_llm/batch_manager/rnnStateManager.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 

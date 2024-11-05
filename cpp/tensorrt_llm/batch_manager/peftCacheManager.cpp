@@ -290,12 +290,12 @@ void PeftCacheManager::addRequestPeft(std::shared_ptr<LlmRequest> llmRequest, bo
 }
 
 std::tuple<std::map<uint64_t, std::future<void>>, std::map<uint64_t, std::vector<uint64_t>>>
-PeftCacheManager::getTaskMaps(ScheduledRequests const& scheduledRequests)
+PeftCacheManager::getTaskMaps(RequestVector const& contextRequests, RequestVector const& generationRequests)
 {
     std::map<uint64_t, std::vector<uint64_t>> taskIdToReqIds;
     std::map<uint64_t, std::future<void>> taskIdToFuture;
     std::lock_guard<std::mutex> futuresLock(mPutFuturesMutex);
-    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
+    for (auto const& requests : {contextRequests, generationRequests})
     {
         for (auto const& llmReq : requests)
         {
@@ -332,21 +332,19 @@ PeftCacheManager::getTaskMaps(ScheduledRequests const& scheduledRequests)
 }
 
 PeftCacheManager::PeftTable PeftCacheManager::ensureBatch(
-    ScheduledRequests const& scheduledRequests, bool resetGpuCache)
+    RequestVector const& contextRequests, RequestVector const& generationRequests, bool resetGpuCache)
 {
     TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     if (resetGpuCache)
     {
         resetDeviceCache();
     }
-    auto [taskIdToFuture, taskIdToReqIds] = getTaskMaps(scheduledRequests);
+    auto [taskIdToFuture, taskIdToReqIds] = getTaskMaps(contextRequests, generationRequests);
 
-    std::map<uint64_t, std::future<std::shared_ptr<std::vector<runtime::LoraCache::TaskLayerModuleConfig>>>>
-        ensureFutures;
+    std::map<uint64_t, std::future<std::vector<runtime::LoraCache::TaskLayerModuleConfig>>> ensureFutures;
     for (auto& [taskId, taskFuture] : taskIdToFuture)
     {
-        auto fn = [&taskIdToFuture, taskId = taskId,
-                      this]() -> std::shared_ptr<std::vector<runtime::LoraCache::TaskLayerModuleConfig>>
+        auto fn = [&taskIdToFuture, taskId = taskId, this]() -> std::vector<runtime::LoraCache::TaskLayerModuleConfig>
         {
             // TODO (grclark) it should be possible to move capture taskFuture instead of doing a second lookup
             // And you can, which required this lambda to be mutable, which doesn't work with WorkerPool
@@ -479,16 +477,16 @@ void PeftCacheManager::resetDeviceCache()
     TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
-void PeftCacheManager::markRequestDone(std::shared_ptr<LlmRequest> const& llmReq, bool pause)
+void PeftCacheManager::markRequestDone(LlmRequest const& llmReq, bool pause)
 {
     TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     // mDeviceLoraCache->markAllDone();
-    if (!llmReq->getLoraTaskId().has_value())
+    if (!llmReq.getLoraTaskId().has_value())
     {
         return;
     }
-    auto const taskId = llmReq->getLoraTaskId().value();
-    auto const reqId = llmReq->mRequestId;
+    auto const taskId = llmReq.getLoraTaskId().value();
+    auto const reqId = llmReq.mRequestId;
     updateTaskState(taskId, reqId, true, pause);
     TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
@@ -541,14 +539,14 @@ std::unordered_map<uint64_t, std::unordered_set<uint64_t>> const& PeftCacheManag
 void NoOpPeftCacheManager::addRequestPeft(std::shared_ptr<LlmRequest> llmRequest, bool tryGpuCache) {}
 
 PeftCacheManager::PeftTable NoOpPeftCacheManager::ensureBatch(
-    ScheduledRequests const& scheduledRequests, bool resetGpuCache)
+    RequestVector const& contextRequests, RequestVector const& generationRequests, bool resetGpuCache)
 {
     return PeftTable{};
 }
 
 void NoOpPeftCacheManager::resetDeviceCache() {}
 
-void NoOpPeftCacheManager::markRequestDone(std::shared_ptr<LlmRequest> const& llmReq, bool pause) {}
+void NoOpPeftCacheManager::markRequestDone(LlmRequest const& llmReq, bool pause) {}
 
 SizeType32 NoOpPeftCacheManager::getMaxDevicePages() const
 {

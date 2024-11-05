@@ -68,14 +68,14 @@ public:
 
     void addRequestPeft(std::shared_ptr<LlmRequest> llmRequest, bool tryGpuCache = true) override {}
 
-    PeftTable ensureBatch(ScheduledRequests const&, bool resetGpuCache = false) override
+    PeftTable ensureBatch(RequestVector const&, RequestVector const&, bool resetGpuCache = false) override
     {
         return PeftTable{};
     }
 
     void resetDeviceCache() override {}
 
-    void markRequestDone(std::shared_ptr<LlmRequest> const& llmReq, bool pause = false) override {}
+    void markRequestDone(LlmRequest const& llmReq, bool pause = false) override {}
 
     [[nodiscard]] SizeType32 getMaxDevicePages() const override
     {
@@ -357,10 +357,10 @@ int runTest(CapacityScheduler& capacityScheduler,
 
                 if (llmReq->getContextRemainingLength() == 0)
                 {
-                    kvCacheManager->storeContextBlocks(llmReq);
+                    kvCacheManager->storeContextBlocks(*llmReq);
                     if (crossKvCacheManager)
                     {
-                        crossKvCacheManager->storeContextBlocks(llmReq);
+                        crossKvCacheManager->storeContextBlocks(*llmReq);
                     }
                     llmReq->addNewTokens({itCount});
                     llmReq->mState = LlmRequestState::kGENERATION_IN_PROGRESS;

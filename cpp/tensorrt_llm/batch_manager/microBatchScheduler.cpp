@@ -24,6 +24,8 @@ MicroBatchScheduler::MicroBatchScheduler(SizeType32 maxBatchSize, std::optional<
     std::optional<batch_scheduler::ContextChunkingConfig> ctxChunkConfig, std::optional<SizeType32> maxContextLength,
     LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
     : mMaxBatchSize{maxBatchSize}
+    , mMaxBatchSizeTunerRecommended(0)
+    , mMaxBatchSizeRuntime{maxBatchSize}
     , mMaxNumTokens(maxNumTokens)
     , mMaxContextLength(maxContextLength)
     , mCtxChunkConfig(ctxChunkConfig)
@@ -49,14 +51,6 @@ MicroBatchScheduler::MicroBatchScheduler(SizeType32 maxBatchSize, std::optional<
                 "max number of tokens (%d).",
                 mMaxContextLength.value(), mMaxNumTokens.value());
         }
-    }
-
-    if (mMaxBatchSize < maxBatchSize)
-    {
-        TLLM_LOG_WARNING(
-            "micro_batch_size (%d) is smaller than the engine max_batch_size (%d). "
-            "Batches smaller than max_batch_size will be executed.",
-            mMaxBatchSize, maxBatchSize);
     }
 }
 
@@ -302,7 +296,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
             batchNumTokens += reqNumTokens;
         }
 
-        if (++scheduledReqSize >= mMaxBatchSize)
+        if (++scheduledReqSize >= mMaxBatchSizeRuntime)
         {
             break;
         }
@@ -344,6 +338,12 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     return {std::move(contextRequests), std::move(generationRequests)};
+}
+
+void MicroBatchScheduler::setRuntimeMaxBatchSize(SizeType32 runtimeMaxBatchSize)
+{
+    mMaxBatchSizeTunerRecommended = runtimeMaxBatchSize;
+    mMaxBatchSizeRuntime = std::min(mMaxBatchSize, runtimeMaxBatchSize);
 }
 
 } // namespace tensorrt_llm::batch_manager

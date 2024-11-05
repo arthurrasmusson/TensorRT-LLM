@@ -17,6 +17,7 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(SRCS
     cacheTransceiver.cpp
     capacityScheduler.cpp
+    contextProgress.cpp
     dataTransceiver.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp

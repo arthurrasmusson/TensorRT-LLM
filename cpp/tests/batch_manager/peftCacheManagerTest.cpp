@@ -148,7 +148,7 @@ TEST_F(PeftCacheManagerTest, putGet)
     std::vector<std::shared_ptr<LlmRequest>> reqVector{llmRequest};
 
     mPeftManager->addRequestPeft(llmRequest);
-    auto const peftTable = mPeftManager->ensureBatch(ScheduledRequests{reqVector, {}});
+    auto const peftTable = mPeftManager->ensureBatch(reqVector, {});
 
     std::vector<LoraCache::TaskLayerModuleConfig> expectedValues{{0, 0, 128, 192, 0, 0, 8, 14},
         {0, 14, 128, 192, 0, 1, 8, 14}, {0, 28, 64, 32, 1, 0, 4, 4}, {0, 32, 64, 32, 1, 1, 4, 4},
@@ -164,12 +164,12 @@ TEST_F(PeftCacheManagerTest, putGet)
     for (auto [requestId, valuesWeekPtr] : peftTable)
     {
         auto values = valuesWeekPtr;
-        for (size_t i = 0; i < values->size(); ++i)
+        for (size_t i = 0; i < values.size(); ++i)
         {
-            TLLM_LOG_DEBUG("actual:   " + to_string(values->at(i)));
+            TLLM_LOG_DEBUG("actual:   " + to_string(values.at(i)));
             TLLM_LOG_DEBUG("expected: " + to_string(expectedValues.at(i)));
-            EXPECT_EQ(expectedValues.at(i), values->at(i));
-            auto v = values->at(i);
+            EXPECT_EQ(expectedValues.at(i), values.at(i));
+            auto v = values.at(i);
             cudaPointerAttributes attrs;
             cudaError_t err = cudaPointerGetAttributes(&attrs, reinterpret_cast<void*>(v.weightsInPointer));
             ASSERT_EQ(err, 0);
@@ -228,15 +228,15 @@ TEST_F(PeftCacheManagerTest, putToCapacity)
         PeftCacheManager::PeftTable peftTable;
         try
         {
-            peftTable = mPeftManager->ensureBatch(ScheduledRequests{batchRequests, {}});
+            peftTable = mPeftManager->ensureBatch(batchRequests, {});
 #ifndef NDEBUG
-            for (auto [requestId, valuesWeakPtr] : peftTable)
+            for (auto const& [requestId, valuesWeakPtr] : peftTable)
             {
-                auto values = valuesWeakPtr;
+                auto const& values = valuesWeakPtr;
                 std::cout << requestId << std::endl;
-                for (size_t i = 0; i < values->size(); ++i)
+                for (size_t i = 0; i < values.size(); ++i)
                 {
-                    std::cout << "\t" << values->at(i) << std::endl;
+                    std::cout << "\t" << values.at(i) << std::endl;
                 }
             }
 #endif
@@ -334,7 +334,7 @@ TEST_F(PeftCacheManagerTest, gptManagerSim)
             std::transform(localTable.begin(), localTable.end(), std::back_inserter(batchRequests),
                 [](auto const& llmReq) { return llmReq.second; });
 
-            auto peftTable = peftManager->ensureBatch(ScheduledRequests{batchRequests, {}});
+            auto peftTable = peftManager->ensureBatch(batchRequests, {});
             ASSERT_EQ(numReqsWithLora, peftTable.size());
             for (auto const [id, valuesWeakPtr] : peftTable)
             {
@@ -343,24 +343,24 @@ TEST_F(PeftCacheManagerTest, gptManagerSim)
                 auto hasLora = localTable.at(id)->getLoraTaskId().has_value();
                 if (!hasLora)
                 {
-                    EXPECT_TRUE(values->empty());
+                    EXPECT_TRUE(values.empty());
                 }
                 else
                 {
 
                     auto taskId = localTable.at(id)->getLoraTaskId().value();
-                    EXPECT_EQ(loras.at(taskId).second->getShape().d[1], values->size());
+                    EXPECT_EQ(loras.at(taskId).second->getShape().d[1], values.size());
                     // get target weights from extra cache
                     auto targetValues = loraCache->get(taskId);
-                    EXPECT_EQ(targetValues->size(), values->size());
+                    EXPECT_EQ(targetValues.size(), values.size());
 
-                    auto numVals = targetValues->size();
+                    auto numVals = targetValues.size();
 
                     for (size_t valIdx = 0; valIdx < numVals; ++valIdx)
                     {
-                        auto v = values->at(valIdx);
+                        auto v = values.at(valIdx);
                         std::cout << taskId << v << std::endl;
-                        auto targetValue = targetValues->at(valIdx);
+                        auto targetValue = targetValues.at(valIdx);
                         float* weightsInPtr = reinterpret_cast<float*>(v.weightsInPointer);
                         float* weightsOutPtr = reinterpret_cast<float*>(v.weightsOutPointer);
 
@@ -390,7 +390,7 @@ TEST_F(PeftCacheManagerTest, gptManagerSim)
             }
             for (auto const [id, r] : localTable)
             {
-                peftManager->markRequestDone(r);
+                peftManager->markRequestDone(*r);
             }
             localTable.clear();
             numReqsWithLora = 0;
@@ -444,9 +444,9 @@ TEST_F(PeftCacheManagerTest, updateTaskState)
     ASSERT_TRUE(mPeftManager->getPausedTasks().empty());
 
     // sync with copy threads and populate device cache
-    auto peftTable = mPeftManager->ensureBatch(ScheduledRequests{reqVector, {}});
+    auto peftTable = mPeftManager->ensureBatch(reqVector, {});
 
-    mPeftManager->markRequestDone(llmRequest2, true);
+    mPeftManager->markRequestDone(*llmRequest2, true);
     ASSERT_EQ(2, mPeftManager->getActiveTasks().size());
     ASSERT_EQ(1, mPeftManager->getActiveTasks().at(1234).size());
     EXPECT_TRUE(mPeftManager->getActiveTasks().at(0).count(1));
@@ -458,7 +458,7 @@ TEST_F(PeftCacheManagerTest, updateTaskState)
     EXPECT_FALSE(mPeftManager->isTaskDone(1234));
     EXPECT_FALSE(mPeftManager->isTaskDoneDevice(1234));
 
-    mPeftManager->markRequestDone(llmRequest, true);
+    mPeftManager->markRequestDone(*llmRequest, true);
     ASSERT_EQ(1, mPeftManager->getActiveTasks().size());
     EXPECT_TRUE(mPeftManager->getActiveTasks().at(0).count(1));
     ASSERT_EQ(1, mPeftManager->getPausedTasks().size());
@@ -469,7 +469,7 @@ TEST_F(PeftCacheManagerTest, updateTaskState)
     EXPECT_FALSE(mPeftManager->isTaskDone(1234));
     EXPECT_TRUE(mPeftManager->isTaskDoneDevice(1234));
 
-    mPeftManager->markRequestDone(llmRequest, false);
+    mPeftManager->markRequestDone(*llmRequest, false);
     ASSERT_EQ(1, mPeftManager->getActiveTasks().size());
     EXPECT_TRUE(mPeftManager->getActiveTasks().at(0).count(1));
     ASSERT_EQ(1, mPeftManager->getPausedTasks().size());
@@ -479,7 +479,7 @@ TEST_F(PeftCacheManagerTest, updateTaskState)
     EXPECT_FALSE(mPeftManager->isTaskDone(1234));
     EXPECT_TRUE(mPeftManager->isTaskDoneDevice(1234));
 
-    mPeftManager->markRequestDone(llmRequest2, false);
+    mPeftManager->markRequestDone(*llmRequest2, false);
     ASSERT_EQ(1, mPeftManager->getActiveTasks().size());
     EXPECT_TRUE(mPeftManager->getActiveTasks().at(0).count(1));
     ASSERT_EQ(0, mPeftManager->getPausedTasks().size());

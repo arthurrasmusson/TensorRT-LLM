@@ -60,8 +60,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(InflightBatchingStats, numScheduledRequests, numContextRequests, numGenRequests,
     numPausedRequests, numCtxTokens, microBatchId, avgNumDecodedTokensPerIter);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(IterationStats, timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
-    numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, gpuMemUsage,
-    cpuMemUsage, pinnedMemUsage, kvCacheStats, staticBatchingStats, inflightBatchingStats);
+    numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests,
+    maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime, gpuMemUsage, cpuMemUsage, pinnedMemUsage,
+    kvCacheStats, staticBatchingStats, inflightBatchingStats);
 NLOHMANN_JSON_SERIALIZE_ENUM(RequestStage,
     {{RequestStage::kQUEUED, "QUEUED"}, {RequestStage::kCONTEXT_IN_PROGRESS, "CONTEXT_IN_PROGRESS"},
         {RequestStage::kGENERATION_IN_PROGRESS, "GENERATION_IN_PROGRESS"},

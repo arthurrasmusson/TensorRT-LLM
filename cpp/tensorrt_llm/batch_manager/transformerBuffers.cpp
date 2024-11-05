@@ -113,6 +113,9 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     SizeType32 enableContextFMHAFP32AccVal = extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc() ? 1 : 0;
     runtimePerfKnobsHostPtr[0] = multiBlockModeVal;
     runtimePerfKnobsHostPtr[1] = enableContextFMHAFP32AccVal;
+
+    contextProgressHost = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT64);
+    bufferCast<int64_t>(*contextProgressHost)[0] = 0;
 }
 
 void TransformerBuffers::reshape(SizeType32 numSequences, SizeType32 numInputTokens)
@@ -249,6 +252,7 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     inputBuffers.insert_or_assign("kv_cache_block_offsets", kvCacheBlockOffsetsDevice);
     inputBuffers.insert_or_assign("host_kv_cache_block_offsets", kvCacheBlockOffsetsHost);
     inputBuffers.insert_or_assign("host_runtime_perf_knobs", runtimePerfKnobsHost);
+    inputBuffers.insert_or_assign("host_context_progress", contextProgressHost);
 
     if (crossKvCacheBlockOffsetsHost)
     {

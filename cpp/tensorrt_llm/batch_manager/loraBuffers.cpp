@@ -63,8 +63,8 @@ void LoraBuffers::fill(RequestVector const& contextRequests, RequestVector const
             auto const peftIt = peftTable.find(llmReq->mRequestId);
             if (peftIt != peftTable.end())
             {
-                auto const peftValuesPtr = peftIt->second;
-                if (peftValuesPtr != nullptr && !peftValuesPtr->empty())
+                auto const& peftValues = peftIt->second;
+                if (!peftValues.empty())
                 {
                     mLoraManager.fillInputTensors(mLoraWeightsPointersHost, mLoraAdapterSizesHost, peftIt->second,
                         batchIdx, beamWidth, modelConfig, worldConfig);

@@ -15,6 +15,7 @@
 #include "runtimeBuffers.h"
 #include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/batch_manager/contextProgress.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
@@ -653,32 +654,10 @@ void TrtGptModelInflightBatching::createCustomAllReduceWorkspace()
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::terminateRequest(std::shared_ptr<LlmRequest> const& llmReq, bool pause)
+void TrtGptModelInflightBatching::terminateRequest(LlmRequestPtr const& llmReq, bool pause)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    // If a sequence slot is associated with this request id, free it
-    mSeqSlotManager->freeSequenceSlot(llmReq->mRequestId);
-    // Remove the sequence from kvCacheManager
-    auto const requestId = llmReq->mRequestId;
-    if (mKvCacheManager)
-    {
-        mKvCacheManager->removeSequence(requestId, llmReq);
-    }
-    if (mCrossKvCacheManager)
-    {
-        mCrossKvCacheManager->removeSequence(requestId, llmReq);
-    }
-    if (pause && !llmReq->isGenerationCompleteState())
-    {
-        llmReq->pause(getMaxInputLen());
-    }
-    else
-    {
-        TLLM_LOG_DEBUG("terminated: request %lu, paused: %d", requestId, pause);
-    }
-
-    mPeftCacheManager->markRequestDone(llmReq, pause);
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    utils::terminateRequest(
+        *mSeqSlotManager, *llmReq, getMaxInputLen(), mKvCacheManager, mCrossKvCacheManager, mPeftCacheManager, pause);
 }
 
 TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fillIterationStats(
@@ -832,11 +811,11 @@ void TrtGptModelInflightBatching::storeContextBlocks(std::shared_ptr<LlmRequest>
     // This check is made in code that calls storeContextBlocks, so omitted here.
     if (mKvCacheManager)
     {
-        mKvCacheManager->storeContextBlocks(llmReq);
+        mKvCacheManager->storeContextBlocks(*llmReq);
     }
     if (mCrossKvCacheManager)
     {
-        mCrossKvCacheManager->storeContextBlocks(llmReq);
+        mCrossKvCacheManager->storeContextBlocks(*llmReq);
     }
 }
 
@@ -915,7 +894,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             {
                 utils::allocateKvCache(currRequests, mKvCacheManager.get(), mCrossKvCacheManager.get());
             }
-            mPeftTables.at(mMicroBatchId) = mPeftCacheManager->ensureBatch(currRequests, true);
+            mPeftTables.at(mMicroBatchId)
+                = mPeftCacheManager->ensureBatch(currRequests.contextRequests, currRequests.generationRequests, true);
             executeBatch(currRequests);
 
             sync_check_cuda_error();
@@ -1008,6 +988,11 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void TrtGptModelInflightBatching::setRuntimeBatchSize(SizeType32 runtimeBatchSize)
+{
+    mMicroBatchScheduler->setRuntimeMaxBatchSize(runtimeBatchSize);
 }
 
 void TrtGptModelInflightBatching::updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest)
@@ -1539,6 +1524,36 @@ void TrtGptModelInflightBatching::executeStep(
 
     auto [optProfileId, inputMap, outputMap] = prepareBuffers(contextRequests, generationRequests, bufferId);
 
+    RequestVector layerWiseRequests;
+    for (auto& request : contextRequests)
+    {
+        bool enableLayerWise = request->isLayerWiseKvCacheEnabled() && request->isLastContextChunk();
+        if (enableLayerWise)
+        {
+            layerWiseRequests.push_back(request);
+        }
+    }
+
+    // Creation of context progress, or remains nullptr if not needed
+    std::unique_ptr<ContextProgress> progress = nullptr;
+    if (mBuffers[bufferId]->transformerBuffers.has_value())
+    {
+        // TODO: support layer-wise cross kv cache in encoder-decoder models
+        if (!layerWiseRequests.empty() && !mModelConfig.useCrossAttention())
+        {
+            int const numLayers = mModelConfig.getNbAttentionLayers(mWorldConfig.getPipelineParallelism());
+            progress = std::make_unique<ContextProgress>(numLayers);
+        }
+        bufferCast<void*>(*mBuffers[bufferId]->transformerBuffers->contextProgressHost)[0] = progress.get();
+    }
+
+    std::thread receiverThread;
+    if (progress != nullptr)
+    {
+        receiverThread = std::thread(&CacheTransceiver::respondAndSendLayerWise, mCacheTransceiver.get(),
+            std::move(layerWiseRequests), std::move(progress));
+    }
+
     executeContext(optProfileId, bufferId);
 
     // If batch state has any context request, do not capture this graph.
@@ -1549,6 +1564,12 @@ void TrtGptModelInflightBatching::executeStep(
         // a) We can hide CPU graph capture behind the GPU engine execution.
         // b) Batch size in the next iterations won't change and we can reuse the graph multiple times.
         prepareGraph(bufferId, optProfileId);
+    }
+
+    // TODO make thread reusable
+    if (receiverThread.joinable())
+    {
+        receiverThread.join();
     }
 
     if (mDebugConfig)
@@ -1665,6 +1686,11 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
                 // Only Explicit draft tokens model needs dtype to WAR the lack of bf16 decoder.
                 decoderRequest.dtype = mModelConfig.getDataType();
             }
+            else if (mModelConfig.getSpeculativeDecodingMode().isEagle())
+            {
+                decoderRequest.eagleConfig
+                    = llmReq->getEagleConfig() ? llmReq->getEagleConfig() : mDecodingConfig.getEagleConfig();
+            }
             if (llmReq->getEmbeddingBias().has_value())
             {
                 auto embeddingBias = llmReq->getEmbeddingBias().value();
@@ -1697,7 +1723,7 @@ void TrtGptModelInflightBatching::setupDecoderStep(RequestVector const& contextR
         if (!decoderRequests.empty())
         {
             NVTX3_SCOPED_RANGE(decoderNewRequests);
-            mDecoder->newRequests(seqSlots, decoderRequests, samplingConfigs);
+            mDecoder->newRequests(seqSlots, decoderRequests, samplingConfigs, mModelConfig);
         }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -2114,6 +2140,13 @@ TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching
         decodingInput->seqSlots = genRuntimeBuffers.seqSlots;
         decodingInput->explicitDraftTokensInputs = genRuntimeBuffers.explicitDraftTokensBuffers->engineOutputs;
         decodingInput->explicitDraftTokensLastInputs = genRuntimeBuffers.explicitDraftTokensBuffers->engineInputs;
+    }
+    else if (mModelConfig.getSpeculativeDecodingMode().isEagle())
+    {
+        // requires mCtxGenFusion == true
+        decodingInput->seqSlots = genRuntimeBuffers.seqSlots;
+        decodingInput->eagleInputs = genRuntimeBuffers.eagleBuffers->engineOutputs;
+        decodingInput->eagleLastInputs = genRuntimeBuffers.eagleBuffers->engineInputs;
     }
 
     mDecodingOutput = std::make_shared<decoder_batch::Output>();
@@ -2588,6 +2621,12 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
 void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationStats& stats) const
 {
     stats.iter = mIterCounter;
+
+    // Max batch size can be tuned at runtime
+    stats.maxBatchSizeStatic = mMicroBatchScheduler->getMaxBatchSizeStatic();
+    stats.maxBatchSizeTunerRecommended = mMicroBatchScheduler->getMaxBatchSizeTunerRecommended();
+    stats.maxBatchSizeRuntime = mMicroBatchScheduler->getMaxBatchSizeRuntime();
+
     // KVCacheManager statistics
     auto const& kvCacheManager = getKVCacheManager();
     if (kvCacheManager)

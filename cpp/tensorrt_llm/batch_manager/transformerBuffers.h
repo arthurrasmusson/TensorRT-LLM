@@ -50,6 +50,7 @@ public:
     TensorPtr kvCacheBlockOffsetsHost;   // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr kvCacheBlockOffsetsDevice; // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr runtimePerfKnobsHost;
+    TensorPtr contextProgressHost;
 
     // Cross attention buffers
     TensorPtr crossKvCacheBlockPoolPointers = nullptr;

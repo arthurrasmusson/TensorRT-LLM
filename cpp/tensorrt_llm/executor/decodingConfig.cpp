@@ -135,11 +135,28 @@ bool LookaheadDecodingConfig::isLE(LookaheadDecodingConfig const& that) const
         && mVerificationSetSize <= that.mVerificationSetSize;
 }
 
+EagleConfig::EagleConfig(std::optional<EagleChoices> eagleChoices)
+    : mEagleChoices(std::move(eagleChoices))
+{
+}
+
+bool EagleConfig::operator==(EagleConfig const& other) const
+{
+    return mEagleChoices == other.mEagleChoices;
+}
+
+std::optional<EagleChoices> EagleConfig::getEagleChoices() const
+{
+    return mEagleChoices;
+}
+
 DecodingConfig::DecodingConfig(std::optional<DecodingMode> decodingMode,
-    std::optional<LookaheadDecodingConfig> lookaheadDecodingConfig, std::optional<MedusaChoices> medusaChoices)
+    std::optional<LookaheadDecodingConfig> lookaheadDecodingConfig, std::optional<MedusaChoices> medusaChoices,
+    std::optional<EagleConfig> eagleConfig)
     : mDecodingMode{decodingMode}
     , mLookaheadDecodingConfig{lookaheadDecodingConfig}
     , mMedusaChoices{std::move(medusaChoices)}
+    , mEagleConfig{std::move(eagleConfig)}
 {
     if (mLookaheadDecodingConfig)
     {
@@ -153,12 +170,18 @@ DecodingConfig::DecodingConfig(std::optional<DecodingMode> decodingMode,
         TLLM_CHECK_WITH_INFO(
             mDecodingMode.value().isMedusa(), "MedusaChoices are set, but DecodingMode is not set to Medusa");
     }
+    if (mEagleConfig)
+    {
+        TLLM_CHECK_WITH_INFO(mDecodingMode, "EagleConfig is set, but DecodingMode is not set");
+        TLLM_CHECK_WITH_INFO(
+            mDecodingMode.value().isEagle(), "EagleConfig is set, but DecodingMode is not set to Eagle");
+    }
 }
 
 bool DecodingConfig::operator==(DecodingConfig const& other) const
 {
     return mDecodingMode == other.mDecodingMode && mLookaheadDecodingConfig == other.mLookaheadDecodingConfig
-        && mMedusaChoices == other.mMedusaChoices;
+        && mMedusaChoices == other.mMedusaChoices && mEagleConfig == other.mEagleConfig;
 }
 
 std::optional<DecodingMode> DecodingConfig::getDecodingMode() const
@@ -197,6 +220,17 @@ void DecodingConfig::setMedusaChoices(MedusaChoices const& medusaChoices)
 {
     mMedusaChoices = medusaChoices;
     mDecodingMode = DecodingMode::Medusa();
+}
+
+std::optional<EagleConfig> DecodingConfig::getEagleConfig() const
+{
+    return mEagleConfig;
+}
+
+void DecodingConfig::setEagleConfig(EagleConfig const& eagleConfig)
+{
+    mEagleConfig = eagleConfig;
+    mDecodingMode = DecodingMode::Eagle();
 }
 
 } // namespace tensorrt_llm::executor

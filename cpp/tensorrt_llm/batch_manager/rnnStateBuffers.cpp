@@ -11,7 +11,7 @@
  */
 
 #include "rnnStateBuffers.h"
-#include "rnnStateManager.h"
+#include "tensorrt_llm/batch_manager/rnnStateManager.h"
 
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
