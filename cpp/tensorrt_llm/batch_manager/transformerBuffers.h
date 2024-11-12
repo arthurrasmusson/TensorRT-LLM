@@ -82,6 +82,7 @@ public:
     TensorPtr fillValuesAltDevice;
     TensorPtr seqSlotsAlt;
     TensorPtr seqSlotsAltDevice;
+    TensorPtr skipCrossAttnBlocks;
 
     TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
         SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
@@ -119,6 +120,8 @@ public:
         TensorPtr const& decoderContextLengthsDevice, TensorPtr const& encoderInputLengths,
         SizeType32 maxDecoderContextLength, SizeType32 maxEncoderInputLengthInBatch,
         runtime::TllmRuntime const& runtime);
+
+    void copySkipCrossAttnBlocks(bool const& _skipCrossAttnBlocks, runtime::TllmRuntime const& runtime);
 
 private:
     SizeType32 maxInputLen;

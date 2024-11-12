@@ -23,6 +23,7 @@
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
@@ -1101,6 +1102,12 @@ bool Executor::Impl::isParticipant() const
     return mIsWorker;
 }
 
+std::optional<std::shared_ptr<KVCacheEventManager>> Executor::Impl::getKVCacheEventManager() const
+{
+    auto cacheEventManager = mModel->getKVCacheManager();
+    return cacheEventManager ? std::optional(std::make_shared<KVCacheEventManager>(cacheEventManager)) : std::nullopt;
+}
+
 std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
@@ -1928,6 +1935,7 @@ void Executor::Impl::executionLoop()
         auto const iterCounter = mModel->getIterCounter();
         auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
         auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
+        bool reportFinishedRequests = true;
         RequestList finishedRequests;
         if (!activeRequests.empty())
         {
@@ -1969,6 +1977,7 @@ void Executor::Impl::executionLoop()
                 updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests,
                     newActiveRequestsQueueLatencyMS, static_cast<SizeType32>(finishedRequests.size()));
                 updateRequestStats(activeRequests, finishedRequests);
+                reportFinishedRequests = false;
             }
             auto [newRequests, newActiveRequestsQueueLatency]
                 = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()), lowestPriority);
@@ -2002,7 +2011,15 @@ void Executor::Impl::executionLoop()
             forwardAsync(activeRequests);
             updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS,
                 static_cast<SizeType32>(finishedRequests.size()));
-            updateRequestStats(activeRequests, finishedRequests);
+            // Finished requests were reported once. Avoid reporting it twice.
+            if (reportFinishedRequests)
+            {
+                updateRequestStats(activeRequests, finishedRequests);
+            }
+            else
+            {
+                updateRequestStats(activeRequests, {});
+            }
             appendCurrentDebugTensors();
         }
     }

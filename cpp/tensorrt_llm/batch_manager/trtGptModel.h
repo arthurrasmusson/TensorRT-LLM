@@ -275,9 +275,6 @@ protected:
         mMaxInputLen = maxInputLen;
     }
 
-    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::KVCacheManager> getKVCacheManager() = 0;
-    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::KVCacheManager const> getKVCacheManager() const = 0;
-
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager> getPeftCacheManager() = 0;
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager const> getPeftCacheManager() const = 0;
 

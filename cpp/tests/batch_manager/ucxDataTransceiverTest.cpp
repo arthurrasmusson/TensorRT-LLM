@@ -40,10 +40,10 @@ using testing::Return;
 using testing::ReturnRef;
 
 // ---------------------------------------
-//          UcxCommTest
+//          UcxEndpointTest
 // ---------------------------------------
 
-class UcxCommTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+class UcxEndpointTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
 {
 public:
     void SetUp() override
@@ -72,12 +72,12 @@ protected:
     int mDeviceId{0};
 };
 
-TEST_F(UcxCommTest, Basic)
+TEST_F(UcxEndpointTest, Basic)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
 
-    UcxComm selfComm(selfEndpoint), peerComm(peerEndpoint);
+    UcxEndpoint selfComm(selfEndpoint), peerComm(peerEndpoint);
 
     auto state = std::make_unique<tle::DataTransceiverState>();
     state->setCommState(tle::kv_cache::CommState{12, "127.0.0.1"});
@@ -93,7 +93,7 @@ TEST_F(UcxCommTest, Basic)
     EXPECT_EQ(info, recvFuture.get());
 }
 
-TEST_F(UcxCommTest, ListenerConnection)
+TEST_F(UcxEndpointTest, ListenerConnection)
 {
     using ContextPair = std::pair<std::shared_ptr<ucxx::Listener>, std::promise<std::shared_ptr<ucxx::Endpoint>>>;
     ContextPair context;
@@ -116,7 +116,7 @@ TEST_F(UcxCommTest, ListenerConnection)
     auto selfEndpoint = endpointFuture.get();
     ASSERT_TRUE(selfEndpoint);
 
-    UcxComm selfComm(selfEndpoint), peerComm(peerEndpoint);
+    UcxEndpoint selfComm(selfEndpoint), peerComm(peerEndpoint);
 
     LlmRequest::RequestIdType sendId{123};
     auto state = std::make_unique<tle::DataTransceiverState>();
@@ -133,12 +133,12 @@ TEST_F(UcxCommTest, ListenerConnection)
     EXPECT_EQ(info, recvFuture.get());
 }
 
-TEST_F(UcxCommTest, HostBufferSync)
+TEST_F(UcxEndpointTest, HostBufferSync)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
 
-    UcxComm selfComm(selfEndpoint), peerComm(peerEndpoint);
+    UcxEndpoint selfComm(selfEndpoint), peerComm(peerEndpoint);
 
     int32_t expectedValue = 234;
 
@@ -155,12 +155,12 @@ TEST_F(UcxCommTest, HostBufferSync)
     EXPECT_EQ(*reinterpret_cast<int32_t*>(recvBuffer.data()), expectedValue);
 }
 
-TEST_F(UcxCommTest, DeviceBufferSync)
+TEST_F(UcxEndpointTest, DeviceBufferSync)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
 
-    UcxComm selfComm(selfEndpoint), peerComm(peerEndpoint);
+    UcxEndpoint selfComm(selfEndpoint), peerComm(peerEndpoint);
 
     int32_t expectedValue = 234;
     tr::StaticDeviceBuffer sendBuffer{sizeof(int32_t), nvinfer1::DataType::kINT32},
@@ -180,7 +180,7 @@ TEST_F(UcxCommTest, DeviceBufferSync)
     EXPECT_EQ(gotValue, expectedValue);
 }
 
-TEST_F(UcxCommTest, MultiPointIsolation)
+TEST_F(UcxEndpointTest, MultiPointIsolation)
 {
     // This test is to ensure many to many communication is being handled properly.
     // Due to UCX implementation, tagRecv and amRecv are receiving data on to UCX worker
@@ -204,18 +204,18 @@ TEST_F(UcxCommTest, MultiPointIsolation)
         },
         &context);
 
-    UcxComm peerComm0{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
+    UcxEndpoint peerComm0{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
 
     auto endpointFuture0 = endpointPromise.get_future();
     ASSERT_EQ(endpointFuture0.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    UcxComm selfComm0{endpointFuture0.get()};
+    UcxEndpoint selfComm0{endpointFuture0.get()};
 
     context.second = std::promise<std::shared_ptr<ucxx::Endpoint>>();
-    UcxComm peerComm1{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
+    UcxEndpoint peerComm1{mPeerWorker->createEndpointFromHostname(listener->getIp(), listener->getPort())};
 
     auto endpointFuture1 = endpointPromise.get_future();
     ASSERT_EQ(endpointFuture1.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    UcxComm selfComm1{endpointFuture1.get()};
+    UcxEndpoint selfComm1{endpointFuture1.get()};
 
     int32_t expectedValue0 = 234;
     tr::HostBuffer sendBuffer0{sizeof(int32_t), nvinfer1::DataType::kINT32},
@@ -256,11 +256,11 @@ TEST_F(UcxCommTest, MultiPointIsolation)
 // ---------------------------------------
 //          MockTransceiverTest
 // ---------------------------------------
-class MockUcxComm : public UcxComm
+class MockUcxEndpoint : public UcxEndpoint
 {
 public:
-    MockUcxComm()
-        : UcxComm{nullptr}
+    MockUcxEndpoint()
+        : UcxEndpoint{nullptr}
     {
         ON_CALL(*this, sendRequestInfo).WillByDefault(Return());
         ON_CALL(*this, recvRequestInfo)
@@ -284,45 +284,54 @@ public:
         ON_CALL(*this, create).WillByDefault(testing::InvokeWithoutArgs(this, &MockUcxCommFactory::popMockComm));
     }
 
-    void addMockComm(std::unique_ptr<MockUcxComm>&& comm)
+    void addMockComm(std::unique_ptr<MockUcxEndpoint>&& comm)
     {
         mComms.emplace_back(std::move(comm));
     }
 
-    MOCK_METHOD(std::unique_ptr<UcxComm>, create, (std::shared_ptr<ucxx::Endpoint> const& endpoint), (override));
+    MOCK_METHOD(std::unique_ptr<UcxEndpoint>, create, (std::shared_ptr<ucxx::Endpoint> const& endpoint), (override));
 
 private:
-    std::unique_ptr<UcxComm> popMockComm()
+    std::unique_ptr<UcxEndpoint> popMockComm()
     {
         auto comm = std::move(mComms.front());
         mComms.pop_front();
         return comm;
     }
 
-    std::deque<std::unique_ptr<MockUcxComm>> mComms;
+    std::deque<std::unique_ptr<MockUcxEndpoint>> mComms;
 };
 
-template <typename TComm>
-class MockIOFormatter final : public IOFormatter<TComm, tle::kv_cache::CacheState>
+class MockIOFormatter final : public IOFormatter
 {
 public:
     MockIOFormatter() = default;
 
-    void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm,
-        tensorrt_llm::executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
+    void formatOutput(tle::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<tle::kv_cache::ProcessInfo> const& processInfos,
+        tensorrt_llm::executor::kv_cache::CacheState const& selfConfig, SizeType32 selfIdx,
+        tensorrt_llm::executor::kv_cache::CacheState const& destConfig) override
+    {
+        mockTransfer(llmRequest, comm, std::vector<tle::kv_cache::ProcessInfo>{std::move(processInfos)});
+    }
+
+    void formatInput(tle::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<tle::kv_cache::ProcessInfo> const& processInfos,
+        tensorrt_llm::executor::kv_cache::CacheState const& selfConfig, SizeType32 selfIdx,
         tensorrt_llm::executor::kv_cache::CacheState const& destConfig,
         tensorrt_llm::runtime::BufferManager const&) override
     {
-        mockTransfer(llmRequest, comm);
+        mockTransfer(llmRequest, comm, std::vector<tle::kv_cache::ProcessInfo>{std::move(processInfos)});
     }
 
-    MOCK_METHOD(void, mockTransfer, (LlmRequest const&, std::vector<TComm const*> const&) );
+    MOCK_METHOD(void, mockTransfer,
+        (LlmRequest const&, tle::kv_cache::Communicator const& comm, std::vector<tle::kv_cache::ProcessInfo> const&) );
 
     MOCK_METHOD(
         bool, inquireSupport, (tle::kv_cache::CacheState const&, tle::kv_cache::CacheState const&), (const, override));
 
     MOCK_METHOD(std::vector<SizeType32>, getCounterparts,
-        (tle::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx, tle::kv_cache::CacheState const& destConfig),
+        (tle::kv_cache::CacheState const& selfConfig, SizeType32 selfIdx, tle::kv_cache::CacheState const& destConfig),
         (const, override));
 };
 
@@ -364,24 +373,26 @@ public:
 
 TEST_F(MockTransceiverTest, UcxSenderBasic)
 {
-    auto formatter = std::make_unique<MockIOFormatter<UcxComm>>();
+    auto formatter = std::make_unique<MockIOFormatter>();
 
     // setup mock formatter
     // [NOTE] Test expects dynamic support inquire is not implemented
     EXPECT_CALL(*formatter, inquireSupport).WillOnce(Return(true));
     // Make sure correct request are selected and send
+
     EXPECT_CALL(*formatter, mockTransfer)
-        .WillOnce(
-            testing::DoAll(testing::WithArgs<1>(
-                               [](auto comm) {
-                                   comm[0]->sendBuffer(tr::HostBuffer{sizeof(int32_t), nvinfer1::DataType::kINT32});
-                               }),
-                Return()));
+        .WillOnce(testing::DoAll(testing::WithArgs<1, 2>(
+                                     [](auto const& comm, auto const& processInfos)
+                                     {
+                                         comm.sendBuffer(tr::HostBuffer{sizeof(int32_t), nvinfer1::DataType::kINT32},
+                                             tensorrt_llm::executor::kv_cache::DataContext{}, processInfos[0]);
+                                     }),
+            Return()));
 
     // setup mock data communicator
     auto factory = std::make_unique<MockUcxCommFactory>();
     {
-        auto mockComm = std::make_unique<MockUcxComm>();
+        auto mockComm = std::make_unique<MockUcxEndpoint>();
         EXPECT_CALL(*mockComm, recvRequestInfo)
             .WillOnce(Return(RequestInfo{123,
                 tle::DataTransceiverState{tle::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
@@ -393,7 +404,7 @@ TEST_F(MockTransceiverTest, UcxSenderBasic)
     }
     EXPECT_CALL(*factory, create).Times(1);
     tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT};
-    auto sender = UcxDataSender<tle::kv_cache::CacheState>(std::move(factory), fakeCacheState, 0, std::move(formatter));
+    auto sender = UcxDataSender(std::move(factory), fakeCacheState, 0, std::move(formatter));
 
     // Expect recvRequestInfo will be blocking until a connection has been initialized
     auto requestId = std::async(std::launch::async, [&sender]() { return sender.recvRequestInfo(); });
@@ -410,22 +421,25 @@ TEST_F(MockTransceiverTest, UcxSenderBasic)
 
 TEST_F(MockTransceiverTest, UcxReceiverBasic)
 {
-    auto formatter = std::make_unique<MockIOFormatter<UcxComm>>();
+    auto formatter = std::make_unique<MockIOFormatter>();
 
     EXPECT_CALL(*formatter, inquireSupport).WillOnce(Return(true));
+
     EXPECT_CALL(*formatter, mockTransfer)
-        .WillOnce(testing::DoAll(testing::WithArgs<1>(
-                                     [](auto comm)
+        .WillOnce(testing::DoAll(testing::WithArgs<1, 2>(
+                                     [](auto const& comm, auto const& processInfos)
                                      {
                                          auto buffer = tr::HostBuffer{sizeof(int32_t), nvinfer1::DataType::kINT32};
-                                         comm[0]->recvBuffer(buffer);
+                                         comm.recvBuffer(
+                                             buffer, tensorrt_llm::executor::kv_cache::DataContext{0}, processInfos[0]);
                                      }),
             Return()));
+
     EXPECT_CALL(*formatter, getCounterparts).Times(1).WillOnce(Return(std::vector<SizeType32>{0}));
     // setup mock data communicator
     auto factory = std::make_unique<MockUcxCommFactory>();
     {
-        auto mockComm = std::make_unique<MockUcxComm>();
+        auto mockComm = std::make_unique<MockUcxEndpoint>();
         EXPECT_CALL(*mockComm, sendRequestInfo).Times(1);
         // Ensure correct comm is passed for all operations of the same
         // request.
@@ -439,8 +453,7 @@ TEST_F(MockTransceiverTest, UcxReceiverBasic)
         0, [](ucp_conn_request_h conn_request, void* data) {}, nullptr);
     tensorrt_llm::executor::kv_cache::CacheState fakeCacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT};
 
-    auto receiver
-        = UcxDataReceiver<tle::kv_cache::CacheState>(std::move(factory), fakeCacheState, 0, std::move(formatter));
+    auto receiver = UcxDataReceiver(std::move(factory), fakeCacheState, 0, std::move(formatter));
 
     // Request containing context phase info, i.e. 123 is the request id in context executor
     auto llmRequest = makeLlmRequest(0, 123, listener->getIp(), listener->getPort());

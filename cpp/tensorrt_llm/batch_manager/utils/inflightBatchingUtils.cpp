@@ -126,56 +126,6 @@ void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
-    kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(allocateKvCache);
-
-    TLLM_CHECK(kvCacheManagerPtr);
-    auto& kvCacheManager = *kvCacheManagerPtr;
-
-    for (auto const& llmReq : scheduledRequests.contextRequests)
-    {
-        if (llmReq->isFirstContextChunk())
-        {
-            auto const requestId = llmReq->mRequestId;
-            auto const promptLen = llmReq->mPromptLen;
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-            auto const draftLength = llmReq->getNumDraftTokens();
-
-            // Allocate/Reuse KV cache
-            kvCacheManager.addSequence(requestId, promptLen, reqBeamWidth, llmReq);
-
-            // Allocate more KV cache for speculative decoding
-            if (draftLength > 0)
-            {
-                for (SizeType32 di = 0; di < draftLength; ++di)
-                {
-                    kvCacheManager.addToken(requestId);
-                }
-            }
-
-            if (crossKvCacheManagerPtr != nullptr)
-            {
-                crossKvCacheManagerPtr->addSequence(requestId, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
-            }
-        }
-    }
-
-    for (auto const& llmReq : scheduledRequests.generationRequests)
-    {
-        auto const requestId = llmReq->mRequestId;
-        auto const draftLength = llmReq->getNumDraftTokens();
-
-        for (SizeType32 di = 0; di < draftLength + 1; ++di)
-        {
-            kvCacheManager.addToken(requestId);
-        }
-    }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, SizeType32 maxInputLen,
     OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager,
     OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager,

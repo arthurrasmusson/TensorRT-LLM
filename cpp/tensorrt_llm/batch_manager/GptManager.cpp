@@ -352,7 +352,6 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
         }
     }
 
-    std::optional<SizeType32> numReturnSequences(std::nullopt);
     std::optional<SizeType32> endId(std::nullopt);
     std::optional<SizeType32> padId(std::nullopt);
     std::optional<SizeType32> beamWidth(std::nullopt);
@@ -424,7 +423,7 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
         returnLogProbs.value(), returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
         false /* FIXME: exclude input in output */, newReq->getLogitsPostProcessor());
 
-    if (r->getNumReturnSequences() > 1)
+    if (samplingConfig.numReturnSequences > 1)
     {
         TLLM_LOG_WARNING("numReturnSequences > 1 is not supported in GptManager. numReturnSequences will be set to 1");
         r->setNumReturnSequences(1);

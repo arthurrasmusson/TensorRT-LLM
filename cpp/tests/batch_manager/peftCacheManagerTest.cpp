@@ -234,9 +234,9 @@ TEST_F(PeftCacheManagerTest, putToCapacity)
             {
                 auto const& values = valuesWeakPtr;
                 std::cout << requestId << std::endl;
-                for (size_t i = 0; i < values.size(); ++i)
+                for (auto const& value : values)
                 {
-                    std::cout << "\t" << values.at(i) << std::endl;
+                    std::cout << "\t" << value << std::endl;
                 }
             }
 #endif

@@ -30,192 +30,31 @@ namespace tensorrt_llm::batch_manager::kv_cache_manager
 
 // Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
 // parallel topology is completely identical, making it the preferred method.
-template <typename TComm>
-class CacheInputFormatter final : public IOFormatter<TComm, executor::kv_cache::CacheState>
+class CacheFormatter final : public IOFormatter
 {
 public:
-    CacheInputFormatter(KVCacheManager* cacheManager)
+    using CacheState = executor::kv_cache::CacheState;
+
+    CacheFormatter(KVCacheManager* cacheManager)
         : mCacheManager{cacheManager}
     {
         TLLM_CHECK(mCacheManager);
     }
 
-    void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& srcs,
-        executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        executor::kv_cache::CacheState const& destConfig, runtime::BufferManager const& bufferManager) override
+    void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+        SizeType32 selfIdx, CacheState const& destConfig) override;
+
+    void formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+        SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager) override;
+
+    [[nodiscard]] bool inquireSupport(CacheState const& selfConfig, CacheState const& destConfig) const override;
+
+    [[nodiscard]] std::vector<SizeType32> getCounterparts(
+        CacheState const& selfConfig, SizeType32 selfIdx, CacheState const& destConfig) const override
     {
-
-        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
-        constexpr SizeType32 beam{0};
-        std::vector<runtime::ITensor::SharedPtr> recvBufferTmps;
-        std::vector<runtime::ITensor::SharedPtr> outputBuffers;
-        auto const numPools = mCacheManager->getBlockManager().getNumPools();
-        // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
-        int blockNum = 0;
-        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
-        {
-            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
-            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
-            {
-                blockNum++;
-            }
-        }
-        auto cacheShape = executor::kv_cache::makeShapeFromCacheState(destConfig);
-
-        size_t bufferNum = blockNum * srcs.size();
-        auto dataType = getBlockBeginIt(*mCacheManager, llmRequest, beam, 0)->getDataType();
-        runtime::ITensor::SharedPtr recvBufferTemp = bufferManager.gpu(
-            runtime::ITensor::makeShape(
-                {static_cast<long>(tensorrt_llm::runtime::ITensor::volume(cacheShape) * bufferNum)}),
-            dataType);
-        recvBufferTmps.resize(bufferNum);
-        for (size_t i = 0; i < bufferNum; i++)
-        {
-            recvBufferTmps[i]
-                = runtime::ITensor::slice(recvBufferTemp, i * tensorrt_llm::runtime::ITensor::volume(cacheShape),
-                    tensorrt_llm::runtime::ITensor::volume(cacheShape));
-        }
-        // sync to alloc buffer
-        bufferManager.getStream().synchronize();
-
-        int idx = 0;
-        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
-        {
-            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
-            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
-            {
-                for (auto&& src : srcs)
-                {
-                    src->recvBuffer(*recvBufferTmps[idx]);
-                    idx++;
-                }
-                outputBuffers.push_back(it);
-            }
-        }
-
-        executor::kv_cache::concatenateKVCacheDispatch(recvBufferTmps.data(), recvBufferTmps.size(),
-            getCounterparts(selfconfig, selfIdx, destConfig), destConfig, outputBuffers.data(), outputBuffers.size(),
-            selfIdx, selfconfig, bufferManager);
-        bufferManager.getStream().synchronize();
-    }
-
-    [[nodiscard]] bool inquireSupport(executor::kv_cache::CacheState const& selfconfig,
-        executor::kv_cache::CacheState const& destConfig) const override
-    {
-        std::unordered_set<SizeType32> setVecSelf{selfconfig.getModelConfig().mNbKvHeadsPerLayer.begin(),
-            selfconfig.getModelConfig().mNbKvHeadsPerLayer.end()};
-
-        if (setVecSelf.size() != 1)
-        {
-            return false;
-        }
-        std::unordered_set<int> setVecDest{destConfig.getModelConfig().mNbKvHeadsPerLayer.begin(),
-            destConfig.getModelConfig().mNbKvHeadsPerLayer.end()};
-
-        if (setVecDest.size() != 1)
-        {
-            return false;
-        }
-        if (selfconfig.getModelConfig().mTokensPerBlock != destConfig.getModelConfig().mTokensPerBlock
-            || selfconfig.getModelConfig().mSizePerHead != destConfig.getModelConfig().mSizePerHead)
-        {
-            return false;
-        }
-        if (selfconfig.getModelConfig().mNbKvHeadsPerLayer.size()
-            != destConfig.getModelConfig().mNbKvHeadsPerLayer.size())
-        {
-            return false;
-        }
-
-        int selfNumHeads
-            = selfconfig.getModelConfig().mNbKvHeadsPerLayer[0] * selfconfig.getParallelConfig().mTensorParallelism;
-        int destNumHeads
-            = destConfig.getModelConfig().mNbKvHeadsPerLayer[0] * destConfig.getParallelConfig().mTensorParallelism;
-        return selfNumHeads == destNumHeads;
-    }
-
-    [[nodiscard]] std::vector<SizeType32> getCounterparts(executor::kv_cache::CacheState const& selfconfig,
-        SizeType32 selfIdx, executor::kv_cache::CacheState const& destConfig) const override
-    {
-        return executor::kv_cache::targetIRanks(destConfig, selfconfig, selfIdx);
-    }
-
-private:
-    KVCacheManager* mCacheManager{};
-};
-
-// Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
-// parallel topology is completely identical, making it the preferred method.
-template <typename TComm>
-class CacheOutputFormatter final : public IOFormatter<TComm, executor::kv_cache::CacheState>
-{
-public:
-    CacheOutputFormatter(KVCacheManager* cacheManager)
-        : mCacheManager{cacheManager}
-    {
-        TLLM_CHECK(mCacheManager);
-    }
-
-    void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& dsts,
-        executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        executor::kv_cache::CacheState const& destConfig, runtime::BufferManager const& /*bufferManager*/) override
-    {
-        TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
-        constexpr SizeType32 beam{0};
-        auto const numPools = mCacheManager->getBlockManager().getNumPools();
-        // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
-        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
-        {
-            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
-            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
-            {
-                for (auto&& dst : dsts)
-                {
-                    dst->sendBuffer(*it);
-                }
-            }
-        }
-    }
-
-    [[nodiscard]] bool inquireSupport(executor::kv_cache::CacheState const& selfconfig,
-        executor::kv_cache::CacheState const& destConfig) const override
-    {
-        std::unordered_set<SizeType32> setVecSelf{selfconfig.getModelConfig().mNbKvHeadsPerLayer.begin(),
-            selfconfig.getModelConfig().mNbKvHeadsPerLayer.end()};
-
-        if (setVecSelf.size() != 1)
-        {
-            return false;
-        }
-        std::unordered_set<int> setVecDest{destConfig.getModelConfig().mNbKvHeadsPerLayer.begin(),
-            destConfig.getModelConfig().mNbKvHeadsPerLayer.end()};
-
-        if (setVecDest.size() != 1)
-        {
-            return false;
-        }
-        if (selfconfig.getModelConfig().mTokensPerBlock != destConfig.getModelConfig().mTokensPerBlock
-            || selfconfig.getModelConfig().mSizePerHead != destConfig.getModelConfig().mSizePerHead)
-        {
-            return false;
-        }
-        if (selfconfig.getModelConfig().mNbKvHeadsPerLayer.size()
-            != destConfig.getModelConfig().mNbKvHeadsPerLayer.size())
-        {
-            return false;
-        }
-
-        int selfNumHeads
-            = selfconfig.getModelConfig().mNbKvHeadsPerLayer[0] * selfconfig.getParallelConfig().mTensorParallelism;
-        int destNumHeads
-            = destConfig.getModelConfig().mNbKvHeadsPerLayer[0] * destConfig.getParallelConfig().mTensorParallelism;
-        return selfNumHeads == destNumHeads;
-    }
-
-    [[nodiscard]] std::vector<SizeType32> getCounterparts(executor::kv_cache::CacheState const& selfconfig,
-        SizeType32 selfIdx, executor::kv_cache::CacheState const& destConfig) const override
-    {
-        return executor::kv_cache::targetIRanks(destConfig, selfconfig, selfIdx);
+        return executor::kv_cache::targetIRanks(destConfig, selfConfig, selfIdx);
     }
 
 private:

@@ -121,6 +121,8 @@ public:
 
     bool isParticipant() const;
 
+    std::optional<std::shared_ptr<KVCacheEventManager>> getKVCacheEventManager() const;
+
 private:
     using RtTensorPtr = runtime::ITensor::SharedPtr;
     using CudaStreamPtr = runtime::BufferManager::CudaStreamPtr;

@@ -15,6 +15,9 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # keep this list sorted alphabetically
 set(SRCS
+    allocateKvCache.cpp
+    assignReqSeqSlots.cpp
+    cacheFormatter.cpp
     cacheTransceiver.cpp
     capacityScheduler.cpp
     contextProgress.cpp
@@ -23,15 +26,16 @@ set(SRCS
     encoderBuffers.cpp
     GptManager.cpp
     kvCacheUtils.cpp
-    mpiDataTransceiver.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
+    kvCacheEventManager.cpp
     kvCacheUtils.cpp
     loraBuffers.cpp
     medusaBuffers.cpp
     microBatchScheduler.cpp
     mpiDataTransceiver.cpp
     namedTensor.cpp
+    pauseRequests.cpp
     peftCacheManager.cpp
     promptTuningBuffers.cpp
     rnnStateBuffers.cpp

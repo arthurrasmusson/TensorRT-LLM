@@ -84,6 +84,10 @@ std::string ModelSpec::getSpeculativeDecodingModeString() const
     {
         return "medusa";
     }
+    else if (mSpecDecodingMode.isEagle())
+    {
+        return "eagle";
+    }
     else
     {
         throw std::runtime_error("Unsupported decoding mode");

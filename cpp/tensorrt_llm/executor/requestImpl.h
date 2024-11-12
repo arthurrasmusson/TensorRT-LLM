@@ -39,7 +39,8 @@ public:
         std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority, RequestType type,
         std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
         std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
-        SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig)
+        SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
+        std::optional<Tensor> skipCrossAttnBlocks)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -68,6 +69,7 @@ public:
         , mCrossAttentionMask(crossAttentionMask)
         , mNumReturnSequences(numReturnSequences)
         , mEagleConfig(eagleConfig)
+        , mSkipCrossAttnBlocks(skipCrossAttnBlocks)
     {
         validate();
     }
@@ -229,6 +231,11 @@ public:
         return mEagleConfig;
     }
 
+    std::optional<Tensor> getSkipCrossAttnBlocks() const
+    {
+        return mSkipCrossAttnBlocks;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -363,6 +370,11 @@ public:
         mEagleConfig = eagleConfig;
     }
 
+    void setSkipCrossAttnBlocks(Tensor skipCrossAttnBlocks)
+    {
+        mSkipCrossAttnBlocks = skipCrossAttnBlocks;
+    }
+
 private:
     void validate()
     {
@@ -420,6 +432,7 @@ private:
         lambda(mCrossAttentionMask);
         lambda(mNumReturnSequences);
         lambda(mEagleConfig);
+        lambda(mSkipCrossAttnBlocks);
     }
 
     VecTokens mInputTokenIds;
@@ -450,6 +463,7 @@ private:
     std::optional<Tensor> mCrossAttentionMask;
     SizeType32 mNumReturnSequences;
     std::optional<EagleConfig> mEagleConfig;
+    std::optional<Tensor> mSkipCrossAttnBlocks;
 };
 
 } // namespace tensorrt_llm::executor

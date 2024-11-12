@@ -13,8 +13,10 @@
 #include "trtGptModelV1.h"
 
 #include "promptTuningBuffers.h"
+#include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/stlUtils.h"
@@ -219,9 +221,9 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     : TrtGptModel(modelConfig, worldConfig, optionalParams)
     , mPeftCacheManager{std::make_shared<NoOpPeftCacheManager>()}
 {
-    auto const ppTimesMaxBatchSize = worldConfig.getPipelineParallelism() * getMaxBatchSize();
+    mPpTimesMaxBatchSize = worldConfig.getPipelineParallelism() * getMaxBatchSize();
 
-    runtime::GptSession::Config sessionConfig{ppTimesMaxBatchSize, getMaxBeamWidth(), getMaxSequenceLen()};
+    runtime::GptSession::Config sessionConfig{mPpTimesMaxBatchSize, getMaxBeamWidth(), getMaxSequenceLen()};
     sessionConfig.decoderPerRequest = true;
     sessionConfig.kvCacheConfig = optionalParams.kvCacheConfig;
     sessionConfig.normalizeLogProbs = optionalParams.normalizeLogProbs;
@@ -241,10 +243,10 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     std::optional<SizeType32> maxNumTokens = modelConfig.getMaxNumTokens();
     TLLM_CHECK_WITH_INFO(maxNumTokens, "Max number of tokens is not set.");
 
-    mCapacityScheduler = tensorrt_llm::batch_manager::CapacityScheduler(ppTimesMaxBatchSize, mSession->mKvCacheManager,
-        nullptr, mPeftCacheManager, optionalParams.schedulerConfig.getCapacitySchedulerPolicy());
+    mCapacityScheduler = std::make_unique<tensorrt_llm::batch_manager::CapacityScheduler>(mPpTimesMaxBatchSize,
+        optionalParams.schedulerConfig.getCapacitySchedulerPolicy(), static_cast<bool>(mSession->mKvCacheManager));
 
-    mMicroBatchScheduler = tensorrt_llm::batch_manager::MicroBatchScheduler(ppTimesMaxBatchSize, maxNumTokens);
+    mMicroBatchScheduler = std::make_unique<tensorrt_llm::batch_manager::MicroBatchScheduler>(maxNumTokens);
 }
 
 runtime::ModelConfig const& TrtGptModelV1::getModelConfig() const
@@ -433,8 +435,8 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     auto const device = getWorldConfig().getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
 
-    auto [fittingRequests, pausedRequests] = mCapacityScheduler(activeRequests);
-    auto [scheduledRequests, genRequests] = mMicroBatchScheduler(fittingRequests, {});
+    auto [fittingRequests, pausedRequests] = (*mCapacityScheduler)(activeRequests, mSession->mKvCacheManager);
+    auto [scheduledRequests, genRequests] = (*mMicroBatchScheduler)(fittingRequests, {}, mPpTimesMaxBatchSize);
 
     TLLM_CHECK(genRequests.empty());
 
@@ -674,5 +676,7 @@ void TrtGptModelV1::setReplicateLogitsPostProcessor(bool replicateLogitsPostProc
 {
     TLLM_THROW("Logits post processor is not supported in V1 batcher.");
 }
+
+TrtGptModelV1::~TrtGptModelV1() = default;
 
 } // namespace tensorrt_llm::batch_manager

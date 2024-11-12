@@ -36,14 +36,15 @@
 #endif
 namespace tensorrt_llm::batch_manager
 {
-class UcxComm
+
+class UcxEndpoint
 {
 public:
-    using TPtrContainer = std::vector<UcxComm const*>;
+    using TPtrContainer = std::vector<UcxEndpoint const*>;
 
-    explicit UcxComm() {}
+    UcxEndpoint() = default;
 
-    explicit UcxComm(std::shared_ptr<ucxx::Endpoint> const& endpoint)
+    explicit UcxEndpoint(std::shared_ptr<ucxx::Endpoint> const& endpoint)
         : mEndpoint(endpoint)
     {
         if (mEndpoint)
@@ -52,7 +53,7 @@ public:
         }
     }
 
-    virtual ~UcxComm() = default;
+    virtual ~UcxEndpoint() = default;
 
     virtual void sendBuffer(runtime::IBuffer const& buf) const;
     virtual void recvBuffer(runtime::IBuffer& buf) const;
@@ -86,7 +87,36 @@ private:
     std::shared_ptr<ucxx::Endpoint> mEndpoint;
 };
 
-// Factory class for creating UcxComm object, UCX transceivers will construct UcxComm objects
+// TODO: Integrate this class with `UcxEndpoint` and limit the dependency on UCX to this class.
+class UcxComm : public executor::kv_cache::Communicator
+{
+public:
+    void sendBuffer(runtime::IBuffer const& buf, executor::kv_cache::DataContext const& context,
+        executor::kv_cache::ProcessInfo const& processInfo) const override
+    {
+        processInfo.getEndpoint()->sendBuffer(buf);
+    }
+
+    void recvBuffer(runtime::IBuffer& buf, executor::kv_cache::DataContext const& context,
+        executor::kv_cache::ProcessInfo const& processInfo) const override
+    {
+        processInfo.getEndpoint()->recvBuffer(buf);
+    }
+
+    [[nodiscard]] std::unique_ptr<batch_manager::RequestInfo> recvRequestInfo(
+        std::optional<executor::kv_cache::ProcessInfo> const& processInfo = std::nullopt) const override
+    {
+        return std::make_unique<batch_manager::RequestInfo>(processInfo.value().getEndpoint()->recvRequestInfo());
+    }
+
+    void sendRequestInfo(batch_manager::RequestInfo const& requestInfo,
+        executor::kv_cache::ProcessInfo const& processInfo) const override
+    {
+        processInfo.getEndpoint()->sendRequestInfo(requestInfo);
+    }
+};
+
+// Factory class for creating UcxEndpoint object, UCX transceivers will construct UcxEndpoint objects
 // per connection and this factory class will be passed to the transceivers to achieve further
 // polymorphism.
 class UcxCommFactory
@@ -94,23 +124,21 @@ class UcxCommFactory
 public:
     virtual ~UcxCommFactory() = default;
 
-    virtual std::unique_ptr<UcxComm> create(std::shared_ptr<ucxx::Endpoint> const& endpoint)
+    virtual std::unique_ptr<UcxEndpoint> create(std::shared_ptr<ucxx::Endpoint> const& endpoint)
     {
-        return std::make_unique<UcxComm>(endpoint);
+        return std::make_unique<UcxEndpoint>(endpoint);
     }
 };
 
-template <typename TDataConfig>
 class UcxDataSender final : public DataSender
 {
 public:
-    using TFormatter = std::unique_ptr<IOFormatter<UcxComm, TDataConfig>>;
+    using TFormatter = std::unique_ptr<IOFormatter>;
 
     UcxDataSender(std::unique_ptr<UcxCommFactory>&& factory, executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, TFormatter formatter, uint16_t listenerPort = 0)
         : mFactory{std::move(factory)}
         , mFormatter{std::move(formatter)}
-        , mBufferManager{std::make_shared<runtime::CudaStream>()}
     {
         mSelfState.setCommState(
             executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
@@ -130,7 +158,7 @@ public:
     [[nodiscard]] RequestInfo recvRequestInfo() override
     {
         // Below can be initiated asynchronously when an endpoint is created..
-        std::unique_ptr<UcxComm> comm;
+        std::unique_ptr<UcxEndpoint> comm;
         {
             std::unique_lock<std::mutex> lk(mMtx);
             if (mIncomingRequests.empty())
@@ -154,7 +182,7 @@ public:
             || (mRequestRemainSendCount[info.getRequestId()] == 0))
         {
             mRequestRemainSendCount[info.getRequestId()] = peerTargetRanks.size();
-            mRequestToComms.emplace(info.getRequestId(), std::vector<std::unique_ptr<UcxComm>>());
+            mRequestToComms.emplace(info.getRequestId(), std::vector<std::unique_ptr<UcxEndpoint>>());
             mRequestToComms[info.getRequestId()].resize(mRequestRemainSendCount[info.getRequestId()]);
         }
         int peerIdx = std::distance(peerTargetRanks.begin(),
@@ -168,14 +196,13 @@ public:
 
     void sendSync(LlmRequest const& llmRequest) override
     {
-
-        std::vector<UcxComm const*> comms;
+        std::vector<executor::kv_cache::ProcessInfo> comms;
         {
             std::unique_lock<std::mutex> lk(mMtxForMap);
             if (mRequestRemainSendCount.find(llmRequest.mRequestId) != mRequestRemainSendCount.end())
             {
                 TLLM_CHECK_WITH_INFO(mRequestRemainSendCount[llmRequest.mRequestId] > 0,
-                    "sendSync kvcache  with request id %ld count should >0 but get %d ", llmRequest.mRequestId,
+                    "sendSync KV cache with request id %ld count should > 0 but get %d ", llmRequest.mRequestId,
                     mRequestRemainSendCount[llmRequest.mRequestId]);
                 mRequestRemainSendCount[llmRequest.mRequestId]--;
             }
@@ -193,14 +220,13 @@ public:
                 (it != mRequestToComms.end()), "sendSync() must be called with request returned by recvRequestInfo().");
             for (auto&& comm : it->second)
             {
-                comms.push_back(comm.get());
+                comms.push_back(executor::kv_cache::ProcessInfo{comm.get()});
             }
         }
 
         // TODO: fake destCacheState
-
-        (*mFormatter)(llmRequest, comms, mSelfState.getCacheState().value(),
-            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value(), mBufferManager);
+        mFormatter->formatOutput(mComm, llmRequest, std::move(comms), mSelfState.getCacheState().value(),
+            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value());
 
         {
             // For now, the connection will be dropped once the transfer is completed
@@ -339,7 +365,7 @@ private:
 #endif
     }
 
-    void addIncomingRequests(std::unique_ptr<UcxComm>&& incomingRequest)
+    void addIncomingRequests(std::unique_ptr<UcxEndpoint>&& incomingRequest)
     {
         {
             std::lock_guard<std::mutex> lk(mMtx);
@@ -348,7 +374,7 @@ private:
         mRequestCv.notify_all();
     }
 
-    void reapFinishedComm(std::vector<std::unique_ptr<UcxComm>>&& comms)
+    void reapFinishedComm(std::vector<std::unique_ptr<UcxEndpoint>>&& comms)
     {
         // this WAR function assumes 'mMtx' is being held
         auto now = std::chrono::steady_clock::now();
@@ -378,6 +404,7 @@ private:
         int idx = -1;
     };
 
+    UcxComm mComm;
     std::unordered_map<std::string, NetINfoT> mNetInfoMap;
     std::unique_ptr<UcxCommFactory> mFactory;
     TFormatter mFormatter;
@@ -388,21 +415,19 @@ private:
 
     std::mutex mMtx;
     std::condition_variable mRequestCv;
-    std::deque<std::unique_ptr<UcxComm>> mIncomingRequests;
-    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxComm>>> mRequestToComms;
+    std::deque<std::unique_ptr<UcxEndpoint>> mIncomingRequests;
+    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxEndpoint>>> mRequestToComms;
     std::unordered_map<LlmRequest::RequestIdType, int> mRequestRemainSendCount;
     std::mutex mMtxForMap;
 
     executor::DataTransceiverState mSelfState;
-    runtime::BufferManager mBufferManager;
-    std::deque<std::pair<decltype(std::chrono::steady_clock::now()), std::unique_ptr<UcxComm>>> mReapingComm;
+    std::deque<std::pair<decltype(std::chrono::steady_clock::now()), std::unique_ptr<UcxEndpoint>>> mReapingComm;
 };
 
-template <typename TDataConfig>
 class UcxDataReceiver final : public DataReceiver
 {
 public:
-    using TFormatter = std::unique_ptr<IOFormatter<UcxComm, TDataConfig>>;
+    using TFormatter = std::unique_ptr<IOFormatter>;
 
     UcxDataReceiver(std::unique_ptr<UcxCommFactory>&& factory, executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, TFormatter formatter)
@@ -433,13 +458,12 @@ public:
         auto const& socketState = contextState.getCommState().value().getSocketState();
 
         auto const& destCacheState = contextState.getCacheState().value();
-        //
 
         auto targetRanks = mFormatter->getCounterparts(
             mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState);
         TLLM_CHECK_WITH_INFO(mFormatter->inquireSupport(mSelfState.getCacheState().value(), destCacheState),
             "Disagg server does not currently support these cacheState.");
-        std::vector<std::unique_ptr<UcxComm>> comms;
+        std::vector<std::unique_ptr<UcxEndpoint>> comms;
 
         for (auto index : targetRanks)
         {
@@ -466,23 +490,22 @@ public:
 
     void receiveSync(LlmRequest const& llmRequest) override
     {
-        std::vector<UcxComm const*> comms;
+        std::vector<executor::kv_cache::ProcessInfo> comms;
         {
             std::unique_lock<std::mutex> lk(mMtx);
             auto it = mRequestToComms.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
                 (it != mRequestToComms.end()), "sendSync() must be called with request returned by recvRequestInfo().");
-            // comm = it->second.get();
             for (auto&& comm : it->second)
             {
-                comms.push_back(comm.get());
+                comms.push_back(executor::kv_cache::ProcessInfo{comm.get()});
             }
         }
         auto const& contextState = llmRequest.getDataTransceiverState();
         TLLM_CHECK(contextState.getCommState());
         TLLM_CHECK(contextState.getCacheState());
         auto const& destCacheState = contextState.getCacheState().value();
-        (*mFormatter)(llmRequest, comms, mSelfState.getCacheState().value(),
+        mFormatter->formatInput(mComm, llmRequest, std::move(comms), mSelfState.getCacheState().value(),
             mSelfState.getCommState().value().getSelfIdx(), destCacheState, mBufferManager);
         {
             // For now, the connection will be dropped once the transfer is completed
@@ -527,6 +550,7 @@ private:
 #endif
     }
 
+    UcxComm mComm;
     std::unique_ptr<UcxCommFactory> mFactory;
     executor::DataTransceiverState mSelfState;
     TFormatter mFormatter;
@@ -535,7 +559,7 @@ private:
     std::shared_ptr<ucxx::Worker> mWorker;
 
     std::mutex mMtx;
-    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxComm>>> mRequestToComms;
+    std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxEndpoint>>> mRequestToComms;
     runtime::BufferManager mBufferManager;
     std::unordered_set<std::string> mSelfIps;
 };

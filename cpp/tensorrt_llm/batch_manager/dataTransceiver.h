@@ -14,6 +14,7 @@
 #include <future>
 
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/executor/cacheCommunicator.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/serializeUtils.h"
 
@@ -21,32 +22,41 @@ namespace tensorrt_llm::batch_manager
 {
 
 // Used to support the data transmission with different layouts and different protocols.
-template <typename TComm, typename TConfig>
 class IOFormatter
 {
 public:
     using SizeType32 = tensorrt_llm::runtime::SizeType32;
+    using CacheState = executor::kv_cache::CacheState;
 
     /// @brief Perform data transmission with formatting actions.
     /// @param llmRequest The request associated with this data transmission.
     /// @param comm The communicator associated with this data transmission.
-    virtual void operator()(LlmRequest const& llmRequest, typename TComm::TPtrContainer const& comm,
-        executor::kv_cache::CacheState const& selfconfig, SizeType32 selfIdx,
-        executor::kv_cache::CacheState const& destConfig, runtime::BufferManager const& bufferManager)
+    virtual void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+        SizeType32 selfIdx, CacheState const& destConfig)
         = 0;
+
+    /// @brief Accept transmitted data with unformatting actions.
+    /// @param llmRequest The request associated with this data transmission.
+    /// @param comm The communicator associated with this data transmission.
+    virtual void formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+        SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager)
+        = 0;
+
     /// @brief Determine whether the sender is applicable to the source and target.
-    /// @param selfconfig Source data arrangement.
+    /// @param selfConfig Source data arrangement.
     /// @param destConfig Target data arrangement.
     /// @return Whether the sender is applicable to the source and target.
-    [[nodiscard]] virtual bool inquireSupport(TConfig const& selfconfig, TConfig const& destConfig) const = 0;
+    [[nodiscard]] virtual bool inquireSupport(CacheState const& selfConfig, CacheState const& destConfig) const = 0;
 
     /// @brief Obtain the indies of the counterparts that need to be actually communicated with.
-    /// @param selfconfig Source data arrangement.
+    /// @param selfConfig Source data arrangement.
     /// @param selfIdx The sequential index of the current executor process within the entire parallel group.
     /// @param destConfig Target data arrangement.
     /// @return The indies of the counterparts.
     [[nodiscard]] virtual std::vector<SizeType32> getCounterparts(
-        TConfig const& selfconfig, SizeType32 selfIdx, TConfig const& destConfig) const
+        CacheState const& selfConfig, SizeType32 selfIdx, CacheState const& destConfig) const
         = 0;
 
     /// @brief Destructor.

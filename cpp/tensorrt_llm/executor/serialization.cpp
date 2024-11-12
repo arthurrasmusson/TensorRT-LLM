@@ -425,6 +425,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto crossAttentionMask = su::deserialize<std::optional<Tensor>>(is);
     auto numReturnSequences = su::deserialize<SizeType32>(is);
     auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
+    auto skipCrossAttnBlocks = su::deserialize<std::optional<Tensor>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
@@ -432,7 +433,7 @@ Request Serialization::deserializeRequest(std::istream& is)
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
-        std::move(crossAttentionMask), numReturnSequences, eagleConfig);
+        std::move(crossAttentionMask), numReturnSequences, std::move(eagleConfig), std::move(skipCrossAttnBlocks));
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -1094,55 +1095,69 @@ size_t Serialization::serializedSize(EagleConfig const& eagleConfig)
 }
 
 // KV Cache Retention Config
+std::optional<size_t> durationToInt(std::optional<std::chrono::milliseconds> const& duration)
+{
+    return duration.has_value() ? std::optional(static_cast<size_t>(duration->count())) : std::nullopt;
+}
+
+std::optional<std::chrono::milliseconds> intToDuration(std::optional<size_t> const& duration)
+{
+    return duration.has_value() ? std::optional(std::chrono::milliseconds(*duration)) : std::nullopt;
+}
+
 KvCacheRetentionConfig Serialization::deserializeKvCacheRetentionConfig(std::istream& is)
 {
     auto tokenRangeRetentionPriorities
-        = su::deserialize<std::vector<executor::KvCacheRetentionConfig::TokenRangeRetentionPriority>>(is);
+        = su::deserialize<std::vector<executor::KvCacheRetentionConfig::TokenRangeRetentionConfig>>(is);
     auto decodePriority = su::deserialize<executor::RetentionPriority>(is);
+    auto decodeDurationMs = intToDuration(su::deserialize<std::optional<size_t>>(is));
 
-    return KvCacheRetentionConfig{tokenRangeRetentionPriorities, decodePriority};
+    return KvCacheRetentionConfig{tokenRangeRetentionPriorities, decodePriority, decodeDurationMs};
 }
 
 void Serialization::serialize(KvCacheRetentionConfig const& kvCacheRetentionConfig, std::ostream& os)
 {
-    su::serialize(kvCacheRetentionConfig.getTokenRangeRetentionPriorities(), os);
+    su::serialize(kvCacheRetentionConfig.getTokenRangeRetentionConfigs(), os);
     su::serialize(kvCacheRetentionConfig.getDecodeRetentionPriority(), os);
+    su::serialize(durationToInt(kvCacheRetentionConfig.getDecodeDurationMs()), os);
 }
 
 size_t Serialization::serializedSize(KvCacheRetentionConfig const& config)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(config.getTokenRangeRetentionPriorities());
+    totalSize += su::serializedSize(config.getTokenRangeRetentionConfigs());
     totalSize += su::serializedSize(config.getDecodeRetentionPriority());
+    totalSize += su::serializedSize(durationToInt(config.getDecodeDurationMs()));
     return totalSize;
 }
 
-// TokenRangeRetentionPriority
-KvCacheRetentionConfig::TokenRangeRetentionPriority Serialization::deserializeTokenRangeRetentionPriority(
-    std::istream& is)
+// TokenRangeRetentionConfig
+KvCacheRetentionConfig::TokenRangeRetentionConfig Serialization::deserializeTokenRangeRetentionConfig(std::istream& is)
 {
     auto tokenStart = su::deserialize<SizeType32>(is);
     auto tokenEnd = su::deserialize<std::optional<SizeType32>>(is);
     auto priority = static_cast<RetentionPriority>(su::deserialize<RetentionPriority>(is));
+    auto durationMs = intToDuration(su::deserialize<std::optional<size_t>>(is));
 
-    return KvCacheRetentionConfig::TokenRangeRetentionPriority(tokenStart, tokenEnd, priority);
+    return KvCacheRetentionConfig::TokenRangeRetentionConfig(tokenStart, tokenEnd, priority, durationMs);
 }
 
 void Serialization::serialize(
-    KvCacheRetentionConfig::TokenRangeRetentionPriority const& tokenRangeRetentionPriority, std::ostream& os)
+    KvCacheRetentionConfig::TokenRangeRetentionConfig const& tokenRangeRetentionConfig, std::ostream& os)
 {
-    su::serialize(tokenRangeRetentionPriority.tokenStart, os);
-    su::serialize(tokenRangeRetentionPriority.tokenEnd, os);
-    su::serialize(tokenRangeRetentionPriority.priority, os);
+    su::serialize(tokenRangeRetentionConfig.tokenStart, os);
+    su::serialize(tokenRangeRetentionConfig.tokenEnd, os);
+    su::serialize(tokenRangeRetentionConfig.priority, os);
+    su::serialize(durationToInt(tokenRangeRetentionConfig.durationMs), os);
 }
 
-size_t Serialization::serializedSize(
-    KvCacheRetentionConfig::TokenRangeRetentionPriority const& tokenRangeRetentionPriority)
+size_t Serialization::serializedSize(KvCacheRetentionConfig::TokenRangeRetentionConfig const& tokenRangeRetentionConfig)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(tokenRangeRetentionPriority.tokenStart);
-    totalSize += su::serializedSize(tokenRangeRetentionPriority.tokenEnd);
-    totalSize += su::serializedSize(static_cast<RetentionPriority>(tokenRangeRetentionPriority.priority));
+    totalSize += su::serializedSize(tokenRangeRetentionConfig.tokenStart);
+    totalSize += su::serializedSize(tokenRangeRetentionConfig.tokenEnd);
+    totalSize += su::serializedSize(static_cast<RetentionPriority>(tokenRangeRetentionConfig.priority));
+    totalSize += su::serializedSize(durationToInt(tokenRangeRetentionConfig.durationMs));
     return totalSize;
 }
 

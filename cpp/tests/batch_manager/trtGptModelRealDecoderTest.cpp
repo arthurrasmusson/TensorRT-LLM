@@ -53,6 +53,7 @@ auto constexpr GPT_MODEL_DIR = "gpt2";
 auto constexpr GPTJ_MODEL_DIR = "gpt-j-6b";
 auto constexpr LLAMA_MODEL_DIR = "llama-7b-hf";
 auto constexpr MEDUSA_MODEL_DIR = "vicuna-7b-medusa";
+auto constexpr EAGLE_MODEL_DIR = "vicuna-7b-eagle";
 auto constexpr MAMBA_MODEL_DIR = "mamba-2.8b-hf";
 auto constexpr RECURRENTGEMMA_MODEL_DIR = "recurrentgemma-2b";
 auto constexpr EXPLICIT_DRAFT_MODEL_DIR = "vicuna-7b-redrafter";
@@ -162,7 +163,7 @@ void verifyOutput(RequestList const& finishedRequestList,
                     = std::min(numPredTokens, acceptedDraftTokensLengths[givenInputIdx * reqBeamWidth + beam] + 1);
             }
             if (modelSpec.mSpecDecodingMode.isMedusa() || modelSpec.mSpecDecodingMode.isLookaheadDecoding()
-                || modelSpec.mSpecDecodingMode.isExplicitDraftTokens())
+                || modelSpec.mSpecDecodingMode.isExplicitDraftTokens() || modelSpec.mSpecDecodingMode.isEagle())
             {
                 // WAR to ensure bulk execution of spec decoding.
                 // We hope that no request in batch can finish 2x faster than any other request.
@@ -682,16 +683,16 @@ void runIfbTest(fs::path const& modelPath, ModelSpec const& modelSpec, ModelIds 
 
     ASSERT_TRUE(fs::exists(modelPath));
 
-    auto trtGptModel = TrtGptModelFactory::create(modelPath, modelType, optionalParams);
-
-    if (modelSpec.mKVCacheType == KVCacheType::kDISABLED)
-    {
-        ASSERT_FALSE(trtGptModel->hasKVCacheManager());
-    }
-
     for (auto batchSize : batchSizes)
     {
         std::cout << "=== batchSize:" << batchSize << " ===\n";
+
+        auto trtGptModel = TrtGptModelFactory::create(modelPath, modelType, optionalParams);
+
+        if (modelSpec.mKVCacheType == KVCacheType::kDISABLED)
+        {
+            ASSERT_FALSE(trtGptModel->hasKVCacheManager());
+        }
 
         // Prepopulate KV cache for speculative decoding test
         bool const prepopulateKVCache = modelSpec.mMaxDraftTokens > 0;
@@ -1005,6 +1006,17 @@ std::shared_ptr<ModelSpec> getGptDraftTestsCompareModelSpec()
 }
 
 std::shared_ptr<ModelSpec> getMedusaTestsCompareModelSpec()
+{
+    auto pModelSpec = std::make_shared<ModelSpec>(LONG_INPUT_FILE, nvinfer1::DataType::kHALF);
+    pModelSpec->useGptAttentionPlugin();
+    pModelSpec->usePackedInput();
+    pModelSpec->setKVCacheType(KVCacheType::kPAGED);
+    pModelSpec->setMaxOutputLength(128);
+
+    return pModelSpec;
+}
+
+std::shared_ptr<ModelSpec> getEagleTestsCompareModelSpec()
 {
     auto pModelSpec = std::make_shared<ModelSpec>(LONG_INPUT_FILE, nvinfer1::DataType::kHALF);
     pModelSpec->useGptAttentionPlugin();
@@ -1562,6 +1574,27 @@ INSTANTIATE_TEST_SUITE_P(MedusaTests, ParamTest,
         testing::Values(false),        // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(true, false)   // enableCudaGraphMode
+        ),
+    generateTestName);
+
+INSTANTIATE_TEST_SUITE_P(EagleTests, ParamTest,
+    testing::Combine(testing::Values(ModelParams{EAGLE_MODEL_DIR, {2, 2}}),
+        testing::Values(
+            //
+            ModelSpec{INPUT_VICUNA_FILE, nvinfer1::DataType::kHALF, getEagleTestsCompareModelSpec()}
+                .useGptAttentionPlugin()
+                .usePackedInput()
+                .setKVCacheType(KVCacheType::kPAGED)
+                .useEagle()
+                .setBatchSizes({8})),
+        testing::Values(TrtGptModelType::InflightFusedBatching), testing::Values(TrtGptModelIfbTestType::BULK),
+        testing::Values(BeamConfig{1, {1}}),
+        testing::Values(std::nullopt), // maxTokensInPagedKvCache
+        testing::Values(std::nullopt), // freeGpuMemoryFraction
+        testing::Values(false),        // enableTrtOverlap
+        testing::Values(false),        // enableChunkedContext
+        testing::Values(false),        // enableStreamingMode
+        testing::Values(false)         // enableCudaGraphMode
         ),
     generateTestName);
 

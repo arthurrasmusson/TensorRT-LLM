@@ -234,15 +234,13 @@ protected:
         mWorldSize = mComm->getSize();
         mlocalRank = mComm->getRank() / 2;
         isSender = mComm->getRank() % 2 == 0;
-        auto sessionComm = mComm->split(static_cast<int>(isSender), mComm->getRank());
-        tensorrt_llm::mpi::MpiComm::setSession(std::move(sessionComm));
-
+        tensorrt_llm::mpi::MpiComm::setSession(mComm->split(static_cast<int>(isSender), mlocalRank));
         return mWorldSize;
     }
 
     void setUpCacheManager()
     {
-        auto constexpr numLayers = 2;
+        auto constexpr numLayers = 4;
         auto constexpr numHeads = 2;
         auto constexpr sizePerHead = 64;
         auto constexpr hiddenSize = numHeads * sizePerHead;
@@ -282,13 +280,13 @@ protected:
     {
         if (isSender)
         {
-            mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender<texec::kv_cache::CacheState>>(
-                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheOutputFormatter<MpiComm>>(mManager.get())));
+            mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
+                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
         }
         else
         {
-            mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver<texec::kv_cache::CacheState>>(
-                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheInputFormatter<MpiComm>>(mManager.get())));
+            mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
+                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
         }
     }
 
@@ -582,15 +580,13 @@ protected:
 
             if (mIsContext)
             {
-                mResponder = std::make_unique<DataResponder>(
-                    std::make_unique<MpiDataSender<texec::kv_cache::CacheState>>(*mComm, *mCacheState, mRankInInstance,
-                        std::make_unique<CacheOutputFormatter<MpiComm>>(mManager.get())));
+                mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
+                    *mComm, *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
             }
             else
             {
-                mRequester = std::make_unique<DataRequester>(
-                    std::make_unique<MpiDataReceiver<texec::kv_cache::CacheState>>(*mComm, *mCacheState,
-                        mRankInInstance, std::make_unique<CacheInputFormatter<MpiComm>>(mManager.get())));
+                mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
+                    *mComm, *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
             }
 
             std::vector<int> contextRankVec(mContextRankSize);
@@ -874,5 +870,10 @@ INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest1, MpiAsymmetricalCacheTest,
     testing::Combine(testing::Values(4), testing::Values(1), testing::Values(1), testing::Values(4), testing::Values(4),
         testing::Values(4), testing::Values(4), testing::Values(8),
         testing::Values(nvinfer1::DataType::kFLOAT, nvinfer1::DataType::kINT8)));
+
+INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest2, MpiAsymmetricalCacheTest,
+    testing::Combine(testing::Values(1), testing::Values(2), testing::Values(1), testing::Values(1, 4),
+        testing::Values(16), testing::Values(16), testing::Values(4), testing::Values(8),
+        testing::Values(nvinfer1::DataType::kFLOAT)));
 
 #endif

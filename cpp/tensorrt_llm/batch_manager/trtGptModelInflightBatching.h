@@ -61,6 +61,9 @@ class BasePeftCacheManager;
 // Algorithms
 class CapacityScheduler;
 class MicroBatchScheduler;
+class PauseRequests;
+class AssignReqSeqSlots;
+class AllocateKvCache;
 
 namespace utils
 {
@@ -233,8 +236,6 @@ private:
     ///        Only possible if no requests are currently in-flight.
     /// @param beamWidth New operating beam width. Must be smaller than initial maxBeamWidth.
     void changeBeamWidth(SizeType32 beamWidth);
-
-    void assignReqSeqSlots(ScheduledRequests const& scheduledRequests);
 
     /// @details Should be called after setting up the current batch in executeBatch to get the correct number of
     /// context tokens.
@@ -413,6 +414,11 @@ private:
     SizeType32 mNumBuffers;
     // Current operating beam width. Can be changed with changeBeamWidth function.
     SizeType32 mOperatingBeamWidth;
+    // Runtime batch size optimized during execution for microBatchScheduler:
+    /// The max batch size recommended by the dynamic tuner
+    SizeType32 mMaxBatchSizeTunerRecommended;
+    /// The min of mMaxBatchSize and mMaxBatchSizeTunerRecommended
+    SizeType32 mMaxBatchSizeRuntime;
 
     /******************** Buffers ********************/
     // Buffers for each micro batch. Unfused path (mCtxGenFusion==false) uses two times the buffers.
@@ -451,11 +457,18 @@ private:
     bool mSpeculativeDecodingFastLogits;
     std::atomic<bool> mDraftModelThreadShouldExit{false};
     bool mIsLeaderInOrchMode{false};
+    // List of completed draft requests which logits will need to be sent to the target model.
+    RequestVector mDraftRequestsWaitingToSendLogits;
 
     /******************** Algorithms ********************/
+    // Algorithms are reentrant, they are assigned a state at
+    // construction time and it is not modified through execution, hence they are const.
     // Schedulers that select which requests to run in each iteration
-    std::unique_ptr<tensorrt_llm::batch_manager::CapacityScheduler> mCapacityScheduler;
-    std::unique_ptr<tensorrt_llm::batch_manager::MicroBatchScheduler> mMicroBatchScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::CapacityScheduler const> mCapacityScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::MicroBatchScheduler const> mMicroBatchScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::PauseRequests const> mPauseRequests;
+    std::unique_ptr<tensorrt_llm::batch_manager::AssignReqSeqSlots const> mAssignReqSeqSlots;
+    std::unique_ptr<tensorrt_llm::batch_manager::AllocateKvCache const> mAllocateKvCache;
 };
 
 } // namespace tensorrt_llm::batch_manager

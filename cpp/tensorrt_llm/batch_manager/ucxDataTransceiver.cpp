@@ -22,9 +22,6 @@ namespace tensorrt_llm::batch_manager
 
 using CacheState = tensorrt_llm::executor::kv_cache::CacheState;
 
-template class UcxDataSender<CacheState>;
-template class UcxDataReceiver<CacheState>;
-
 #if __cplusplus
 extern "C"
 {
@@ -34,8 +31,8 @@ extern "C"
         SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager)
     {
         using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-        auto sender = std::make_unique<UcxDataSender<CacheState>>(std::make_unique<UcxCommFactory>(),
-            std::move(selfCacheState), selfIndex, std::make_unique<CacheOutputFormatter<UcxComm>>(cacheManager));
+        auto sender = std::make_unique<UcxDataSender>(std::make_unique<UcxCommFactory>(), std::move(selfCacheState),
+            selfIndex, std::make_unique<CacheFormatter>(cacheManager));
         return std::make_unique<DataResponder>(std::move(sender));
     }
 
@@ -43,16 +40,15 @@ extern "C"
         SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager)
     {
         using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-        return std::make_unique<DataRequester>(
-            std::make_unique<UcxDataReceiver<CacheState>>(std::make_unique<UcxCommFactory>(), std::move(selfCacheState),
-                selfIndex, std::make_unique<CacheInputFormatter<UcxComm>>(cacheManager)));
+        return std::make_unique<DataRequester>(std::make_unique<UcxDataReceiver>(std::make_unique<UcxCommFactory>(),
+            std::move(selfCacheState), selfIndex, std::make_unique<CacheFormatter>(cacheManager)));
     }
 
 #if __cplusplus
 }
 #endif
 
-void UcxComm::sendBuffer(runtime::IBuffer const& buf) const
+void UcxEndpoint::sendBuffer(runtime::IBuffer const& buf) const
 {
     ucxx::Tag dataTag{mSendTag};
 
@@ -68,7 +64,7 @@ void UcxComm::sendBuffer(runtime::IBuffer const& buf) const
     req->checkError();
 }
 
-void UcxComm::recvBuffer(runtime::IBuffer& buf) const
+void UcxEndpoint::recvBuffer(runtime::IBuffer& buf) const
 {
     ucxx::Tag dataTag{mRecvTag};
 
@@ -84,7 +80,7 @@ void UcxComm::recvBuffer(runtime::IBuffer& buf) const
     req->checkError();
 }
 
-RequestInfo UcxComm::recvRequestInfo() const
+RequestInfo UcxEndpoint::recvRequestInfo() const
 {
     ucxx::Tag infoTag{mRecvTag | mInfoTag};
     ucxx::TagMask infoMask{mEndpointMask | mFlagMask};
@@ -116,7 +112,7 @@ RequestInfo UcxComm::recvRequestInfo() const
     return info;
 }
 
-void UcxComm::sendRequestInfo(RequestInfo const& info) const
+void UcxEndpoint::sendRequestInfo(RequestInfo const& info) const
 {
     // [FIXME] setRequestTag(info.getRequestId());
     ucxx::Tag infoTag{mSendTag | mInfoTag};
@@ -148,7 +144,7 @@ void UcxComm::sendRequestInfo(RequestInfo const& info) const
     }
 }
 
-void UcxComm::initializeEndpointTag(int maxTryTimes)
+void UcxEndpoint::initializeEndpointTag(int maxTryTimes)
 {
     // [FIXME] IP exchange seems to be more robust to ensure tag establishment,
     // i.e. different peers can use the same port number to connect with self worker
@@ -193,7 +189,7 @@ void UcxComm::initializeEndpointTag(int maxTryTimes)
     }
 }
 
-void UcxComm::setRequestTag(LlmRequest::RequestIdType const requestId)
+void UcxEndpoint::setRequestTag(LlmRequest::RequestIdType const requestId)
 {
     uint16_t truncatedRequestId = requestId;
     mSendTag = static_cast<ucxx::Tag>((mSendTag & ~mRequestIdMask) | (truncatedRequestId << 16));

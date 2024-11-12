@@ -10,45 +10,12 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/common/jsonSerializeOptional.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
-
-namespace nlohmann
-{
-
-template <typename T>
-struct adl_serializer<std::optional<T>>
-{
-    static void to_json(json& j, std::optional<T> const& opt)
-    {
-        if (opt == std::nullopt)
-        {
-            j = nullptr;
-        }
-        else
-        {
-            j = opt.value(); // this will call adl_serializer<T>::to_json which will
-                             // find the free function to_json in T's namespace!
-        }
-    }
-
-    static void from_json(json const& j, std::optional<T>& opt)
-    {
-        if (j.is_null())
-        {
-            opt = std::nullopt;
-        }
-        else
-        {
-            opt = j.template get<T>(); // same as above, but with
-                                       // adl_serializer<T>::from_json
-        }
-    }
-};
-} // namespace nlohmann
 
 namespace tensorrt_llm::executor
 {

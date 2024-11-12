@@ -12,9 +12,7 @@
 
 #pragma once
 
-#include "tensorrt_llm/batch_manager/capacityScheduler.h"
 #include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/runtime/generationInput.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -32,6 +30,8 @@ class GptSession;
 
 namespace tensorrt_llm::batch_manager
 {
+class CapacityScheduler;
+class MicroBatchScheduler;
 class LlmRequest;
 
 class [[deprecated("Use the InflightBatching model instead.")]] TrtGptModelV1 : public TrtGptModel
@@ -54,6 +54,8 @@ public:
     TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, runtime::RawEngine const& rawEngine,
         TrtGptModelOptionalParams const& optionalParams = TrtGptModelOptionalParams());
+
+    ~TrtGptModelV1();
 
     // V1 model is stateless, so nothing to do here
     void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false) override{};
@@ -128,12 +130,13 @@ private:
         SizeType32 maxBatchSize, bool normalizeLogProbs);
 
     std::shared_ptr<runtime::GptSession> mSession;
-    tensorrt_llm::batch_manager::CapacityScheduler mCapacityScheduler;
-    tensorrt_llm::batch_manager::MicroBatchScheduler mMicroBatchScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::CapacityScheduler const> mCapacityScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::MicroBatchScheduler const> mMicroBatchScheduler;
     std::shared_ptr<BasePeftCacheManager> mPeftCacheManager;
     IterationStatsV1 mLastIterationStatsV1;
     // Iteration counter used to distinguish debug output
     executor::IterationType mIterCounter{0};
+    SizeType32 mPpTimesMaxBatchSize;
 };
 
 } // namespace tensorrt_llm::batch_manager

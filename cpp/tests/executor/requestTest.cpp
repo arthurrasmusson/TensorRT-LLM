@@ -159,7 +159,7 @@ TEST(RequestTest, serializeDeserialize)
         std::make_optional<std::vector<SizeType32>>({0, 1, 2, 3}), std::list<VecTokens>{{1, 2, 3}, {2, 3, 4}},
         std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
         PromptTuningConfig(embeddingTable, VecTokenExtraIds({1, 2, 3, 4})), std::nullopt, std::nullopt,
-        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 1, 10)}, 10), "Processor",
+        KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionConfig(0, 1, 10)}, 10), "Processor",
         std::nullopt, 1234, false, 0.5);
 
     auto serializedSize = Serialization::serializedSize(request);
@@ -186,10 +186,10 @@ TEST(RequestTest, serializeDeserialize)
     EXPECT_EQ(newRequest.getClientId(), request.getClientId());
     EXPECT_EQ(newRequest.getReturnAllGeneratedTokens(), request.getReturnAllGeneratedTokens());
     EXPECT_EQ(newRequest.getPriority(), request.getPriority());
-    EXPECT_EQ(newRequest.getKvCacheRetentionConfig().value().getTokenRangeRetentionPriorities(),
-        request.getKvCacheRetentionConfig().value().getTokenRangeRetentionPriorities());
-    EXPECT_EQ(newRequest.getKvCacheRetentionConfig().value().getTokenRangeRetentionPriorities(),
-        request.getKvCacheRetentionConfig().value().getTokenRangeRetentionPriorities());
+    EXPECT_EQ(newRequest.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs(),
+        request.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs());
+    EXPECT_EQ(newRequest.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs(),
+        request.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs());
     EXPECT_TRUE(request.getPromptTuningConfig().has_value());
     EXPECT_TRUE(newRequest.getPromptTuningConfig().has_value());
     EXPECT_EQ(newRequest.getPromptTuningConfig()->getInputTokenExtraIds(),

@@ -12,8 +12,6 @@
 
 #pragma once
 
-#include "tensorrt_llm/batch_manager/capacityScheduler.h"
-#include "tensorrt_llm/batch_manager/microBatchScheduler.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -29,7 +27,8 @@ class NcclCommunicator;
 
 namespace tensorrt_llm::batch_manager
 {
-
+class CapacityScheduler;
+class MicroBatchScheduler;
 class EncoderBuffers;
 
 class TrtEncoderModel : public TrtGptModel
@@ -46,7 +45,9 @@ public:
         runtime::RawEngine const& rawEngine, std::shared_ptr<nvinfer1::ILogger> logger,
         TrtGptModelOptionalParams const& optionalParams);
 
-    void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false);
+    ~TrtEncoderModel();
+
+    void terminateRequest(std::shared_ptr<LlmRequest> const& llmRequest, bool pause = false) override;
     void forward(RequestVector& activeRequests);
 
     void forwardSync() override;
@@ -170,8 +171,8 @@ private:
     ReqIdsSet mInflightReqIds;
     ReqIdsSet mReqIdsToPause;
 
-    tensorrt_llm::batch_manager::CapacityScheduler mCapacityScheduler;
-    tensorrt_llm::batch_manager::MicroBatchScheduler mMicroBatchScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::CapacityScheduler const> mCapacityScheduler;
+    std::unique_ptr<tensorrt_llm::batch_manager::MicroBatchScheduler const> mMicroBatchScheduler;
 
     SizeType32 mHiddenSize;  // already divided by Tensor Parallelism
     SizeType32 mMaxInputLen; // WAR for max_input_len == max_seq_len at all circumstances

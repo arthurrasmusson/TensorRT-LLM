@@ -91,6 +91,7 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     cacheIndirBatchedCopyDstOffsets
         = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
     cacheIndirBatchedCopySizes = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
+    skipCrossAttnBlocks = manager.pinnedPool(ITensor::makeShape({1}), nvinfer1::DataType::kBOOL);
 
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
@@ -262,6 +263,11 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
         inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", crossKvCacheBlockPoolMapping);
         inputBuffers.insert_or_assign("cross_attention_mask", crossAttentionMaskDevice);
         inputBuffers.insert_or_assign("cross_attention_packed_mask", crossAttentionPackedMaskDevice);
+    }
+
+    if (skipCrossAttnBlocks)
+    {
+        inputBuffers.insert_or_assign("skip_cross_attn_blocks", skipCrossAttnBlocks);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -661,6 +667,12 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void TransformerBuffers::copySkipCrossAttnBlocks(bool const& _skipCrossAttnBlocks, runtime::TllmRuntime const& runtime)
+{
+    auto const& manager = runtime.getBufferManager();
+    manager.copy(&_skipCrossAttnBlocks, *skipCrossAttnBlocks);
 }
 
 } // namespace tensorrt_llm::batch_manager

@@ -425,23 +425,28 @@ TEST(SerializeUtilsTest, EagleConfig)
 
 TEST(SerializeUtilsTest, KvCacheRetentionConfig)
 {
+
+    using namespace std::chrono_literals;
+
     auto kvCacheRetentionConfig = texec::KvCacheRetentionConfig();
     auto kvCacheRetentionConfig2 = serializeDeserialize(kvCacheRetentionConfig);
-    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionPriorities(),
-        kvCacheRetentionConfig2.getTokenRangeRetentionPriorities());
+    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionConfigs(),
+        kvCacheRetentionConfig2.getTokenRangeRetentionConfigs());
     EXPECT_EQ(
         kvCacheRetentionConfig.getDecodeRetentionPriority(), kvCacheRetentionConfig2.getDecodeRetentionPriority());
+    EXPECT_EQ(kvCacheRetentionConfig.getDecodeDurationMs(), kvCacheRetentionConfig2.getDecodeDurationMs());
 
     kvCacheRetentionConfig
-        = texec::KvCacheRetentionConfig({texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(0, 1, 80),
-                                            texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(1, 2, 50),
-                                            texec::KvCacheRetentionConfig::TokenRangeRetentionPriority(2, 3, 30)},
-            5);
+        = texec::KvCacheRetentionConfig({texec::KvCacheRetentionConfig::TokenRangeRetentionConfig(0, 1, 80),
+                                            texec::KvCacheRetentionConfig::TokenRangeRetentionConfig(1, 2, 50),
+                                            texec::KvCacheRetentionConfig::TokenRangeRetentionConfig(2, 3, 30)},
+            5, 30s);
     kvCacheRetentionConfig2 = serializeDeserialize(kvCacheRetentionConfig);
-    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionPriorities(),
-        kvCacheRetentionConfig2.getTokenRangeRetentionPriorities());
+    EXPECT_EQ(kvCacheRetentionConfig.getTokenRangeRetentionConfigs(),
+        kvCacheRetentionConfig2.getTokenRangeRetentionConfigs());
     EXPECT_EQ(
         kvCacheRetentionConfig.getDecodeRetentionPriority(), kvCacheRetentionConfig2.getDecodeRetentionPriority());
+    EXPECT_EQ(kvCacheRetentionConfig.getDecodeDurationMs(), kvCacheRetentionConfig2.getDecodeDurationMs());
 }
 
 TEST(SerializeUtilsTest, DecodingConfig)

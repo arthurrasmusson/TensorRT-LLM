@@ -1456,6 +1456,7 @@ TEST_F(GptExecutorTest, GetLatestRequestStatsScheduling)
     auto stats = executor.getLatestRequestStats();
     SizeType32 numFinished = 0;
     SizeType32 const maxActiveSize = 64; // Decided by the model
+
     // The 6th iteration request stat may or may not be available when getLatestRequestStats
     // is called. When there are no other active or inTransmission requests, there will be
     // another request stats to properly reset all the statistics to zero.
@@ -1476,6 +1477,71 @@ TEST_F(GptExecutorTest, GetLatestRequestStatsScheduling)
         EXPECT_EQ(numReqs + numFinished, requestParams.size()); // Should report all unfinished requests
         EXPECT_TRUE(numReqsActive <= maxActiveSize); // Not all requests are active due to max active size limit.
         numFinished += numReqsJustDone;
+    }
+}
+
+TEST_F(GptExecutorTest, GetRequestStatsMultipleRequests)
+{
+    bool streaming = false;
+    bool excludeInputFromOutput = false;
+    OutputConfig outConfig;
+    outConfig.excludeInputFromOutput = excludeInputFromOutput;
+
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+    executorConfig.setRequestStatsMaxIterations(1000);
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    auto sendRequestWaitForResponseFn = [&]()
+    {
+        Request request({1, 2, 3}, 5);
+        auto requestId = executor.enqueueRequest(request);
+        bool isFinalResponse = false;
+        while (!isFinalResponse)
+        {
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(requestId, waitTime);
+            for (auto response : responses)
+            {
+                if (response.getResult().isFinal)
+                {
+                    isFinalResponse = true;
+                    break;
+                }
+            }
+        }
+        return requestId;
+    };
+
+    std::unordered_map<IdType, size_t> requestIdToGenerationComplete;
+    auto updateStats = [&]()
+    {
+        auto stats = executor.getLatestRequestStats();
+        for (auto& stat : stats)
+        {
+            for (auto const& request : stat.requestStats)
+            {
+                // only check and aggregate results when request is completed
+                if (request.stage == RequestStage::kGENERATION_COMPLETE)
+                {
+                    requestIdToGenerationComplete[request.id] += 1;
+                }
+            }
+        }
+    };
+
+    auto requestId = sendRequestWaitForResponseFn();
+    requestIdToGenerationComplete[requestId] = 0;
+    updateStats();
+
+    requestId = sendRequestWaitForResponseFn();
+    requestIdToGenerationComplete[requestId] = 0;
+    updateStats();
+
+    for (auto [key, value] : requestIdToGenerationComplete)
+    {
+        EXPECT_EQ(value, 1);
     }
 }
 
@@ -3997,6 +4063,126 @@ TEST_F(GptExecutorTest, LogitsPostProcessorThrow)
     EXPECT_THROW({ auto reqId = executor.enqueueRequest(std::move(request)); }, tensorrt_llm::common::TllmException);
 }
 
+static Response executeDraftRequest(Executor& executor)
+{
+    OutputConfig outputConfig;
+    outputConfig.returnGenerationLogits = true;
+
+    // Create the request
+    SizeType32 maxNewTokens = 4;
+    VecTokens inputTokens{1, 2, 3, 4};
+
+    Request request{std::move(inputTokens), maxNewTokens};
+    request.setOutputConfig(outputConfig);
+
+    // Enqueue the request
+    auto requestId = executor.enqueueRequest(std::move(request));
+
+    // Wait for the response
+    auto responses = executor.awaitResponses(requestId);
+
+    return responses.at(0);
+}
+
+static Response executeTargetRequest(Executor& executor, Result const& draftResult)
+{
+    // Create the request
+    SizeType32 maxNewTokens = 5;
+    VecTokens inputTokens{1, 2, 3, 4};
+
+    Request request{std::move(inputTokens), maxNewTokens};
+
+    VecTokens const& outputTokenIds = draftResult.outputTokenIds.at(0);
+    VecTokens draftTokens(outputTokenIds.end() - 4, outputTokenIds.end());
+
+    auto const& logitsInfo = draftResult.specDecFastLogitsInfo.value();
+    auto logitsTensor = logitsInfo.toTensor();
+
+    ExternalDraftTokensConfig draftTokensConfig(
+        std::move(draftTokens), logitsTensor, std::nullopt /* acceptance threshold */, true /* fastLogits */);
+    request.setExternalDraftTokensConfig(draftTokensConfig);
+
+    // Enqueue the request
+    auto requestId = executor.enqueueRequest(std::move(request));
+
+    // Wait for the response
+    auto responses = executor.awaitResponses(requestId);
+
+    return responses.at(0);
+}
+
+class SpeculativeDecodingTest : public GptExecutorTest
+{
+};
+
+TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
+{
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+    auto trtDraftEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath
+        = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-gpu";
+
+    FloatType freeGpuMemoryFraction = 0.3;
+    auto kvCacheConfig
+        = KvCacheConfig(true /* enableBlockReuse */, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction);
+    executorConfig.setKvCacheConfig(kvCacheConfig);
+
+    tensorrt_llm::mpi::initialize(tensorrt_llm::mpi::MpiThreadSupport::THREAD_MULTIPLE);
+    int const worldSize = tensorrt_llm::mpi::MpiComm::world().getSize();
+    ASSERT_EQ(worldSize, 3);
+    int const myRank = tensorrt_llm::mpi::MpiComm::world().getRank();
+    bool const isOrchestrator = (myRank == 0);
+
+    auto orchestratorConfig
+        = OrchestratorConfig(isOrchestrator, "" /* workerExecutablePath */, nullptr, false /* spawnPrcesses */);
+    auto parallelConfig = ParallelConfig(
+        CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
+    executorConfig.setParallelConfig(parallelConfig);
+
+    auto specDecConfig = SpeculativeDecodingConfig(true /* fastLogits */);
+    executorConfig.setSpecDecConfig(specDecConfig);
+
+    std::unique_ptr<Executor> draftExecutor;
+    std::unique_ptr<Executor> targetExecutor;
+
+    if (isOrchestrator)
+    {
+        auto executorConfigDraft = executorConfig;
+        parallelConfig.setParticipantIds({1});
+        executorConfigDraft.setParallelConfig(parallelConfig);
+
+        draftExecutor = std::make_unique<Executor>(trtDraftEnginePath, ModelType::kDECODER_ONLY, executorConfigDraft);
+
+        parallelConfig.setParticipantIds({2});
+        executorConfig.setParallelConfig(parallelConfig);
+
+        targetExecutor = std::make_unique<Executor>(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+    }
+    else if (myRank == 1) // draft model process
+    {
+        parallelConfig.setParticipantIds({1});
+        parallelConfig.setDeviceIds({0});
+        executorConfig.setParallelConfig(parallelConfig);
+        draftExecutor = std::make_unique<Executor>(trtDraftEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+    }
+    else if (myRank == 2) // target model process
+    {
+        parallelConfig.setParticipantIds({2});
+        parallelConfig.setDeviceIds({0});
+        executorConfig.setParallelConfig(parallelConfig);
+        draftExecutor = std::make_unique<Executor>(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+    }
+
+    if (isOrchestrator)
+    {
+        auto response = executeDraftRequest(*draftExecutor);
+        ASSERT_FALSE(response.hasError());
+        response = executeTargetRequest(*targetExecutor, response.getResult());
+        ASSERT_FALSE(response.hasError());
+    }
+}
+
 class MockedModel : public Model
 {
     using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
@@ -4027,6 +4213,10 @@ public:
     MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
     MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
     MOCK_METHOD(void, resetIterationStats, (), ());
+    MOCK_METHOD(
+        std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager>, getKVCacheManager, (), ());
+    MOCK_METHOD(std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager const>, getKVCacheManager,
+        (), (const));
 };
 
 TEST_P(ParamTest, MockedModel)
@@ -4987,6 +5177,109 @@ TEST_F(GptExecutorTest, SingleRequestInvalidInputs)
                 }
             }
             ++iter;
+        }
+        EXPECT_EQ(done, true);
+    }
+}
+
+TEST_F(GptExecutorTest, ExecutorKVCacheManager)
+{
+
+    bool streaming = true;
+    int numRequests = 3;
+
+    SizeType32 beamWidth = 1;
+    SizeType32 maxNewTokens = 5;
+    auto executorConfig = ExecutorConfig(beamWidth);
+    auto kvCacheConfig = KvCacheConfig(true, 256);
+    kvCacheConfig.setEventBufferMaxSize(1024);
+    executorConfig.setKvCacheConfig(kvCacheConfig);
+
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    auto kvCacheManager = *executor.getKVCacheEventManager();
+
+    // Created event should be available before any requests.
+    auto events = kvCacheManager->getLatestEvents(std::chrono::seconds(1));
+    EXPECT_EQ(events.size(), 1);
+    EXPECT_TRUE(std::holds_alternative<KVCacheCreatedData>(events.front().data));
+
+    // Create requests
+    std::vector<Request> requests;
+    for (int request = 0; request < 3; request++)
+    {
+        VecTokens inputTokens;
+        for (int i = 0; i < 127; i++)
+        {
+            inputTokens.emplace_back(i + request);
+        }
+        requests.emplace_back(inputTokens, maxNewTokens, streaming);
+    }
+
+    for (auto req = 0; req < requests.size(); ++req)
+    {
+        auto& request = requests.at(req);
+
+        auto requestId = executor.enqueueRequest(std::move(request));
+
+        // Get the new tokens
+        bool done = false;
+        int iter = 0;
+        while (!done && iter < mMaxWaitMs)
+        {
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(requestId, waitTime);
+            for (auto& response : responses)
+            {
+                if (response.hasError())
+                {
+                    // This request failed for some reason, get error msg
+                    std::string errStr
+                        = "Request id " + std::to_string(requestId) + " failed with err " + response.getErrorMsg();
+                    FAIL();
+                }
+                else
+                {
+                    auto result = response.getResult();
+                    done = result.isFinal;
+                    if (done)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        auto events = kvCacheManager->getLatestEvents(std::chrono::milliseconds(100));
+                        if (req == 0)
+                        {
+                            EXPECT_EQ(events.size(), 2);
+
+                            // Store the first context block
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.front().data).parentHash, std::nullopt);
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.front().data).blocks.size(), 1);
+                            // Store the second (now completed) context block and the partial decode block.
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.back().data).blocks.size(), 2);
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.front().data).blocks[0].blockHash,
+                                std::get<KVCacheStoredData>(events.back().data).parentHash);
+                        }
+                        else
+                        {
+                            EXPECT_EQ(events.size(), 4);
+
+                            // Remove a block to make room for the second context block. On the second request, we need
+                            // to remove 2 blocks.
+                            EXPECT_EQ(std::get<KVCacheRemovedData>(events.front().data).blockHashes.size(), req);
+                            events.pop_front();
+                            // Store the first filled context block
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.front().data).blocks.size(), 1);
+                            events.pop_front();
+                            // Remove a block for the decode phase
+                            EXPECT_EQ(std::get<KVCacheRemovedData>(events.front().data).blockHashes.size(), 1);
+                            events.pop_front();
+                            // Store the final context block and the decode block
+                            EXPECT_EQ(std::get<KVCacheStoredData>(events.front().data).blocks.size(), 2);
+                        }
+                    }
+                }
+            }
+            iter++;
         }
         EXPECT_EQ(done, true);
     }

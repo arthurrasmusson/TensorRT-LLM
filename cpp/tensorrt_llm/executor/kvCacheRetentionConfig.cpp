@@ -16,10 +16,11 @@ namespace tensorrt_llm::executor
 {
 
 KvCacheRetentionConfig::KvCacheRetentionConfig(
-    std::vector<KvCacheRetentionConfig::TokenRangeRetentionPriority> const& tokenRangeRetentionPriorities,
-    RetentionPriority decodeRetentionPriority)
-    : mTokenRangeRetentionPriorities(std::vector<TokenRangeRetentionPriority>(tokenRangeRetentionPriorities))
+    std::vector<KvCacheRetentionConfig::TokenRangeRetentionConfig> const& tokenRangeRetentionPriorities,
+    RetentionPriority decodeRetentionPriority, std::optional<std::chrono::milliseconds> decodeDurationMs)
+    : mTokenRangeRetentionConfigs(std::vector<TokenRangeRetentionConfig>(tokenRangeRetentionPriorities))
     , mDecodeRetentionPriority{decodeRetentionPriority}
+    , mDecodeDurationMs{decodeDurationMs}
 {
 
     // The token ranges must be non-overlapping
@@ -34,15 +35,15 @@ KvCacheRetentionConfig::KvCacheRetentionConfig(
 
     // Validate that these constraints hold, and throw an error otherwise.
 
-    std::sort(mTokenRangeRetentionPriorities.begin(), mTokenRangeRetentionPriorities.end(),
-        [](TokenRangeRetentionPriority const& x, TokenRangeRetentionPriority const& y)
+    std::sort(mTokenRangeRetentionConfigs.begin(), mTokenRangeRetentionConfigs.end(),
+        [](TokenRangeRetentionConfig const& x, TokenRangeRetentionConfig const& y)
         { return x.tokenStart < y.tokenStart; });
 
-    size_t numRanges = mTokenRangeRetentionPriorities.size();
+    size_t numRanges = mTokenRangeRetentionConfigs.size();
 
     for (size_t i = 0; i < numRanges; i++)
     {
-        auto entry = mTokenRangeRetentionPriorities[i];
+        auto entry = mTokenRangeRetentionConfigs[i];
         if (!entry.tokenEnd.has_value() && i != numRanges - 1)
         {
             throw std::invalid_argument("Invalid use of end indicator.");
@@ -57,7 +58,7 @@ KvCacheRetentionConfig::KvCacheRetentionConfig(
         }
         if (i != numRanges - 1)
         {
-            if (*entry.tokenEnd > mTokenRangeRetentionPriorities[i + 1].tokenStart)
+            if (*entry.tokenEnd > mTokenRangeRetentionConfigs[i + 1].tokenStart)
             {
                 throw std::invalid_argument("Token ranges must be non-overlapping.");
             }
@@ -65,10 +66,10 @@ KvCacheRetentionConfig::KvCacheRetentionConfig(
     }
 }
 
-std::vector<KvCacheRetentionConfig::TokenRangeRetentionPriority>
-KvCacheRetentionConfig::getTokenRangeRetentionPriorities() const
+std::vector<KvCacheRetentionConfig::TokenRangeRetentionConfig>
+KvCacheRetentionConfig::getTokenRangeRetentionConfigs() const
 {
-    return mTokenRangeRetentionPriorities;
+    return mTokenRangeRetentionConfigs;
 }
 
 RetentionPriority KvCacheRetentionConfig::getDecodeRetentionPriority() const
@@ -76,26 +77,31 @@ RetentionPriority KvCacheRetentionConfig::getDecodeRetentionPriority() const
     return mDecodeRetentionPriority;
 }
 
-std::vector<std::optional<RetentionPriority>> KvCacheRetentionConfig::getPerBlockEvictionPolicy(
-    SizeType32 blockSize, SizeType32 seqLen)
+std::optional<std::chrono::milliseconds> KvCacheRetentionConfig::getDecodeDurationMs() const
 {
-    std::vector<std::optional<RetentionPriority>> perBlockPriorities;
+    return mDecodeDurationMs;
+}
+
+std::vector<RetentionPriorityAndDuration> KvCacheRetentionConfig::getPerBlockRetentionPriorityDuration(
+    SizeType32 blockSize, SizeType32 seqLen) const
+{
+    std::vector<RetentionPriorityAndDuration> perBlockRetentions;
 
     SizeType32 tokenLoc = 0;
     size_t pointer = 0;
-    size_t numRanges = mTokenRangeRetentionPriorities.size();
+    size_t numRanges = mTokenRangeRetentionConfigs.size();
 
     // Handle cases where the first range doesn't start at 0
-    for (; !mTokenRangeRetentionPriorities.empty() && tokenLoc < mTokenRangeRetentionPriorities[0].tokenStart
+    for (; !mTokenRangeRetentionConfigs.empty() && tokenLoc < mTokenRangeRetentionConfigs[0].tokenStart
          && tokenLoc < seqLen;
          tokenLoc += blockSize)
     {
-        perBlockPriorities.emplace_back(std::nullopt);
+        perBlockRetentions.emplace_back(std::nullopt, std::nullopt);
     }
 
     while (tokenLoc < seqLen && pointer < numRanges)
     {
-        TokenRangeRetentionPriority entry = mTokenRangeRetentionPriorities[pointer];
+        TokenRangeRetentionConfig entry = mTokenRangeRetentionConfigs[pointer];
 
         if (entry.tokenEnd.has_value() && tokenLoc >= entry.tokenEnd)
         {
@@ -103,18 +109,26 @@ std::vector<std::optional<RetentionPriority>> KvCacheRetentionConfig::getPerBloc
         }
         else
         {
-            perBlockPriorities.emplace_back(
-                tokenLoc < entry.tokenStart ? std::nullopt : std::optional<RetentionPriority>(entry.priority));
+
+            if (tokenLoc < entry.tokenStart)
+            {
+                perBlockRetentions.emplace_back(std::nullopt, std::nullopt);
+            }
+            else
+            {
+                perBlockRetentions.emplace_back(entry.priority, entry.durationMs);
+            }
+
             tokenLoc += blockSize;
         }
     }
 
     for (; tokenLoc < seqLen; tokenLoc += blockSize)
     {
-        perBlockPriorities.emplace_back(std::nullopt);
+        perBlockRetentions.emplace_back(std::nullopt, std::nullopt);
     }
 
-    return perBlockPriorities;
+    return perBlockRetentions;
 }
 
 } // namespace tensorrt_llm::executor

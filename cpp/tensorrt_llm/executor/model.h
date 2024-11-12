@@ -107,6 +107,11 @@ public:
     {
         return 0;
     }
+
+    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager>
+    getKVCacheManager() = 0;
+    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager const>
+    getKVCacheManager() const = 0;
 };
 
 } // namespace tensorrt_llm::executor

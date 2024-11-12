@@ -88,4 +88,5 @@ TEST(ExternalDraftTokensConfigTest, serializeDeserialize)
     EXPECT_EQ(newConfig.getTokens(), config.getTokens());
     EXPECT_EQ(newConfig.getLogits(), std::nullopt);
     EXPECT_EQ(newConfig.getAcceptanceThreshold(), config.getAcceptanceThreshold());
+    EXPECT_EQ(newConfig.getFastLogits(), config.getFastLogits());
 }

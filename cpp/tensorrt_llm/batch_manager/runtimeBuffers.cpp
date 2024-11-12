@@ -433,6 +433,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto* logitsIdsHostPtr = bufferCast<SizeType32>(*logitsIdsHost);
     bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kChatGlm;
     bool const isGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
+    bool isSkipCrossAttn = true;
 
     maxKvCacheLengthRounded = 0;
 
@@ -710,6 +711,24 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             lookaheadBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
                 decoderBuffers.lookaheadBuffers.value(), runtime, modelConfig, worldConfig);
         }
+    }
+
+    // check skipCrossAttnBlocks
+    if (transformerBuffers && modelConfig.skipCrossAttnBlocks())
+    {
+        for (auto const& requests : {contextRequests, genRequests})
+        {
+            for (auto const& llmReq : requests)
+            {
+                bool tmpValue = false;
+                if (llmReq->getSkipCrossAttnBlocks() != nullptr)
+                {
+                    manager.copy(*llmReq->getSkipCrossAttnBlocks(), &tmpValue);
+                }
+                isSkipCrossAttn &= tmpValue;
+            }
+        }
+        transformerBuffers->copySkipCrossAttnBlocks(isSkipCrossAttn, runtime);
     }
 
     if (isChatGlm || isGlm)

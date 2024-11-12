@@ -62,12 +62,10 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
     if (mCommType == CommType::MPI)
     {
         mMpiWorldComm = std::addressof(tensorrt_llm::mpi::MpiComm::world());
-        mDataResponder = std::make_unique<DataResponder>(
-            std::make_unique<MpiDataSender<executor::kv_cache::CacheState>>(*mMpiWorldComm, *mCacheState,
-                worldConfig.getRank(), std::make_unique<CacheOutputFormatter<MpiComm>>(cacheManager)));
-        mDataRequester = std::make_unique<DataRequester>(
-            std::make_unique<MpiDataReceiver<executor::kv_cache::CacheState>>(*mMpiWorldComm, *mCacheState,
-                worldConfig.getRank(), std::make_unique<CacheInputFormatter<MpiComm>>(cacheManager)));
+        mDataResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
+            *mMpiWorldComm, *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
+        mDataRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
+            *mMpiWorldComm, *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
     }
     else if (mCommType == CommType::UCX)
     {

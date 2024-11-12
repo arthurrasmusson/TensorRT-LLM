@@ -66,6 +66,11 @@ std::optional<FloatType> ExternalDraftTokensConfig::getAcceptanceThreshold() con
     return mAcceptanceThreshold;
 }
 
+std::optional<bool> ExternalDraftTokensConfig::getFastLogits() const
+{
+    return mFastLogits;
+}
+
 LookaheadDecodingConfig::LookaheadDecodingConfig(
     SizeType32 windowSize, SizeType32 ngramSize, SizeType32 verificationSetSize)
     : mWindowSize(windowSize)

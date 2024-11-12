@@ -25,4 +25,12 @@ bool SpeculativeDecodingConfig::operator==(SpeculativeDecodingConfig const& othe
     return fastLogits == other.fastLogits;
 }
 
+Tensor SpeculativeDecodingFastLogitsInfo::toTensor() const
+{
+    size_t const numLogitsNeeded = (sizeof(*this) + 1) / sizeof(float);
+    auto tensor = Tensor::cpu(DataType::kFP32, {1, numLogitsNeeded});
+    std::memcpy(tensor.getData(), this, sizeof(*this));
+    return tensor;
+}
+
 } // namespace tensorrt_llm::executor

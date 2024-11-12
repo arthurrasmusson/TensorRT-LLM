@@ -47,9 +47,6 @@ void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::Buff
 //! @brief Copy logits from generation phase under streaming mode.
 void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, LlmRequest& llmReq);
 
-void allocateKvCache(ScheduledRequests const& scheduledRequests, kv_cache_manager::KVCacheManager* kvCacheManagerPtr,
-    kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr);
-
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmRequest, SizeType32 maxInputLen,
     OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager = std::nullopt,
     OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager = std::nullopt,

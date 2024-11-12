@@ -122,4 +122,15 @@ bool Executor::isParticipant() const
     return mImpl->isParticipant();
 }
 
+std::optional<std::shared_ptr<KVCacheEventManager>> Executor::getKVCacheEventManager() const
+{
+    return mImpl->getKVCacheEventManager();
+}
+
+KVCacheEvent::KVCacheEvent(size_t eventId, KVCacheEventData data)
+    : eventId{eventId}
+    , data{std::move(data)}
+{
+}
+
 } // namespace tensorrt_llm::executor

@@ -19,11 +19,13 @@ KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> co
     std::optional<std::vector<SizeType32>> const& maxAttentionWindowVec,
     std::optional<SizeType32> const& sinkTokenLength, std::optional<FloatType> const& freeGpuMemoryFraction,
     std::optional<size_t> const& hostCacheSize, bool onboardBlocks,
-    std::optional<FloatType> const& crossKvCacheFraction, std::optional<RetentionPriority> secondaryOffloadMinPriority)
+    std::optional<FloatType> const& crossKvCacheFraction, std::optional<RetentionPriority> secondaryOffloadMinPriority,
+    size_t eventBufferMaxSize, std::optional<tensorrt_llm::runtime::RuntimeDefaults> const& runtimeDefaults)
     : mEnableBlockReuse(enableBlockReuse)
     , mHostCacheSize(hostCacheSize)
     , mOnboardBlocks(onboardBlocks)
     , mSecondaryOffloadMinPriority(secondaryOffloadMinPriority)
+    , mEventBufferMaxSize{eventBufferMaxSize}
 {
     if (maxTokens)
     {
@@ -44,6 +46,10 @@ KvCacheConfig::KvCacheConfig(bool enableBlockReuse, std::optional<SizeType32> co
     if (crossKvCacheFraction)
     {
         setCrossKvCacheFraction(crossKvCacheFraction.value());
+    }
+    if (runtimeDefaults)
+    {
+        fillEmptyFieldsFromRuntimeDefaults(runtimeDefaults.value());
     }
 }
 
@@ -90,6 +96,11 @@ bool KvCacheConfig::getOnboardBlocks() const
 std::optional<RetentionPriority> KvCacheConfig::getSecondaryOffloadMinPriority() const
 {
     return mSecondaryOffloadMinPriority;
+}
+
+size_t KvCacheConfig::getEventBufferMaxSize() const
+{
+    return mEventBufferMaxSize;
 }
 
 void KvCacheConfig::setEnableBlockReuse(bool enableBlockReuse)
@@ -146,6 +157,23 @@ void KvCacheConfig::setOnboardBlocks(bool onboardBlocks)
 void KvCacheConfig::setSecondaryOffloadMinPriority(std::optional<RetentionPriority> secondaryOffloadMinPriority)
 {
     mSecondaryOffloadMinPriority = secondaryOffloadMinPriority;
+}
+
+void KvCacheConfig::setEventBufferMaxSize(size_t eventBufferMaxSize)
+{
+    mEventBufferMaxSize = eventBufferMaxSize;
+}
+
+void KvCacheConfig::fillEmptyFieldsFromRuntimeDefaults(tensorrt_llm::runtime::RuntimeDefaults runtimeDefaults)
+{
+    if (!mMaxAttentionWindowVec && runtimeDefaults.maxAttentionWindowVec)
+    {
+        setMaxAttentionWindowVec(runtimeDefaults.maxAttentionWindowVec.value());
+    }
+    if (!mSinkTokenLength && runtimeDefaults.sinkTokenLength)
+    {
+        setSinkTokenLength(runtimeDefaults.sinkTokenLength.value());
+    }
 }
 
 } // namespace tensorrt_llm::executor

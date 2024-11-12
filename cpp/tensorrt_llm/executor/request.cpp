@@ -29,14 +29,15 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
     float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
     std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
-    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig)
+    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
+    std::optional<Tensor> skipCrossAttnBlocks)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
-        numReturnSequences, eagleConfig))
+        numReturnSequences, eagleConfig, skipCrossAttnBlocks))
 {
 }
 
@@ -209,6 +210,11 @@ std::optional<EagleConfig> Request::getEagleConfig() const
     return mImpl->getEagleConfig();
 }
 
+std::optional<Tensor> Request::getSkipCrossAttnBlocks() const
+{
+    return mImpl->getSkipCrossAttnBlocks();
+}
+
 void Request::setStreaming(bool streaming)
 {
     return mImpl->setStreaming(streaming);
@@ -340,6 +346,11 @@ void Request::setNumReturnSequences(SizeType32 numReturnSequences)
 void Request::setEagleConfig(std::optional<EagleConfig> const& eagleConfig)
 {
     mImpl->setEagleConfig(eagleConfig);
+}
+
+void Request::setSkipCrossAttnBlocks(Tensor skipCrossAttnBlocks)
+{
+    return mImpl->setSkipCrossAttnBlocks(skipCrossAttnBlocks);
 }
 
 } // namespace tensorrt_llm::executor

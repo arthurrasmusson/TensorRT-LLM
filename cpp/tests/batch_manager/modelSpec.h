@@ -155,6 +155,12 @@ public:
         return *this;
     }
 
+    ModelSpec& useEagle()
+    {
+        mSpecDecodingMode = SpeculativeDecodingMode::Eagle();
+        return *this;
+    }
+
     ModelSpec& useLookaheadDecoding()
     {
         mSpecDecodingMode = SpeculativeDecodingMode::LookaheadDecoding();

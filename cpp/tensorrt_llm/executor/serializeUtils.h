@@ -390,9 +390,9 @@ T deserialize(std::istream& is)
         return Serialization::deserializeKvCacheRetentionConfig(is);
     }
     else if constexpr (std::is_same<T,
-                           tensorrt_llm::executor::KvCacheRetentionConfig::TokenRangeRetentionPriority>::value)
+                           tensorrt_llm::executor::KvCacheRetentionConfig::TokenRangeRetentionConfig>::value)
     {
-        return Serialization::deserializeTokenRangeRetentionPriority(is);
+        return Serialization::deserializeTokenRangeRetentionConfig(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::DecodingConfig>::value)
     {
