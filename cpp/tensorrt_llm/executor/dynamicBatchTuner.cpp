@@ -37,7 +37,7 @@ DynamicBatchTuner::DynamicBatchTuner(DynamicBatchConfig const& config)
     , mDynamicBatchMovingAverageWindow(config.getDynamicBatchMovingAverageWindow())
     , mBatchSizeTable(config.getBatchSizeTable())
 {
-    TLLM_CHECK_WITH_INFO(mBatchSizeTable.size() > 0, "Batch size table is empty.");
+    TLLM_CHECK_WITH_INFO(!mBatchSizeTable.empty(), "Batch size table is empty.");
     for (size_t i = 1; i < mBatchSizeTable.size(); ++i)
     {
         TLLM_CHECK_WITH_INFO(mBatchSizeTable[i - 1].first < mBatchSizeTable[i].first,
@@ -63,11 +63,11 @@ double DynamicBatchTuner::getAverageOutputLength() const
 
 SizeType32 DynamicBatchTuner::getRuntimeBatchSize(SizeType32 maxCapacityBatchSize) const
 {
-    for (size_t i = 0; i < mBatchSizeTable.size(); ++i)
+    for (auto const& [batchSizeLimit, batchSize] : mBatchSizeTable)
     {
-        if (maxCapacityBatchSize < mBatchSizeTable[i].first)
+        if (maxCapacityBatchSize < batchSizeLimit)
         {
-            return mBatchSizeTable[i].second;
+            return batchSize;
         }
     }
     SizeType32 threshold = maxCapacityBatchSize / kBatchSizeFallbackGranularity * kBatchSizeFallbackGranularity;

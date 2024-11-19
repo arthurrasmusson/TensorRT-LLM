@@ -71,6 +71,43 @@ void compareIterationStats(texec::IterationStats const& lh, texec::IterationStat
     }
 }
 
+void compareDisServingRequestStats(texec::DisServingRequestStats const& lh, texec::DisServingRequestStats const& rh)
+{
+    EXPECT_EQ(lh.kvCacheTransferMS, rh.kvCacheTransferMS);
+}
+
+void compareRequestStats(texec::RequestStats const& lh, texec::RequestStats const& rh)
+{
+    EXPECT_EQ(lh.id, rh.id);
+    EXPECT_EQ(lh.stage, rh.stage);
+    EXPECT_EQ(lh.contextPrefillPosition, rh.contextPrefillPosition);
+    EXPECT_EQ(lh.numGeneratedTokens, rh.numGeneratedTokens);
+    EXPECT_EQ(lh.avgNumDecodedTokensPerIter, rh.avgNumDecodedTokensPerIter);
+    EXPECT_EQ(lh.scheduled, rh.scheduled);
+    EXPECT_EQ(lh.paused, rh.paused);
+    EXPECT_EQ(lh.disServingStats.has_value(), rh.disServingStats.has_value());
+    if (lh.disServingStats.has_value())
+    {
+        compareDisServingRequestStats(lh.disServingStats.value(), rh.disServingStats.value());
+    }
+    EXPECT_EQ(lh.allocTotalBlocksPerRequest, rh.allocTotalBlocksPerRequest);
+    EXPECT_EQ(lh.allocNewBlocksPerRequest, rh.allocNewBlocksPerRequest);
+    EXPECT_EQ(lh.reusedBlocksPerRequest, rh.reusedBlocksPerRequest);
+    EXPECT_EQ(lh.missedBlocksPerRequest, rh.missedBlocksPerRequest);
+    EXPECT_EQ(lh.kvCacheHitRatePerRequest, rh.kvCacheHitRatePerRequest);
+}
+
+void compareRequestStatsPerIteration(
+    texec::RequestStatsPerIteration const& lh, texec::RequestStatsPerIteration const& rh)
+{
+    EXPECT_EQ(lh.iter, rh.iter);
+    EXPECT_EQ(lh.requestStats.size(), rh.requestStats.size());
+    for (size_t i = 0; i < lh.requestStats.size(); i++)
+    {
+        compareRequestStats(lh.requestStats.at(i), rh.requestStats.at(i));
+    }
+}
+
 void compareResult(texec::Result res, texec::Result res2)
 {
     EXPECT_EQ(res.isFinal, res2.isFinal);
@@ -136,6 +173,10 @@ void testSerializeDeserialize(T val)
     else if constexpr (std::is_same<T, texec::IterationStats>::value)
     {
         compareIterationStats(val, val2);
+    }
+    else if constexpr (std::is_same<T, texec::RequestStatsPerIteration>::value)
+    {
+        compareRequestStatsPerIteration(val, val2);
     }
     else
     {
@@ -652,4 +693,30 @@ TEST(SerializeUtilsTest, ExecutorConfig)
     EXPECT_EQ(executorConfig.getExtendedRuntimePerfKnobConfig(), executorConfig2.getExtendedRuntimePerfKnobConfig());
     EXPECT_EQ(executorConfig.getDebugConfig(), executorConfig2.getDebugConfig());
     EXPECT_EQ(executorConfig.getMaxSeqIdleMicroseconds(), executorConfig2.getMaxSeqIdleMicroseconds());
+}
+
+TEST(SerializeUtilsTest, RequestStats)
+{
+    tensorrt_llm::executor::DisServingRequestStats disServingRequestStats{0.56222};
+    texec::RequestStats requestStats{123, tensorrt_llm::executor::RequestStage::kQUEUED, 56, 25, 135, true, false,
+        disServingRequestStats, 33, 22, 6, 1, 8};
+    auto requestStats2 = serializeDeserialize(requestStats);
+    compareRequestStats(requestStats, requestStats2);
+    requestStats.disServingStats = std::nullopt;
+    requestStats2 = serializeDeserialize(requestStats);
+    compareRequestStats(requestStats, requestStats2);
+}
+
+TEST(SerializeUtilsTest, RequestStatsPerIteration)
+{
+
+    tensorrt_llm::executor::DisServingRequestStats disServingRequestStats{0.56222};
+    texec::RequestStats requestStats1{123, tensorrt_llm::executor::RequestStage::kQUEUED, 56, 25, 135, true, false,
+        disServingRequestStats, 33, 22, 6, 1, 8};
+    texec::RequestStats requestStats2{
+        899, texec::RequestStage::kGENERATION_IN_PROGRESS, 98, 78, 77, false, true, std::nullopt, 7, 14, 65, 61, 78};
+
+    texec::RequestStatsPerIteration requestStatsPerIteration{0, {requestStats1, requestStats2}};
+    auto requestStatsPerIteration2 = serializeDeserialize(requestStatsPerIteration);
+    compareRequestStatsPerIteration(requestStatsPerIteration, requestStatsPerIteration2);
 }

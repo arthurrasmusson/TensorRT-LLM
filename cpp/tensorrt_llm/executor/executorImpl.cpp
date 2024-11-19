@@ -33,7 +33,10 @@
 #include "tensorrt_llm/runtime/memoryCounters.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cuda_profiler_api.h>
+#include <iterator>
 #include <optional>
 #include <utility>
 
@@ -49,7 +52,7 @@ char const* version() noexcept
 class CancelledRequestsAsyncSend
 {
 public:
-    CancelledRequestsAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> commSession,
+    CancelledRequestsAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession,
         std::unordered_set<IdType> const& cancelledReqIds, int const peer)
     {
         TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -76,6 +79,11 @@ public:
         TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     }
 
+    CancelledRequestsAsyncSend(CancelledRequestsAsyncSend const& executor) = delete;
+    CancelledRequestsAsyncSend& operator=(CancelledRequestsAsyncSend const& executor) = delete;
+    CancelledRequestsAsyncSend(CancelledRequestsAsyncSend&&) = delete;
+    CancelledRequestsAsyncSend& operator=(CancelledRequestsAsyncSend&&) = delete;
+
 private:
     int64_t mNumReq;
     std::vector<IdType> mIds;
@@ -84,7 +92,7 @@ private:
 };
 
 std::unordered_set<IdType> cancelledRequestsRecv(
-    std::shared_ptr<tensorrt_llm::mpi::MpiComm> commSession, int const peer)
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int const peer)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start recv cancelled requests from rank %d", peer);
@@ -105,7 +113,7 @@ std::unordered_set<IdType> cancelledRequestsRecv(
 class RequestWithIdAsyncSend
 {
 public:
-    RequestWithIdAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> commSession,
+    RequestWithIdAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession,
         std::vector<RequestWithId> const& reqWithIds, int const peer)
     {
         TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -127,12 +135,21 @@ public:
         TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
         mRequest1->wait();
         if (mRequest2)
+        {
             mRequest2->wait();
+        }
         if (mRequest3)
+        {
             mRequest3->wait();
+        }
         TLLM_LOG_DEBUG("end send requests");
         TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     }
+
+    RequestWithIdAsyncSend(RequestWithIdAsyncSend const& executor) = delete;
+    RequestWithIdAsyncSend& operator=(RequestWithIdAsyncSend const& executor) = delete;
+    RequestWithIdAsyncSend(RequestWithIdAsyncSend&&) = delete;
+    RequestWithIdAsyncSend& operator=(RequestWithIdAsyncSend&&) = delete;
 
 private:
     int64_t mNumReq;
@@ -143,7 +160,8 @@ private:
     std::shared_ptr<tensorrt_llm::mpi::MpiRequest> mRequest3;
 };
 
-std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::MpiComm> commSession, int const peer)
+std::vector<RequestWithId> requestWithIdRecv(
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int const peer)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start recv requests from rank %d", peer);
@@ -153,7 +171,7 @@ std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::
     if (numReq > 0)
     {
         std::vector<char> buffer;
-        int64_t vecSize;
+        int64_t vecSize = 0;
         commSession->recv(&vecSize, 1, mpi::MpiType::kINT64, peer, 3);
         buffer.resize(vecSize);
         commSession->recv(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, peer, 4);
@@ -248,7 +266,6 @@ Executor::Impl::Impl(std::filesystem::path const& modelPath,
             }
             else
             {
-
                 TLLM_LOG_WARNING("Encoder model path not provided. Skipping Encoder Run.");
             }
         }
@@ -442,25 +459,28 @@ void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelCon
     // Create a leaderOrch comm
     std::vector<int32_t> leaderOrchRanks{0, participantIds.front()};
 
-    MPI_Group worldGroup;
-    MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup));
-    int worldGroupRank;
+    MPI_Group worldGroup = nullptr;
+    MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup)); // NOLINT
+    int worldGroupRank = 0;
     MPI_Group_rank(worldGroup, &worldGroupRank);
 
-    int worldSize;
-    MPICHECK(MPI_Group_size(worldGroup, &worldSize));
+    int worldSize = 0;
+    MPICHECK(MPI_Group_size(worldGroup, &worldSize)); // NOLINT
     TLLM_CHECK_WITH_INFO(participantIds.front() < worldSize, "Not enough ranks in world");
 
-    MPI_Group leaderOrchCommGroup;
-    MPICHECK(MPI_Group_incl(worldGroup, leaderOrchRanks.size(), leaderOrchRanks.data(), &leaderOrchCommGroup));
-    int leaderOrchGroupRank, leaderOrchGroupSize;
+    MPI_Group leaderOrchCommGroup = nullptr;
+    MPICHECK(
+        MPI_Group_incl(worldGroup, leaderOrchRanks.size(), leaderOrchRanks.data(), &leaderOrchCommGroup)); // NOLINT
+    int leaderOrchGroupRank = 0;
+    int leaderOrchGroupSize = 0;
     MPI_Group_rank(leaderOrchCommGroup, &leaderOrchGroupRank);
     MPI_Group_size(leaderOrchCommGroup, &leaderOrchGroupSize);
 
     if (isOrchestrator || isLeader)
     {
-        MPI_Comm leaderOrchComm;
-        MPICHECK(MPI_Comm_create_group(MPI_COMM_WORLD, leaderOrchCommGroup, participantIds.front(), &leaderOrchComm));
+        MPI_Comm leaderOrchComm = nullptr;
+        MPICHECK(MPI_Comm_create_group(
+            MPI_COMM_WORLD, leaderOrchCommGroup, participantIds.front(), &leaderOrchComm)); // NOLINT
         mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(leaderOrchComm, false);
     }
     else
@@ -549,8 +569,8 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
 
         // Spawn the worker threads
         auto workerExecPath = orchestratorConfig.getWorkerExecutablePath();
-        MPI_Comm intercomm;
-        MPI_Info mpiInfo;
+        MPI_Comm intercomm = nullptr;
+        MPI_Info mpiInfo = nullptr;
         MPI_Info_create(&mpiInfo);
         MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY");
 
@@ -613,7 +633,7 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
 
         // Check that rank 0 is reserved for the orchestrator
         auto const participantIds = parallelConfig.getParticipantIds().value();
-        for (auto& participantId : participantIds)
+        for (auto const& participantId : participantIds)
         {
             TLLM_CHECK_WITH_INFO(participantId != 0, "Rank 0 is reserved for the orchestrator");
         }
@@ -662,7 +682,7 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     {
         // Create a session, but only assign to COMM_SESSION for ranks participating in this model
         MPI_Group worldGroup = MPI_GROUP_NULL;
-        MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup));
+        MPICHECK(MPI_Comm_group(MPI_COMM_WORLD, &worldGroup)); // NOLINT
         MPI_Group sessionGroup = MPI_GROUP_NULL;
         if (pp > 1)
         {
@@ -676,9 +696,10 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
                 }
             }
         }
-        MPICHECK(MPI_Group_incl(worldGroup, participantIds.size(), participantIds.data(), &sessionGroup));
+        MPICHECK(MPI_Group_incl(worldGroup, participantIds.size(), participantIds.data(), &sessionGroup)); // NOLINT
         MPI_Comm sessionComm = MPI_COMM_NULL;
-        MPICHECK(MPI_Comm_create_group(MPI_COMM_WORLD, sessionGroup, 1000 + participantIds.front(), &sessionComm));
+        MPICHECK(
+            MPI_Comm_create_group(MPI_COMM_WORLD, sessionGroup, 1000 + participantIds.front(), &sessionComm)); // NOLINT
 
         tensorrt_llm::mpi::MpiComm::setSession(tensorrt_llm::mpi::MpiComm(sessionComm, false));
     }
@@ -762,7 +783,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
     requestWithIds.reserve(requests.size());
 
     // First check valid of request in enqueue thread, so Exceptions can be thrown to user.
-    for (auto& req : requests)
+    for (auto const& req : requests)
     {
         auto logitsPostProcessorName = req.getLogitsPostProcessorName();
         if (logitsPostProcessorName && logitsPostProcessorName.value() != Request::kBatchedPostProcessorName)
@@ -774,7 +795,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
     std::vector<IdType> ids;
     {
         auto now = std::chrono::steady_clock::now();
-        for (auto& req : requests)
+        for (auto const& req : requests)
         {
             ids.emplace_back(generateReqId());
 
@@ -980,6 +1001,9 @@ void Executor::Impl::shutdown()
             if (mIsOrchestrator)
             {
                 // Send to the leader the termination signal
+                mShutdown = true;
+                mResponsesCv.notify_all();
+
                 mSendQueue.push(MpiMessage(MpiId::TERMINATION));
 
                 // Wait for sender thread to exit
@@ -1065,11 +1089,7 @@ std::deque<RequestStatsPerIteration> Executor::Impl::getLatestRequestStats()
 {
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called");
     checkParallelApiUsage(__func__);
-    if (mCommMode == CommunicationMode::kORCHESTRATOR)
-    {
-        TLLM_LOG_WARNING("getLatestRequestStats is not supported in ORCHESTRATOR mode yet");
-        return {};
-    }
+
     std::scoped_lock<std::mutex> lck(mRequestStatsMtx);
     return std::exchange(mRequestStats, {});
 }
@@ -1113,7 +1133,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const& worldConfig = mModel->getWorldConfig();
-    SizeType32 numMicroBatches = mRequestWithIdWaitThreads.size();
+    auto const numMicroBatches = static_cast<SizeType32>(mRequestWithIdWaitThreads.size());
 
     auto prevMicroBatchId = worldConfig.isLastPipelineParallelRank()
         ? (mNewReqMicroBatchId == 0 ? numMicroBatches - 1 : mNewReqMicroBatchId - 1)
@@ -1153,7 +1173,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
                     mQueuedRequests.pop_front();
                 };
 
-                if (mQueuedRequests.size() > 0)
+                if (!mQueuedRequests.empty())
                 {
                     if (mQueuedRequests.front().id == mTerminateReqId)
                     {
@@ -1161,7 +1181,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
                     }
                 }
 
-                for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests;)
+                for (size_t req = 0; !mQueuedRequests.empty() && req < maxNewRequests;)
                 {
                     req += (getNumChildRequests(mQueuedRequests.front().req) + 1);
                     if (req > maxNewRequests)
@@ -1173,8 +1193,8 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
 
                 if (lowestPriorityActive)
                 {
-                    while (mQueuedRequests.size() > 0
-                        && mQueuedRequests.front().req.getPriority() > (*lowestPriorityActive))
+                    while (
+                        !mQueuedRequests.empty() && mQueuedRequests.front().req.getPriority() > (*lowestPriorityActive))
                     {
                         insertQueuedRequestIntoReqWithIds();
                     }
@@ -1257,6 +1277,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
         }
     }
     cudaSetDevice(originalDevice);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     return reqWithIds;
 }
 
@@ -1657,20 +1678,51 @@ void Executor::Impl::appendCurrentIterStats(IterationStats&& currentIterStats)
     mIterationStats.emplace_back(std::move(currentIterStats));
 }
 
+void Executor::Impl::appendMultipleIterStats(std::vector<IterationStats>&& currentIterStatsVec)
+{
+    std::scoped_lock<std::mutex> lck(mIterStatsMtx);
+    if (mIterationStats.size() + currentIterStatsVec.size() > mIterStatsMaxIterations)
+    {
+        size_t removeCount = mIterationStats.size() + currentIterStatsVec.size() - mIterStatsMaxIterations;
+        for (size_t i = 0; i < removeCount; i++)
+        {
+            mIterationStats.pop_front();
+        }
+    }
+    mIterationStats.insert(mIterationStats.end(), std::make_move_iterator(currentIterStatsVec.begin()),
+        std::make_move_iterator(currentIterStatsVec.end()));
+}
+
 void Executor::Impl::updateIterationStats(RequestList const& activeRequests, double iterLatencyMS,
-    SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests)
+    SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests,
+    bool flushToOrchestrator)
 {
     NVTX3_SCOPED_RANGE(updateIterationStats);
-    if (mIterStatsMaxIterations > 0)
+    if (mIterStatsMaxIterations > 0 && mIsLeader)
     {
         auto currentIterStats = getCurrentIterationStats(
             activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS, numCompletedRequests);
         // Send the stats to the orchestrator
-        if (mCommMode == CommunicationMode::kORCHESTRATOR && mIsLeader)
+        if (mCommMode == CommunicationMode::kORCHESTRATOR)
         {
-            MpiMessage message(MpiId::ITER_STATS);
-            message.data = IterStatsData{std::move(currentIterStats)};
-            mSendQueue.push(std::move(message));
+            bool hasSchedThisIter = (currentIterStats.inflightBatchingStats
+                                        && currentIterStats.inflightBatchingStats->numScheduledRequests > 0)
+                || (currentIterStats.staticBatchingStats
+                    && currentIterStats.staticBatchingStats->numScheduledRequests > 0);
+            appendCurrentIterStats(std::move(currentIterStats));
+            if (hasSchedThisIter || flushToOrchestrator)
+            {
+                std::deque<IterationStats> iterStatsQueue;
+                {
+                    std::scoped_lock<std::mutex> lck(mIterStatsMtx);
+                    iterStatsQueue = std::exchange(mIterationStats, {});
+                }
+                MpiMessage message(MpiId::ITER_STATS);
+                std::vector<IterationStats> iterStates(
+                    std::make_move_iterator(iterStatsQueue.begin()), std::make_move_iterator(iterStatsQueue.end()));
+                message.data = IterStatsData{std::move(iterStates)};
+                mSendQueue.push(std::move(message));
+            }
         }
         else
         {
@@ -1680,18 +1732,74 @@ void Executor::Impl::updateIterationStats(RequestList const& activeRequests, dou
     }
 }
 
-void Executor::Impl::updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests)
+void Executor::Impl::appendCurrentRequestStats(RequestStatsPerIteration&& currentRequestStats)
 {
-    NVTX3_SCOPED_RANGE(updateRequestStats);
-    if (mRequestStatsMaxIterations > 0)
+    std::scoped_lock<std::mutex> lck(mRequestStatsMtx);
+    if (mRequestStats.size() >= mRequestStatsMaxIterations)
     {
-        // Add current iteration request stats
-        std::scoped_lock<std::mutex> lck(mRequestStatsMtx);
-        if (mRequestStats.size() >= mRequestStatsMaxIterations)
+        mRequestStats.pop_front();
+    }
+    mRequestStats.emplace_back(std::move(currentRequestStats));
+}
+
+void Executor::Impl::appendMultipleRequestStats(std::vector<RequestStatsPerIteration>&& currentRequestStatsVec)
+{
+    std::scoped_lock<std::mutex> lck(mRequestStatsMtx);
+    if (mRequestStats.size() + currentRequestStatsVec.size() > mRequestStatsMaxIterations)
+    {
+        size_t removeCount = mRequestStats.size() + currentRequestStatsVec.size() - mRequestStatsMaxIterations;
+        for (size_t i = 0; i < removeCount; i++)
         {
             mRequestStats.pop_front();
         }
-        mRequestStats.emplace_back(getCurrentRequestStats(activeRequests, finishedRequests));
+    }
+    mRequestStats.insert(mRequestStats.end(), std::make_move_iterator(currentRequestStatsVec.begin()),
+        std::make_move_iterator(currentRequestStatsVec.end()));
+}
+
+void Executor::Impl::updateRequestStats(
+    RequestList const& activeRequests, RequestList const& finishedRequests, bool flushToOrchestrator)
+{
+    NVTX3_SCOPED_RANGE(updateRequestStats);
+    if (mRequestStatsMaxIterations > 0 && mIsLeader)
+    {
+        // Add current iteration request stats
+        auto currentRequestStats = getCurrentRequestStats(activeRequests, finishedRequests);
+        // Send the stats to the orchestrator
+        if (mCommMode == CommunicationMode::kORCHESTRATOR)
+        {
+            bool hasScheduledReqs = false;
+            if (!flushToOrchestrator)
+            {
+                size_t activeSize = activeRequests.size();
+                TLLM_CHECK_WITH_INFO(currentRequestStats.requestStats.size() >= activeSize,
+                    "currentRequestStats num is %ld should >= activeRequest num:%zu",
+                    currentRequestStats.requestStats.size(), activeSize);
+                hasScheduledReqs = std::any_of(currentRequestStats.requestStats.begin(),
+                    currentRequestStats.requestStats.begin() + static_cast<int64_t>(activeSize),
+                    [](RequestStats const& requestStat) { return requestStat.scheduled; });
+            }
+            appendCurrentRequestStats(std::move(currentRequestStats));
+            if (hasScheduledReqs || flushToOrchestrator)
+            {
+                std::deque<RequestStatsPerIteration> requestStatsQueue;
+                {
+                    std::scoped_lock<std::mutex> lck(mRequestStatsMtx);
+                    requestStatsQueue = std::exchange(mRequestStats, {});
+                }
+                std::vector<RequestStatsPerIteration> requestIterStates(
+                    std::make_move_iterator(requestStatsQueue.begin()),
+                    std::make_move_iterator(requestStatsQueue.end()));
+                MpiMessage message(MpiId::REQUEST_ITER_STATS);
+                message.data = RequestStatsPerIterationData{std::move(requestIterStates)};
+                mSendQueue.push(std::move(message));
+            }
+        }
+        else
+        {
+            // Add current iteration stats
+            appendCurrentRequestStats(std::move(currentRequestStats));
+        }
     }
 }
 
@@ -1716,8 +1824,8 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
         auto const& commSession = COMM_SESSION;
         auto const& worldConfig = mModel->getWorldConfig();
 
-        SizeType32 numMicroBatches = mCancelledRequestsWaitThreads.size();
-        auto prevMicroBatchId = worldConfig.isLastPipelineParallelRank()
+        auto const numMicroBatches = static_cast<SizeType32>(mCancelledRequestsWaitThreads.size());
+        auto const prevMicroBatchId = worldConfig.isLastPipelineParallelRank()
             ? (mCancelReqMicroBatchId == 0 ? numMicroBatches - 1 : mCancelReqMicroBatchId - 1)
             : 0;
 
@@ -1749,7 +1857,7 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
             {
                 if (worldConfig.isLastPipelineParallelRank())
                 {
-                    int64_t numCancelledRequests;
+                    int64_t numCancelledRequests = 0;
                     mCommTensorParallel->bcastValue(numCancelledRequests, 0);
                     if (numCancelledRequests > 0)
                     {
@@ -1833,7 +1941,7 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
             }
         }
 
-        for (auto& reqId : terminatedReqIds)
+        for (auto const& reqId : terminatedReqIds)
         {
             mCancelledReqIds.erase(reqId);
         }
@@ -1928,10 +2036,12 @@ void Executor::Impl::executionLoop()
     bool firstIteration{true};
     RequestList activeRequests;
     RequestList inTransmissionRequests;
-    bool runCancelReqEpilogue = false;
+    bool runCancelReqEpilogue{false};
+    bool hasUpdateStatsForEmptyActiveRequests{false};
     while (!mShutdown || !activeRequests.empty())
     {
-        double iterLatencyMS{0.0}, newActiveRequestsQueueLatencyMS{0.0};
+        double iterLatencyMS{0.0};
+        double newActiveRequestsQueueLatencyMS{0.0};
         auto const iterCounter = mModel->getIterCounter();
         auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
         auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
@@ -1939,6 +2049,7 @@ void Executor::Impl::executionLoop()
         RequestList finishedRequests;
         if (!activeRequests.empty())
         {
+            hasUpdateStatsForEmptyActiveRequests = false;
             forwardSync(activeRequests);
             terminateCancelledRequests(activeRequests);
             runCancelReqEpilogue = runCancelReqEpilogue || !activeRequests.empty();
@@ -1964,21 +2075,24 @@ void Executor::Impl::executionLoop()
             }
             iterStart = std::chrono::steady_clock::now();
             std::optional<PriorityType> lowestPriority = std::nullopt;
-            if (activeRequests.size() > 0)
+            if (!activeRequests.empty())
             {
                 lowestPriority = activeRequests.back()->priority();
             }
 
             // When there are no active or inflight requests, we need to update the stats before calling
             // fetchNewRequests to make sure that the stats are reported accurately.
-            if (static_cast<SizeType32>(activeRequests.size() + inTransmissionRequests.size()) == 0 && !firstIteration)
+            if (activeRequests.empty() && inTransmissionRequests.empty() && (!firstIteration)
+                && (!hasUpdateStatsForEmptyActiveRequests))
             {
                 mModel->resetIterationStats();
                 updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests,
-                    newActiveRequestsQueueLatencyMS, static_cast<SizeType32>(finishedRequests.size()));
-                updateRequestStats(activeRequests, finishedRequests);
+                    newActiveRequestsQueueLatencyMS, static_cast<SizeType32>(finishedRequests.size()), true);
+                updateRequestStats(activeRequests, finishedRequests, true);
+                hasUpdateStatsForEmptyActiveRequests = true;
                 reportFinishedRequests = false;
             }
+
             auto [newRequests, newActiveRequestsQueueLatency]
                 = fetchNewRequests(static_cast<SizeType32>(activeRequests.size()), lowestPriority);
             newActiveRequestsQueueLatencyMS = newActiveRequestsQueueLatency;
@@ -2010,15 +2124,15 @@ void Executor::Impl::executionLoop()
         {
             forwardAsync(activeRequests);
             updateIterationStats(activeRequests, iterLatencyMS, numNewActiveRequests, newActiveRequestsQueueLatencyMS,
-                static_cast<SizeType32>(finishedRequests.size()));
+                static_cast<SizeType32>(finishedRequests.size()), false);
             // Finished requests were reported once. Avoid reporting it twice.
             if (reportFinishedRequests)
             {
-                updateRequestStats(activeRequests, finishedRequests);
+                updateRequestStats(activeRequests, finishedRequests, false);
             }
             else
             {
-                updateRequestStats(activeRequests, {});
+                updateRequestStats(activeRequests, {}, false);
             }
             appendCurrentDebugTensors();
         }
@@ -2029,7 +2143,7 @@ void Executor::Impl::executionLoop()
     {
         // Matching recvs for extra sends in first iteration
         auto const peer = worldConfig.getPipelineParallelism() - 1;
-        for (SizeType32 i = 0; i < (SizeType32) mCancelledRequestsWaitThreads.size() - 1; i++)
+        for (SizeType32 i = 0; i < static_cast<SizeType32>(mCancelledRequestsWaitThreads.size()) - 1; i++)
         {
             mCancelledReqIds = cancelledRequestsRecv(mCommPipelineParallel, peer);
         }
@@ -2096,7 +2210,7 @@ void Executor::Impl::orchSendReqThread()
             TLLM_LOG_INFO("Orchestrator sendReq thread exiting");
             break;
         }
-        else if (message.id == MpiId::PENDING_REQUEST)
+        if (message.id == MpiId::PENDING_REQUEST)
         {
             auto& reqWithIds = std::get<PendingRequestData>(message.data);
             auto packed = RequestWithId::serializeReqWithIds(reqWithIds.requests);
@@ -2153,16 +2267,16 @@ void Executor::Impl::leaderRecvReqThread()
         }
 
         // Blocking is okay: terminate message is expected to arrive here
-        MPI_Message msg;
+        MPI_Message msg = nullptr;
         MPI_Status status;
         mOrchLeaderComm->mprobe(mOrchRank, kMPI_ID_TAG, &msg, &status);
 
-        int32_t count;
-        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+        int32_t count = 0;
+        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count)); // NOLINT
         TLLM_CHECK(count == 1);
 
-        MpiId mpiId;
-        MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status));
+        MpiId mpiId{};
+        MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status)); // NOLINT
 
         // EXIT condition from receiving TERMINATE msg
         if (mpiId == MpiId::TERMINATION)
@@ -2175,12 +2289,12 @@ void Executor::Impl::leaderRecvReqThread()
             TLLM_LOG_INFO("Leader recvReq thread exiting");
             break;
         }
-        else if (mpiId == MpiId::PENDING_REQUEST)
+        if (mpiId == MpiId::PENDING_REQUEST)
         {
             mOrchLeaderComm->mprobe(mOrchRank, kMPI_DATA_TAG, &msg, &status);
-            MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
+            MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));                 // NOLINT
             std::vector<char> buffer(count);
-            MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status));
+            MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status)); // NOLINT
 
             auto requestWithIds = RequestWithId::deserializeReqWithIds(buffer);
             TLLM_LOG_DEBUG("Leader recvReq thread receiving %d pending requests", requestWithIds.size());
@@ -2215,9 +2329,9 @@ void Executor::Impl::leaderRecvReqThread()
         {
             // Prepare receiving data
             mOrchLeaderComm->mprobe(mOrchRank, kMPI_DATA_TAG, &msg, &status);
-            MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+            MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));                          // NOLINT
             std::vector<uint64_t> cancelledReqIds(count);
-            MPICHECK(MPI_Mrecv(cancelledReqIds.data(), count, MPI_UINT64_T, &msg, &status));
+            MPICHECK(MPI_Mrecv(cancelledReqIds.data(), count, MPI_UINT64_T, &msg, &status)); // NOLINT
 
             std::scoped_lock<std::mutex> lck(mCancelReqMtx);
             mCancelledReqIds.insert(cancelledReqIds.begin(), cancelledReqIds.end());
@@ -2231,7 +2345,7 @@ void Executor::Impl::leaderRecvReqThread()
 }
 
 // Leader thread sending responses to orchestrator
-void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTag, int32_t dataTag)
+void Executor::Impl::leaderSendThread(MpiMessageQueue& sendQueue, int32_t idTag, int32_t dataTag)
 {
     tensorrt_llm::common::setThreadName("leaderSend");
     TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
@@ -2239,7 +2353,7 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
 #if ENABLE_MULTI_DEVICE
     while (true)
     {
-        auto message = senderQueue.pop();
+        auto message = sendQueue.pop();
 
         if (message.id == MpiId::TERMINATION)
         {
@@ -2247,19 +2361,28 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& senderQueue, int32_t idTa
             TLLM_LOG_INFO("Leader sendThread exiting");
             break;
         }
-        else if (message.id == MpiId::RESPONSE)
+        if (message.id == MpiId::RESPONSE || message.id == MpiId::ITER_STATS
+            || message.id == MpiId ::REQUEST_ITER_STATS)
         {
-            auto& responseData = std::get<ResponseData>(message.data);
-            TLLM_LOG_DEBUG("Leader sendResp thread sending %d responses", responseData.responses.size());
-            auto buffer = Serialization::serialize(responseData.responses);
-            mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mOrchRank, idTag);
-            mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, mOrchRank, dataTag);
-        }
-        else if (message.id == MpiId::ITER_STATS)
-        {
-            auto& iterStatsData = std::get<IterStatsData>(message.data);
-            TLLM_LOG_DEBUG("Leader sendResp thread sending iter stats");
-            auto buffer = Serialization::serialize(iterStatsData.iterStats);
+            std::vector<char> buffer;
+            if (message.id == MpiId::RESPONSE)
+            {
+                auto& responseData = std::get<ResponseData>(message.data);
+                TLLM_LOG_DEBUG("Leader sendResp thread sending %d responses", responseData.responses.size());
+                buffer = Serialization::serialize(responseData.responses);
+            }
+            else if (message.id == MpiId::ITER_STATS)
+            {
+                auto& iterStatsData = std::get<IterStatsData>(message.data);
+                TLLM_LOG_DEBUG("Leader sendResp thread sending iter stats");
+                buffer = Serialization::serialize(iterStatsData.iterStatsVec);
+            }
+            else if (message.id == MpiId::REQUEST_ITER_STATS)
+            {
+                auto& requestIterStatsData = std::get<RequestStatsPerIterationData>(message.data);
+                TLLM_LOG_DEBUG("Leader sendResp thread sending iter request stats");
+                buffer = Serialization::serialize(requestIterStatsData.requestStatsPerIterationVec);
+            }
             mOrchLeaderComm->send(&message.id, 1, mpi::MpiType::kUINT64, mOrchRank, idTag);
             mOrchLeaderComm->send(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, mOrchRank, dataTag);
         }
@@ -2284,29 +2407,29 @@ void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
             mOrchLeaderComm->recvPoll(mOrchRank, kMPI_ID_TAG, mRecvPollPeriodMs);
         }
 
-        MPI_Message msg;
+        MPI_Message msg = nullptr;
         MPI_Status status;
         mOrchLeaderComm->mprobe(mLeaderRank, idTag, &msg, &status);
 
-        int32_t count;
-        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
+        int32_t count = 0;
+        MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count)); // NOLINT
         TLLM_CHECK(count == 1);
 
-        MpiId mpiId;
-        MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status));
+        MpiId mpiId{};
+        MPICHECK(MPI_Mrecv(&mpiId, count, MPI_UINT64_T, &msg, &status)); // NOLINT
 
         if (mpiId == MpiId::TERMINATION)
         {
             TLLM_LOG_INFO("Orchestrator recv thread exiting");
             break;
         }
-        else if (mpiId == MpiId::RESPONSE || mpiId == MpiId::ITER_STATS)
+        if (mpiId == MpiId::RESPONSE || mpiId == MpiId::ITER_STATS || mpiId == MpiId::REQUEST_ITER_STATS)
         {
             mOrchLeaderComm->mprobe(mLeaderRank, dataTag, &msg, &status);
-            MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
+            MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count)); // NOLINT
 
             std::vector<char> buffer(count);
-            MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status));
+            MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status)); // NOLINT
 
             if (mpiId == MpiId::RESPONSE)
             {
@@ -2316,8 +2439,11 @@ void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
             }
             else if (mpiId == MpiId::ITER_STATS)
             {
-                auto currentStats = Serialization::deserializeIterationStats(buffer);
-                appendCurrentIterStats(std::move(currentStats));
+                appendMultipleIterStats(Serialization::deserializeIterationStatsVec(buffer));
+            }
+            else if (mpiId == MpiId::REQUEST_ITER_STATS)
+            {
+                appendMultipleRequestStats(Serialization::deserializeRequestStatsPerIterationVec(buffer));
             }
         }
         else
@@ -2335,7 +2461,7 @@ Executor::Impl::LlmRequestLogitsPostProcessor Executor::Impl::getLogitsPostProce
         postProcIt != mLogitsPostProcessorMap.end(), "LogitsPostProcessor %s not found.", name.c_str());
     auto executorLogitsPostProcessor = postProcIt->second;
     return [executorLogitsPostProcessor](IdType reqId, RtTensorPtr& logits, BeamTokens const& beamTokens,
-               CudaStreamPtr cudaStreamPtr, std::optional<IdType> clientId)
+               CudaStreamPtr const& cudaStreamPtr, std::optional<IdType> clientId)
     {
         auto logitsTensor = executor::detail::ofITensor(logits);
         executorLogitsPostProcessor(reqId, logitsTensor, beamTokens, cudaStreamPtr, clientId);

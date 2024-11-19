@@ -12,16 +12,20 @@
 
 #include "transformerBuffers.h"
 
+#include "tensorrt_llm/batch_manager/kvCacheConfig.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/kernels/attentionMask.h"
 #include "tensorrt_llm/kernels/contextFusedMultiHeadAttention/fmhaPackedMask.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
+#include <cstdint>
 
 using namespace tensorrt_llm::runtime;
 namespace tk = tensorrt_llm::kernels;
@@ -33,6 +37,8 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, runtime::TllmRuntime const& runtime,
     runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
+    : maxInputLen(modelConfig.getMaxInputLen())
+    , maxEncoderOutputLen(modelConfig.getMaxEncoderLen())
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -48,8 +54,10 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     cacheIndirection
         = manager.gpu(ITensor::makeShape({maxBatchSize, maxBeamWidth, maxAttentionWindow}), nvinfer1::DataType::kINT32);
 
-    maxInputLen = modelConfig.getMaxInputLen();
-    maxEncoderOutputLen = modelConfig.getMaxEncoderLen();
+    if (!modelConfig.getMaxNumTokens().has_value())
+    {
+        TLLM_THROW("Model must configure a max number of tokens.");
+    }
     maxNumTokens = modelConfig.getMaxNumTokens().value();
 
     if (modelConfig.isKVCacheEnabled())
@@ -63,7 +71,7 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
             crossKvCacheBlockOffsetsHost = manager.emptyTensor(MemoryType::kPINNEDPOOL, kvCacheBlockOffsetsType);
             crossKvCacheBlockOffsetsDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockOffsetsType);
             crossAttentionMaskDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kBOOL);
-            crossAttentionMaskPinnedHost = manager.pinnedPool(
+            crossAttentionMaskPinnedHost = tensorrt_llm::runtime::BufferManager::pinnedPool(
                 ITensor::makeShape({maxNumTokens, maxEncoderOutputLen}), nvinfer1::DataType::kBOOL);
             crossAttentionPackedMaskDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
             crossAttentionCuQSeqLensDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
@@ -72,31 +80,35 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
             // Pinned memory for batch copy of attention masks.
             // There will be paddings in the dim1, so copy it by tokens.
-            crossAttentionMaskCopySrcOffsets
-                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
-            crossAttentionMaskCopyDstOffsets
-                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
-            crossAttentionMaskCopySizes
-                = manager.pinnedPool(ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
+            crossAttentionMaskCopySrcOffsets = tensorrt_llm::runtime::BufferManager::pinnedPool(
+                ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
+            crossAttentionMaskCopyDstOffsets = tensorrt_llm::runtime::BufferManager::pinnedPool(
+                ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
+            crossAttentionMaskCopySizes = tensorrt_llm::runtime::BufferManager::pinnedPool(
+                ITensor::makeShape({maxNumTokens}), nvinfer1::DataType::kINT64);
         }
     }
 
-    fillValuesAlt = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    fillValuesAlt = tensorrt_llm::runtime::BufferManager::pinnedPool(
+        ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     fillValuesAltDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
-    seqSlotsAlt = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
+    seqSlotsAlt = tensorrt_llm::runtime::BufferManager::pinnedPool(
+        ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
     seqSlotsAltDevice = manager.gpu(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT32);
 
-    cacheIndirBatchedCopySrcOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
-    cacheIndirBatchedCopyDstOffsets
-        = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
-    cacheIndirBatchedCopySizes = manager.pinnedPool(ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
-    skipCrossAttnBlocks = manager.pinnedPool(ITensor::makeShape({1}), nvinfer1::DataType::kBOOL);
+    cacheIndirBatchedCopySrcOffsets = tensorrt_llm::runtime::BufferManager::pinnedPool(
+        ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
+    cacheIndirBatchedCopyDstOffsets = tensorrt_llm::runtime::BufferManager::pinnedPool(
+        ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
+    cacheIndirBatchedCopySizes = tensorrt_llm::runtime::BufferManager::pinnedPool(
+        ITensor::makeShape({maxBatchSize}), nvinfer1::DataType::kINT64);
+    skipCrossAttnBlocks
+        = tensorrt_llm::runtime::BufferManager::pinnedPool(ITensor::makeShape({1}), nvinfer1::DataType::kBOOL);
 
     pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
     maxAttentionWindows = BufferManager::cpu(ITensor::makeShape({localNbAttnLayers}), nvinfer1::DataType::kINT32);
-    auto maxAttentionWindowsPtr = bufferCast<SizeType32>(*maxAttentionWindows);
+    auto* maxAttentionWindowsPtr = bufferCast<SizeType32>(*maxAttentionWindows);
     auto const attentionWindowLength = maxAttentionWindowVec.size();
     for (SizeType32 i = 0; i < localNbAttnLayers; ++i)
     {
@@ -190,14 +202,9 @@ void TransformerBuffers::reshape(SizeType32 numSequences, SizeType32 numInputTok
 }
 
 void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
-    runtime::TllmRuntime const& runtime, kv_cache_manager::KVCacheManager const& kvCacheManager)
+    kv_cache_manager::CacheType kvCacheType, SizeType32 numPools, BufferManager const& manager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-
-    auto const& manager = runtime.getBufferManager();
-    auto const& blockManager = kvCacheManager.getBlockManager();
-    auto const kvCacheType = blockManager.getCacheType();
-    auto const numPools = blockManager.getNumPools();
 
     // allocate with max shape during init
     if (kvCacheType == KvCacheType::kSELF)
@@ -244,30 +251,30 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(transformerBuffersGetBuffers);
 
-    inputBuffers.insert_or_assign("position_ids", positionIds);
-    inputBuffers.insert_or_assign("host_past_key_value_lengths", pastKeyValueLengths);
-    inputBuffers.insert_or_assign("cache_indirection", cacheIndirection);
-    inputBuffers.insert_or_assign("host_sink_token_length", sinkTokenLengths);
+    inputBuffers.insert_or_assign(kPositionIdsTensorName.data(), positionIds);
+    inputBuffers.insert_or_assign(kHostPastKeyValueLengthsTensorName.data(), pastKeyValueLengths);
+    inputBuffers.insert_or_assign(kCacheIndirectionsTensorName.data(), cacheIndirection);
+    inputBuffers.insert_or_assign(kHostSinkTokenLengthTensorName.data(), sinkTokenLengths);
 
-    inputBuffers.insert_or_assign("host_max_attention_window_sizes", maxAttentionWindows);
-    inputBuffers.insert_or_assign("kv_cache_block_offsets", kvCacheBlockOffsetsDevice);
-    inputBuffers.insert_or_assign("host_kv_cache_block_offsets", kvCacheBlockOffsetsHost);
-    inputBuffers.insert_or_assign("host_runtime_perf_knobs", runtimePerfKnobsHost);
-    inputBuffers.insert_or_assign("host_context_progress", contextProgressHost);
+    inputBuffers.insert_or_assign(kHostMaxAttentionWindowSizesTensorName.data(), maxAttentionWindows);
+    inputBuffers.insert_or_assign(kKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsDevice);
+    inputBuffers.insert_or_assign(kHostKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsHost);
+    inputBuffers.insert_or_assign(kHostRuntimePerfKnobsTensorName.data(), runtimePerfKnobsHost);
+    inputBuffers.insert_or_assign(kHostContextProgressTensorName.data(), contextProgressHost);
 
     if (crossKvCacheBlockOffsetsHost)
     {
-        inputBuffers.insert_or_assign("cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsDevice);
-        inputBuffers.insert_or_assign("host_cross_kv_cache_block_offsets", crossKvCacheBlockOffsetsHost);
-        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_pointers", crossKvCacheBlockPoolPointers);
-        inputBuffers.insert_or_assign("host_cross_kv_cache_pool_mapping", crossKvCacheBlockPoolMapping);
-        inputBuffers.insert_or_assign("cross_attention_mask", crossAttentionMaskDevice);
-        inputBuffers.insert_or_assign("cross_attention_packed_mask", crossAttentionPackedMaskDevice);
+        inputBuffers.insert_or_assign(kCrossKvCacheBlockOffsetsTensorName.data(), crossKvCacheBlockOffsetsDevice);
+        inputBuffers.insert_or_assign(kHostCrossKvCacheBlockOffsetsTensorName.data(), crossKvCacheBlockOffsetsHost);
+        inputBuffers.insert_or_assign(kHostCrossKvCachePoolPointersTensorName.data(), crossKvCacheBlockPoolPointers);
+        inputBuffers.insert_or_assign(kHostCrossKvCachePoolMappingTensorName.data(), crossKvCacheBlockPoolMapping);
+        inputBuffers.insert_or_assign(kCrossAttentionMaskTensorName.data(), crossAttentionMaskDevice);
+        inputBuffers.insert_or_assign(kCrossAttentionPackedMaskTensorName.data(), crossAttentionPackedMaskDevice);
     }
 
     if (skipCrossAttnBlocks)
     {
-        inputBuffers.insert_or_assign("skip_cross_attn_blocks", skipCrossAttnBlocks);
+        inputBuffers.insert_or_assign(kSkipCrossAttentionBlocksTensorName.data(), skipCrossAttnBlocks);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -285,15 +292,8 @@ void TransformerBuffers::reshapePositionIds(std::vector<SizeType32> const& posit
     }
 }
 
-void TransformerBuffers::copyPositionIds(
-    runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost, bool isChatGlm)
-{
-    auto const& manager = runtime.getBufferManager();
-    manager.copy(positionIdsHost.data(), *positionIds);
-}
-
 void TransformerBuffers::copyPositionIds(runtime::TllmRuntime const& runtime,
-    std::vector<SizeType32> const& positionIdsHost, bool isChatGlm, TensorPtr decoderPositionIds)
+    std::vector<SizeType32> const& positionIdsHost, bool isChatGlm, TensorPtr const& decoderPositionIds)
 {
     auto const& manager = runtime.getBufferManager();
     if (isChatGlm)
@@ -309,8 +309,8 @@ void TransformerBuffers::copyPositionIds(runtime::TllmRuntime const& runtime,
     else
     {
         // concat context phase and generation phase positionIds.
-        ITensor::DimType64 contextPositionIdsLen = static_cast<ITensor::DimType64>(positionIdsHost.size());
-        ITensor::DimType64 generationPositionIdsLen = ITensor::volume(decoderPositionIds->getShape());
+        auto const contextPositionIdsLen = static_cast<ITensor::DimType64>(positionIdsHost.size());
+        auto const generationPositionIdsLen = ITensor::volume(decoderPositionIds->getShape());
         positionIds->reshape(ITensor::makeShape({contextPositionIdsLen + generationPositionIdsLen}));
         manager.copy(positionIdsHost.data(), *ITensor::slice(positionIds, 0, contextPositionIdsLen));
         manager.copy(*decoderPositionIds, *ITensor::slice(positionIds, contextPositionIdsLen));
@@ -319,11 +319,10 @@ void TransformerBuffers::copyPositionIds(runtime::TllmRuntime const& runtime,
 
 void TransformerBuffers::resetCacheIndirection(RequestVector const& contextRequests, SizeType32 maxBeamWidth,
     SizeType32 maxAttentionWindow, TensorPtr const& decoderCacheIndirectionInput,
-    TensorPtr const& decoderCacheIndirectionOutput, TllmRuntime const& runtime)
+    TensorPtr const& decoderCacheIndirectionOutput, BufferManager const& manager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(resetCacheIndirection);
-    auto const& manager = runtime.getBufferManager();
     auto const& stream = manager.getStream();
 
     auto const numContextRequests = contextRequests.size();
@@ -337,20 +336,19 @@ void TransformerBuffers::resetCacheIndirection(RequestVector const& contextReque
     manager.copy(*seqSlotsHostView, *seqSlotsDeviceView);
     manager.copy(*fillValuesAlt, *fillValuesAltDevice);
     runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionInput, *seqSlotsDeviceView,
-        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
+        static_cast<std::uint64_t>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
     runtime::kernels::invokeFillBatch<std::int32_t>(*decoderCacheIndirectionOutput, *seqSlotsDeviceView,
-        static_cast<long>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
+        static_cast<std::uint64_t>(maxBeamWidth) * maxAttentionWindow, *fillValuesAltDevice, stream);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests, RequestVector const& genRequests,
     kv_cache_manager::KVCacheManager const* kvCacheManager, kv_cache_manager::KVCacheManager const* crossKvCacheManager,
-    TllmRuntime const& runtime)
+    BufferManager const& manager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(copyKvBlockPointers);
 
-    auto const& manager = runtime.getBufferManager();
     auto const& cudaStream = manager.getStream();
 
     SizeType32 constexpr contextBeamWidth{1};
@@ -404,11 +402,10 @@ void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests
 }
 
 void TransformerBuffers::copyCacheIndirection(
-    RequestVector const& genRequests, TensorPtr const& decoderCacheIndirectionOutput, TllmRuntime const& runtime)
+    RequestVector const& genRequests, TensorPtr const& decoderCacheIndirectionOutput, CudaStream const& stream)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(copyCacheIndirection);
-    auto const& stream = runtime.getStream();
 
     auto const numGenerationRequests = genRequests.size();
 
@@ -472,7 +469,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
         attentionMaskParams.actualQSeqLens = bufferCastOrNull<SizeType32>(decoderContextLengthsDevice);
         attentionMaskParams.actualKvSeqLens = bufferCastOrNull<SizeType32>(encoderInputLengths);
         attentionMaskParams.attentionMaskType = tk::AttentionMaskType::PADDING;
-        attentionMaskParams.batchSize = contextRequests.size();
+        attentionMaskParams.batchSize = static_cast<SizeType32>(contextRequests.size());
         attentionMaskParams.maxQSeqLen = maxDecoderContextLength;
         attentionMaskParams.maxKvSeqLen = maxEncoderInputLengthInBatch;
         // Launch the kernel.
@@ -503,9 +500,9 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
         if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
         {
             auto memType = crossAttentionMaskRequest->getMemoryType();
-            SizeType64 crossAttentionMaskRequestDim0
+            auto const crossAttentionMaskRequestDim0
                 = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[0]);
-            SizeType64 crossAttentionMaskRequestDim1
+            auto const crossAttentionMaskRequestDim1
                 = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[1]);
             TLLM_LOG_DEBUG("copyCrossAttentionMasks (shape [%d, %d]) from contextRequests position %d chunkSize %d",
                 crossAttentionMaskRequestDim0, crossAttentionMaskRequestDim1, position, size);
@@ -520,9 +517,9 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             if (memType == MemoryType::kCPU)
             {
                 TLLM_LOG_DEBUG("CrossAttentionMask tensor is on CPU.");
-                SizeType64 copiedPosition
+                auto const copiedPosition
                     = std::min(crossAttentionMaskRequestDim0 - 1, static_cast<SizeType64>(position));
-                SizeType64 copiedSize
+                auto const copiedSize
                     = std::min(crossAttentionMaskRequestDim0 - copiedPosition, static_cast<SizeType64>(size));
                 SizeType64 inputMaskOffset = (copiedPosition * crossAttentionMaskRequestDim1);
                 SizeType64 inputMaskSize = (copiedSize * crossAttentionMaskRequestDim1);
@@ -577,9 +574,9 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
         if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
         {
             auto const memType = crossAttentionMaskRequest->getMemoryType();
-            SizeType64 crossAttentionMaskRequestDim0
+            auto const crossAttentionMaskRequestDim0
                 = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[0]);
-            SizeType64 crossAttentionMaskRequestDim1
+            auto const crossAttentionMaskRequestDim1
                 = static_cast<SizeType64>(crossAttentionMaskRequest->getShape().d[1]);
             TLLM_LOG_DEBUG("copyCrossAttentionMasks (shape [%d, %d]) from genRequests decodingIter %d",
                 crossAttentionMaskRequestDim0, crossAttentionMaskRequestDim1, decodingIter);

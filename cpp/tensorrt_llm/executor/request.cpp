@@ -24,7 +24,8 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<std::vector<SizeType32>> positionIds, std::optional<std::list<VecTokens>> badWords,
     std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
     std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig, std::optional<PromptTuningConfig> pTuningConfig,
-    std::optional<LoraConfig> loraConfig, std::optional<LookaheadDecodingConfig> lookaheadConfig,
+    std::optional<MropeConfig> mRopeConfig, std::optional<LoraConfig> loraConfig,
+    std::optional<LookaheadDecodingConfig> lookaheadConfig,
     std::optional<KvCacheRetentionConfig> kvCacheRetentionConfig, std::optional<std::string> logitsPostProcessorName,
     std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
     float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
@@ -33,7 +34,7 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<Tensor> skipCrossAttnBlocks)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
-        std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
+        std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
@@ -130,6 +131,11 @@ std::optional<ExternalDraftTokensConfig> Request::getExternalDraftTokensConfig()
 std::optional<PromptTuningConfig> Request::getPromptTuningConfig() const
 {
     return mImpl->getPromptTuningConfig();
+}
+
+std::optional<MropeConfig> Request::getMropeConfig() const
+{
+    return mImpl->getMropeConfig();
 }
 
 std::optional<LoraConfig> Request::getLoraConfig() const
@@ -268,6 +274,11 @@ void Request::setExternalDraftTokensConfig(ExternalDraftTokensConfig const& spec
 void Request::setPromptTuningConfig(PromptTuningConfig const& pTuningConfig)
 {
     return mImpl->setPromptTuningConfig(pTuningConfig);
+}
+
+void Request::setMropeConfig(MropeConfig const& mRopeConfig)
+{
+    return mImpl->setMropeConfig(mRopeConfig);
 }
 
 void Request::setLoraConfig(LoraConfig const& loraConfig)

@@ -32,8 +32,8 @@ public:
         std::optional<TokenIdType> const& padId, std::optional<std::vector<SizeType32>> positionIds,
         std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
         std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
-        std::optional<PromptTuningConfig> pTuningConfig, std::optional<LoraConfig> loraConfig,
-        std::optional<LookaheadDecodingConfig> lookaheadConfig,
+        std::optional<PromptTuningConfig> pTuningConfig, std::optional<MropeConfig> mRopeConfig,
+        std::optional<LoraConfig> loraConfig, std::optional<LookaheadDecodingConfig> lookaheadConfig,
         std::optional<KvCacheRetentionConfig> kvCacheRetentionConfig,
         std::optional<std::string> logitsPostProcessorName, std::optional<VecTokens> encoderInputTokenIds,
         std::optional<IdType> clientId, bool returnAllGeneratedTokens, PriorityType priority, RequestType type,
@@ -54,6 +54,7 @@ public:
         , mEmbeddingBias(checkEmbeddingBias(std::move(embeddingBias)))
         , mExternalDraftTokensConfig(std::move(externalDraftTokensConfig))
         , mPTuningConfig(std::move(pTuningConfig))
+        , mMropeConfig(std::move(mRopeConfig))
         , mLoraConfig(std::move(loraConfig))
         , mLookaheadConfig(std::move(lookaheadConfig))
         , mKvCacheRetentionConfig(std::move(kvCacheRetentionConfig))
@@ -151,6 +152,11 @@ public:
     std::optional<PromptTuningConfig> getPromptTuningConfig() const
     {
         return mPTuningConfig;
+    }
+
+    std::optional<MropeConfig> getMropeConfig() const
+    {
+        return mMropeConfig;
     }
 
     std::optional<LoraConfig> getLoraConfig() const
@@ -291,6 +297,11 @@ public:
         mPTuningConfig = pTuningConfig;
     }
 
+    void setMropeConfig(MropeConfig const& mRopeConfig)
+    {
+        mMropeConfig = mRopeConfig;
+    }
+
     void setLoraConfig(LoraConfig const& loraConfig)
     {
         mLoraConfig = loraConfig;
@@ -417,6 +428,7 @@ private:
         lambda(mEmbeddingBias);
         lambda(mExternalDraftTokensConfig);
         lambda(mPTuningConfig);
+        lambda(mMropeConfig);
         lambda(mLoraConfig);
         lambda(mLookaheadConfig);
         lambda(mKvCacheRetentionConfig);
@@ -448,6 +460,7 @@ private:
     std::optional<Tensor> mEmbeddingBias;
     std::optional<ExternalDraftTokensConfig> mExternalDraftTokensConfig;
     std::optional<PromptTuningConfig> mPTuningConfig;
+    std::optional<MropeConfig> mMropeConfig;
     std::optional<LoraConfig> mLoraConfig;
     std::optional<LookaheadDecodingConfig> mLookaheadConfig;
     std::optional<KvCacheRetentionConfig> mKvCacheRetentionConfig;

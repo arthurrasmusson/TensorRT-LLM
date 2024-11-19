@@ -54,7 +54,7 @@ TEST(RequestWithIdTest, serializeDeserialize)
     std::vector<RequestWithId> reqWithIds;
     reqWithIds.emplace_back(RequestWithId{request1, 1});
     reqWithIds.emplace_back(RequestWithId{request2, 2});
-    reqWithIds.emplace_back(RequestWithId{request3, 3, {4, 5}});
+    reqWithIds.emplace_back(RequestWithId{request3, 3, {4, 5}, std::chrono::steady_clock::now()});
 
     auto serialized = RequestWithId::serializeReqWithIds(reqWithIds);
     auto reqWithIdsOut = RequestWithId::deserializeReqWithIds(serialized);
@@ -68,6 +68,7 @@ TEST(RequestWithIdTest, serializeDeserialize)
 
         EXPECT_EQ(reqWithIdOut.id, reqWithId.id);
         EXPECT_EQ(reqWithIdOut.childReqIds, reqWithId.childReqIds);
+        EXPECT_EQ(reqWithIdOut.queuedStart, reqWithId.queuedStart);
         auto const& reqOut = reqWithIdOut.req;
         auto const& req = reqWithId.req;
         EXPECT_EQ(reqOut.getInputTokenIds(), req.getInputTokenIds());

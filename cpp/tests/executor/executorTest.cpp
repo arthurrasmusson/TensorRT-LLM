@@ -14,6 +14,7 @@
 #error "Define TOP_LEVEL_DIR"
 #endif
 
+#include "tensorrt_llm/executor/executor.h"
 #include "disaggExecutor.h"
 #include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/trtGptModel.h"
@@ -2422,7 +2423,7 @@ void verifyGenerateDistStats(std::deque<RequestStatsPerIteration> const& iterati
     }
 }
 
-void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutor& executor,
+void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorLeader& executor,
     tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput, ModelIds const& modelIds,
     FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
     OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
@@ -2561,7 +2562,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
     }
 }
 
-void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggOrchestratorExecutor& executor,
+void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorOrchestrator& executor,
     tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput, ModelIds const& modelIds,
     FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
     OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
@@ -2641,12 +2642,12 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggOrches
 
             for (auto&& responseWithId : contextResponses)
             {
-                auto contextGid = responseWithId.id;
+                auto contextGid = responseWithId.gid;
                 int batchId = reqIdToBatchId[contextGid];
                 auto&& request = requests[batchId];
                 request.setRequestType(RequestType::REQUEST_TYPE_GENERATION_ONLY);
                 request.setContextPhaseParams(responseWithId.response.getResult().contextPhaseParams.value());
-                executor.enqueueGeneration({request}, {responseWithId.id}, std::nullopt);
+                executor.enqueueGeneration({request}, {responseWithId.gid}, std::nullopt);
             }
         }
         // Get the new tokens for each requests
@@ -2664,7 +2665,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggOrches
                 {
                     auto result = responseWithId.response.getResult();
                     numFinished += result.isFinal;
-                    auto batchId = reqIdToBatchId.at(responseWithId.id);
+                    auto batchId = reqIdToBatchId.at(responseWithId.gid);
                     auto seqIdx = result.sequenceIndex;
 
                     auto& contextLogits = result.contextLogits;
@@ -2703,7 +2704,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggOrches
                 else
                 {
                     // Allow response with error only if awaitResponse processed a terminated request id
-                    std::string err = "ReqId " + std::to_string(responseWithId.id)
+                    std::string err = "ReqId " + std::to_string(responseWithId.gid)
                         + " has already been processed and was terminated.";
                     EXPECT_EQ(responseWithId.response.getErrorMsg(), err);
                 }
@@ -3152,7 +3153,7 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
     auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
     world_comm.barrier();
     auto disaggExecutor
-        = tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutor(modelPath, ModelType::kDECODER_ONLY,
+        = tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorLeader(modelPath, ModelType::kDECODER_ONLY,
             executorConfig, isController, isContext, givenInputLengths.size(), participatntIds, deviceIds, commRank);
 
     runDisaggTest(disaggExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
@@ -3197,13 +3198,6 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
     ASSERT_EQ(instanceNum, modelNames.size());
     ASSERT_GE(controllerRank, 0);
     ASSERT_LT(controllerRank, commSize);
-    int ranksNum = 0;
-    std::unordered_map<SizeType32, SizeType32> rankCounter;
-    std::unordered_map<SizeType32, SizeType32> deviceCounter;
-    SizeType32 deviceRuseNum = 1;
-    bool isContext = false;
-    std::vector<int> participatntIds;
-    std::vector<int> deviceIds;
     std::string modelName = modelNames[0];
     bool isController = (commRank == controllerRank);
     std::vector<fs::path> contextModels;
@@ -3339,20 +3333,42 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
         mMaxWaitMs = 20000;
     }
 
-    auto executorConfig = ExecutorConfig(maxBeamWidth);
-    FloatType freeGpuMemoryFraction = 0.9f / (deviceRuseNum); // context and gen instance run on same device
-    KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
-    executorConfig.setKvCacheConfig(kvCacheConfig);
-    executorConfig.setRequestStatsMaxIterations(1000);
     auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
     auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
     auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
     world_comm.barrier();
-    auto disaggExecutor = tensorrt_llm::testing::executor::disaggexecutor::DisaggOrchestratorExecutor{
-        contextModels, genModels, std::nullopt, 1, CapacitySchedulerPolicy::kMAX_UTILIZATION, true, true};
+    auto contextNum = contextModels.size();
+    auto genNum = genModels.size();
+    //     int deviceCount = -1;
+    // TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+    bool isOrchestrator = commRank == 0;
+    std::vector<ExecutorConfig> ctxExecutorConfigs;
+    std::vector<ExecutorConfig> genExecutorConfigs;
+    for (int in = 0; in < instanceNum; in++)
+    {
+        tensorrt_llm::executor::SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kMAX_UTILIZATION);
+        KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, 0.2};
+
+        tensorrt_llm::executor::ExecutorConfig executorConfig(maxBeamWidth, schedulerConfig, kvCacheConfig);
+        tensorrt_llm::executor::OrchestratorConfig orchestratorConfig{isOrchestrator, "", nullptr, false};
+        tensorrt_llm::executor::ParallelConfig parallelConfig{tensorrt_llm::executor::CommunicationType::kMPI,
+            tensorrt_llm::executor::CommunicationMode::kORCHESTRATOR, participantDeviceIdsEachInstance.at(in),
+            participantIdsEachInstance.at(in), orchestratorConfig};
+        executorConfig.setParallelConfig(parallelConfig);
+        if (in < contextNum)
+        {
+            ctxExecutorConfigs.push_back(executorConfig);
+        }
+        else
+        {
+            genExecutorConfigs.push_back(executorConfig);
+        }
+    }
+    auto disaggExecutor = tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorOrchestrator(
+        contextModels, genModels, ctxExecutorConfigs, genExecutorConfigs, true, true);
 
     runDisaggTest(disaggExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
-        outConfig, isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false);
+        outConfig, isSpeculativeDecoding, mMaxWaitMs, BatchingType::kINFLIGHT, false);
 
 #else
 
@@ -6236,7 +6252,7 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP2PP2DisaggAsymmetricExecutorTest, Dis
 INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
     testing::Combine(testing::Values(7),
         testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp2", "llama_tp1_pp2"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
+        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4}, {5, 6}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
         testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
     generateTestNameDisaggParams);
@@ -6244,7 +6260,7 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaaggOrchestrator, DisaggOrchestra
 INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen1TP2PP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
     testing::Combine(testing::Values(7),
         testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp2"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3, 4, 5}}),
+        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4, 5, 6}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3, 0, 1}}),
         testing::Values(std::vector<int>{1, 1, 0}), testing::Values(0)),
     generateTestNameDisaggParams);

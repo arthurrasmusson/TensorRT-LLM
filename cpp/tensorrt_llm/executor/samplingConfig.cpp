@@ -338,7 +338,8 @@ std::optional<FloatType> const& SamplingConfig::checkRepetitionPenalty(std::opti
 {
     if (penalty.has_value())
     {
-        TLLM_CHECK(penalty.value() > 0.f);
+        TLLM_CHECK_WITH_INFO(penalty.value() > 0.F,
+            "Repetition penalty should be strictly greater than zero. Provided value was %f", penalty.value());
     }
     return penalty;
 }

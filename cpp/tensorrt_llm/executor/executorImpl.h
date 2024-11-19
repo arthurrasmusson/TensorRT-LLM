@@ -43,7 +43,7 @@ namespace tensorrt_llm::executor
 class RequestWithIdAsyncSend;
 class CancelledRequestsAsyncSend;
 
-std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::MpiComm> commSession, int const peer);
+std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int peer);
 
 class MpiMessageQueue
 {
@@ -93,6 +93,11 @@ public:
         shutdown();
     }
 
+    Impl(Impl const& executor) = delete;
+    Impl& operator=(Impl const& executor) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
+
     IdType enqueueRequest(Request const& request);
 
     std::vector<IdType> enqueueRequests(std::vector<Request> const& requests);
@@ -105,7 +110,7 @@ public:
         IdType const& optId, std::optional<std::chrono::milliseconds> const& optTimeout = std::nullopt);
 
     std::vector<std::vector<Response>> awaitResponses(
-        std::vector<IdType> const& optId, std::optional<std::chrono::milliseconds> const& optTimeout = std::nullopt);
+        std::vector<IdType> const& requestIds, std::optional<std::chrono::milliseconds> const& timeout);
 
     SizeType32 getNumResponsesReady(std::optional<IdType> const& optId = std::nullopt) const;
 
@@ -185,12 +190,15 @@ private:
         SizeType32 numNewActiveRequests, double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
 
     void appendCurrentIterStats(IterationStats&& currentIterStats);
+    void appendMultipleIterStats(std::vector<IterationStats>&& currentIterStatsVec);
     void updateIterationStats(RequestList const& activeRequests, double iterLatencyMS, SizeType32 numNewActiveRequests,
-        double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests);
-
+        double newActiveRequestsQueueLatencyMS, SizeType32 numCompletedRequests, bool flushToOrchestrator);
+    void appendCurrentRequestStats(RequestStatsPerIteration&& currentRequestStats);
+    void appendMultipleRequestStats(std::vector<RequestStatsPerIteration>&& currentRequestStatsVec);
     RequestStatsPerIteration getCurrentRequestStats(
         RequestList const& activeRequests, RequestList const& finishedRequests);
-    void updateRequestStats(RequestList const& activeRequests, RequestList const& finishedRequests);
+    void updateRequestStats(
+        RequestList const& activeRequests, RequestList const& finishedRequests, bool flushToOrchestrator);
 
     void appendCurrentDebugTensors();
 

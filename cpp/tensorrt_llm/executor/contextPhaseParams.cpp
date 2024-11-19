@@ -44,7 +44,7 @@ ContextPhaseParams::ContextPhaseParams(ContextPhaseParams const& other)
     }
 }
 
-ContextPhaseParams::ContextPhaseParams(ContextPhaseParams&&) = default;
+ContextPhaseParams::ContextPhaseParams(ContextPhaseParams&&) noexcept = default;
 
 ContextPhaseParams& ContextPhaseParams::operator=(ContextPhaseParams const& other)
 {
@@ -52,7 +52,9 @@ ContextPhaseParams& ContextPhaseParams::operator=(ContextPhaseParams const& othe
     return *this;
 }
 
-ContextPhaseParams& ContextPhaseParams::operator=(ContextPhaseParams&&) = default;
+ContextPhaseParams& ContextPhaseParams::operator=(ContextPhaseParams&&) noexcept = default;
+
+ContextPhaseParams::~ContextPhaseParams() = default;
 
 VecTokens const& ContextPhaseParams::getFirstGenTokens() const& noexcept
 {

@@ -1374,12 +1374,12 @@ void KVCacheManager::getBlockOffsetsOfBatch(
     }
 }
 
-std::tuple<SizeType32, SizeType32> const KVCacheManager::calculateMaxNumBlocks(KvCacheConfig const& config,
+std::tuple<SizeType32, SizeType32> KVCacheManager::calculateMaxNumBlocks(KvCacheConfig const& config,
     nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     runtime::BufferManager const& bufferManager)
 {
     auto const freeMemFraction = config.freeGpuMemoryFraction.value_or(KvCacheConfig::kDefaultGpuMemFraction);
-    TLLM_CHECK_WITH_INFO(freeMemFraction < 1.0f,
+    TLLM_CHECK_WITH_INFO(freeMemFraction < 1.0F,
         "Invalid freeMemFraction, freeMemFraction (%f) must be smaller than 1.0f", freeMemFraction);
     auto const cacheSizePerToken
         = kv_cache_manager::KVCacheManager::calculateCacheSizePerToken(modelConfig, worldConfig);
@@ -1408,6 +1408,7 @@ std::tuple<SizeType32, SizeType32> const KVCacheManager::calculateMaxNumBlocks(K
         }
         else
         {
+            TLLM_LOG_INFO("Maximum kv-cache token overridden by configuration as '%i'.", config.maxTokens.value());
             maxTokens = config.maxTokens.value();
         }
     }
@@ -1415,10 +1416,10 @@ std::tuple<SizeType32, SizeType32> const KVCacheManager::calculateMaxNumBlocks(K
     {
         TLLM_CHECK(worldConfig.validMpiConfig());
         // make sure all ranks use same value for maxTokens
-        int64_t __maxTokensRank{maxTokens};
-        int64_t __maxTokensWorld{0};
-        COMM_SESSION.allreduce(&__maxTokensRank, &__maxTokensWorld, 1, mpi::MpiType::kINT64, mpi::MpiOp::MIN);
-        maxTokens = static_cast<SizeType32>(__maxTokensWorld);
+        int64_t _maxTokensRank{maxTokens};
+        int64_t _maxTokensWorld{0};
+        COMM_SESSION.allreduce(&_maxTokensRank, &_maxTokensWorld, 1, mpi::MpiType::kINT64, mpi::MpiOp::MIN);
+        maxTokens = static_cast<SizeType32>(_maxTokensWorld);
     }
 
     auto const tokensPerBlock = modelConfig.getTokensPerBlock();

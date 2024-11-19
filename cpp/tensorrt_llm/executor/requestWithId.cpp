@@ -12,6 +12,7 @@
 
 #include "requestWithId.h"
 
+#include <cstdint>
 #include <istream>
 #include <ostream>
 #include <sstream>
@@ -29,6 +30,7 @@ std::vector<char> tensorrt_llm::executor::RequestWithId::serializeReqWithIds(
         totalSize += su::serializedSize(reqWithId.id);
         totalSize += su::serializedSize(reqWithId.req);
         totalSize += su::serializedSize(reqWithId.childReqIds);
+        totalSize += su::serializedSize(static_cast<uint64_t>(reqWithId.queuedStart.time_since_epoch().count()));
     }
 
     std::vector<char> buffer(totalSize);
@@ -42,6 +44,7 @@ std::vector<char> tensorrt_llm::executor::RequestWithId::serializeReqWithIds(
         su::serialize(reqWithId.id, ostream);
         su::serialize(reqWithId.req, ostream);
         su::serialize(reqWithId.childReqIds, ostream);
+        su::serialize(static_cast<uint64_t>(reqWithId.queuedStart.time_since_epoch().count()), ostream);
     }
     return buffer;
 }
@@ -57,7 +60,9 @@ std::vector<RequestWithId> tensorrt_llm::executor::RequestWithId::deserializeReq
         auto const id = su::deserialize<IdType>(istream);
         auto const request = Serialization::deserializeRequest(istream);
         auto const childReqIds = su::deserialize<std::vector<IdType>>(istream);
-        reqWithIds.emplace_back(RequestWithId{request, id, childReqIds});
+        auto const queuedStart = std::chrono::steady_clock::time_point{
+            std::chrono::steady_clock::duration{su::deserialize<uint64_t>(istream)}};
+        reqWithIds.emplace_back(RequestWithId{request, id, childReqIds, queuedStart});
     }
     return reqWithIds;
 }

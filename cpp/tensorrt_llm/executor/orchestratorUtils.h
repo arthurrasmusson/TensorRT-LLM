@@ -39,6 +39,7 @@ enum class MpiId : uint64_t
     CANCEL_REQUEST = 3,
     TERMINATION = 4,
     ITER_STATS = 5,
+    REQUEST_ITER_STATS = 6,
 };
 
 struct PendingRequestData
@@ -58,10 +59,16 @@ struct ResponseData
 
 struct IterStatsData
 {
-    IterationStats iterStats;
+    std::vector<IterationStats> iterStatsVec;
 };
 
-using MpiMessageData = std::variant<PendingRequestData, RequestIdsData, ResponseData, IterStatsData>;
+struct RequestStatsPerIterationData
+{
+    std::vector<RequestStatsPerIteration> requestStatsPerIterationVec;
+};
+
+using MpiMessageData
+    = std::variant<PendingRequestData, RequestIdsData, ResponseData, IterStatsData, RequestStatsPerIterationData>;
 
 struct MpiMessage
 {

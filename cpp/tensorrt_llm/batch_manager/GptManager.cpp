@@ -419,9 +419,10 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
 
     auto r = std::make_shared<LlmRequest>(newReq->getRequestId(), maxNewTokens, tokens, samplingConfig,
         newReq->isStreaming(), endId, padId, embeddingBias, badWordsList, stopWordsList, positionIds,
-        promptEmbeddingTable, promptVocabSize, loraTaskId, optLoraWeights, optLoraConfig, lookaheadConfig, std::nullopt,
-        returnLogProbs.value(), returnContextLogits.value(), returnGenerationLogits.value(), draftTokens, draftLogits,
-        false /* FIXME: exclude input in output */, newReq->getLogitsPostProcessor());
+        promptEmbeddingTable, promptVocabSize, std::nullopt, std::nullopt, loraTaskId, optLoraWeights, optLoraConfig,
+        lookaheadConfig, std::nullopt, returnLogProbs.value(), returnContextLogits.value(),
+        returnGenerationLogits.value(), draftTokens, draftLogits, false /* FIXME: exclude input in output */,
+        newReq->getLogitsPostProcessor());
 
     if (samplingConfig.numReturnSequences > 1)
     {

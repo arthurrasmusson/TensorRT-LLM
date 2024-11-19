@@ -33,6 +33,7 @@ set(SRCS
     parallelConfig.cpp
     peftCacheConfig.cpp
     promptTuningConfig.cpp
+    mropeConfig.cpp
     request.cpp
     requestUtils.cpp
     requestWithId.cpp

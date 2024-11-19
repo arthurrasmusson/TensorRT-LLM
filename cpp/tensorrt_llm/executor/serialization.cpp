@@ -180,6 +180,29 @@ size_t Serialization::serializedSize(PromptTuningConfig const& config)
     return totalSize;
 }
 
+// MropeConfig
+MropeConfig Serialization::deserializeMropeConfig(std::istream& is)
+{
+    auto mropeRotarySinCos = su::deserialize<Tensor>(is);
+    auto mropePositionDeltas = su::deserialize<SizeType32>(is);
+    return MropeConfig{std::move(mropeRotarySinCos), std::move(mropePositionDeltas)};
+}
+
+void Serialization::serialize(MropeConfig const& config, std::ostream& os)
+{
+    su::serialize(config.mMRopeRotarySinCos, os);
+    su::serialize(config.mMRopePositionDeltas, os);
+}
+
+size_t Serialization::serializedSize(MropeConfig const& config)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(config.mMRopeRotarySinCos);
+    totalSize += su::serializedSize(config.mMRopePositionDeltas);
+
+    return totalSize;
+}
+
 // LoraConfig
 LoraConfig Serialization::deserializeLoraConfig(std::istream& is)
 {
@@ -410,6 +433,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto embeddingBias = su::deserialize<std::optional<Tensor>>(is);
     auto externalDraftTokensConfig = su::deserialize<std::optional<ExternalDraftTokensConfig>>(is);
     auto pTuningConfig = su::deserialize<std::optional<PromptTuningConfig>>(is);
+    auto mRopeConfig = su::deserialize<std::optional<MropeConfig>>(is);
     auto loraConfig = su::deserialize<std::optional<LoraConfig>>(is);
     auto lookaheadConfig = su::deserialize<std::optional<LookaheadDecodingConfig>>(is);
     auto kvCacheRetentionConfig = su::deserialize<std::optional<KvCacheRetentionConfig>>(is);
@@ -429,7 +453,7 @@ Request Serialization::deserializeRequest(std::istream& is)
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
-        std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(loraConfig),
+        std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
@@ -1436,6 +1460,217 @@ std::vector<char> Serialization::serialize(IterationStats const& iterStats)
     Serialization::serialize(iterStats, os);
 
     return buffer;
+}
+
+std::vector<IterationStats> Serialization::deserializeIterationStatsVec(std::vector<char>& buffer)
+{
+    std::vector<IterationStats> iterStatsVec;
+    su::VectorWrapBuf<char> strbuf(buffer);
+    std::istream is(&strbuf);
+    auto numIterStats = su::deserialize<std::size_t>(is);
+    for (std::size_t iterStats = 0; iterStats < numIterStats; ++iterStats)
+    {
+        iterStatsVec.emplace_back(Serialization::deserializeIterationStats(is));
+    }
+    return iterStatsVec;
+}
+
+std::vector<char> Serialization::serialize(std::vector<IterationStats> const& iterStatsVec)
+{
+    size_t totalSize = 0;
+    totalSize += sizeof(size_t);
+    for (auto const& iterStats : iterStatsVec)
+    {
+        totalSize += su::serializedSize(iterStats);
+    }
+    std::vector<char> buffer(totalSize);
+    std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
+    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    std::ostream os(&strbuf);
+    su::serialize(iterStatsVec.size(), os);
+    for (auto const& iterStats : iterStatsVec)
+    {
+        su::serialize(iterStats, os);
+    }
+    return buffer;
+}
+
+// DistServinigState
+
+DisServingRequestStats Serialization::deserializeDisServingRequestStats(std::istream& is)
+{
+    double kvCacheTransferMs = su::deserialize<double>(is);
+    return DisServingRequestStats{kvCacheTransferMs};
+}
+
+void Serialization::serialize(DisServingRequestStats const& stats, std::ostream& os)
+{
+    su::serialize(stats.kvCacheTransferMS, os);
+}
+
+size_t Serialization::serializedSize(DisServingRequestStats const& disServingRequestStats)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(disServingRequestStats.kvCacheTransferMS);
+    return totalSize;
+}
+
+// ReqeuestStage
+
+RequestStage Serialization::deserializeRequestStage(std::istream& is)
+{
+    int stage = su::deserialize<int>(is);
+    return RequestStage{stage};
+}
+
+void Serialization::serialize(RequestStage const& stats, std::ostream& os)
+{
+    su::serialize(static_cast<int>(stats), os);
+}
+
+size_t Serialization::serializedSize(RequestStage const& stage)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(static_cast<int>(stage));
+    return totalSize;
+}
+
+// RequestStats
+RequestStats Serialization::deserializeRequestStats(std::istream& is)
+{
+    auto id = su::deserialize<IdType>(is);
+    auto stage = su::deserialize<RequestStage>(is);
+    auto contextPrefillPosition = su::deserialize<SizeType32>(is);
+    auto numGeneratedTokens = su::deserialize<SizeType32>(is);
+    auto avgNumDecodedTokensPerIter = su::deserialize<float>(is);
+    auto scheduled = su::deserialize<bool>(is);
+    auto paused = su::deserialize<bool>(is);
+    auto disServingStats = su::deserialize<std::optional<DisServingRequestStats>>(is);
+    auto allocTotalBlocksPerRequest = su::deserialize<SizeType32>(is);
+    auto allocNewBlocksPerRequest = su::deserialize<SizeType32>(is);
+    auto reusedBlocksPerRequest = su::deserialize<SizeType32>(is);
+    auto missedBlocksPerRequest = su::deserialize<SizeType32>(is);
+    auto kvCacheHitRatePerRequest = su::deserialize<SizeType32>(is);
+
+    return RequestStats{id, stage, contextPrefillPosition, numGeneratedTokens, avgNumDecodedTokensPerIter, scheduled,
+        paused, disServingStats, allocTotalBlocksPerRequest, allocNewBlocksPerRequest, reusedBlocksPerRequest,
+        missedBlocksPerRequest, kvCacheHitRatePerRequest};
+}
+
+void Serialization::serialize(RequestStats const& state, std::ostream& os)
+{
+    su::serialize(state.id, os);
+    su::serialize(state.stage, os);
+    su::serialize(state.contextPrefillPosition, os);
+    su::serialize(state.numGeneratedTokens, os);
+    su::serialize(state.avgNumDecodedTokensPerIter, os);
+    su::serialize(state.scheduled, os);
+    su::serialize(state.paused, os);
+    su::serialize(state.disServingStats, os);
+    su::serialize(state.allocTotalBlocksPerRequest, os);
+    su::serialize(state.allocNewBlocksPerRequest, os);
+    su::serialize(state.reusedBlocksPerRequest, os);
+    su::serialize(state.missedBlocksPerRequest, os);
+    su::serialize(state.kvCacheHitRatePerRequest, os);
+}
+
+size_t Serialization::serializedSize(RequestStats const& state)
+{
+
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.id);
+    totalSize += su::serializedSize((state.stage));
+    totalSize += su::serializedSize(state.contextPrefillPosition);
+    totalSize += su::serializedSize(state.numGeneratedTokens);
+    totalSize += su::serializedSize(state.avgNumDecodedTokensPerIter);
+    totalSize += su::serializedSize(state.scheduled);
+    totalSize += su::serializedSize(state.paused);
+    totalSize += su::serializedSize(state.disServingStats);
+    totalSize += su::serializedSize(state.allocTotalBlocksPerRequest);
+    totalSize += su::serializedSize(state.allocNewBlocksPerRequest);
+    totalSize += su::serializedSize(state.reusedBlocksPerRequest);
+    totalSize += su::serializedSize(state.missedBlocksPerRequest);
+    totalSize += su::serializedSize(state.kvCacheHitRatePerRequest);
+    return totalSize;
+}
+
+// RequestStatsPerIteration
+RequestStatsPerIteration Serialization::deserializeRequestStatsPerIteration(std::istream& is)
+{
+    auto iter = su::deserialize<IterationType>(is);
+    auto requestStats = su::deserialize<std::vector<RequestStats>>(is);
+
+    return RequestStatsPerIteration{iter, requestStats};
+}
+
+RequestStatsPerIteration Serialization::deserializeRequestStatsPerIteration(std::vector<char>& buffer)
+{
+    su::VectorWrapBuf<char> strbuf(buffer);
+    std::istream is(&strbuf);
+
+    return Serialization::deserializeRequestStatsPerIteration(is);
+}
+
+void Serialization::serialize(RequestStatsPerIteration const& state, std::ostream& os)
+{
+    su::serialize(state.iter, os);
+    su::serialize(state.requestStats, os);
+}
+
+std::vector<char> Serialization::serialize(RequestStatsPerIteration const& state)
+{
+    auto totalSize = Serialization::serializedSize(state);
+    std::vector<char> buffer(totalSize);
+
+    std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
+    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    std::ostream os(&strbuf);
+
+    Serialization::serialize(state, os);
+
+    return buffer;
+}
+
+size_t Serialization::serializedSize(RequestStatsPerIteration const& state)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(state.iter);
+    totalSize += su::serializedSize(state.requestStats);
+    return totalSize;
+}
+
+std::vector<char> Serialization::serialize(std::vector<RequestStatsPerIteration> const& requestStatsVec)
+{
+    size_t totalSize = 0;
+    totalSize += sizeof(size_t);
+    for (auto const& requestStat : requestStatsVec)
+    {
+        totalSize += su::serializedSize(requestStat);
+    }
+    std::vector<char> buffer(totalSize);
+    std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
+    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    std::ostream os(&strbuf);
+    su::serialize(requestStatsVec.size(), os);
+    for (auto const& requestStat : requestStatsVec)
+    {
+        su::serialize(requestStat, os);
+    }
+    return buffer;
+}
+
+std::vector<RequestStatsPerIteration> Serialization::deserializeRequestStatsPerIterationVec(std::vector<char>& buffer)
+{
+
+    std::vector<RequestStatsPerIteration> iterRequestStatsVec;
+    su::VectorWrapBuf<char> strbuf(buffer);
+    std::istream is(&strbuf);
+    auto numIterStats = su::deserialize<std::size_t>(is);
+    for (std::size_t iterStats = 0; iterStats < numIterStats; ++iterStats)
+    {
+        iterRequestStatsVec.emplace_back(Serialization::deserializeRequestStatsPerIteration(is));
+    }
+    return iterRequestStatsVec;
 }
 
 // String

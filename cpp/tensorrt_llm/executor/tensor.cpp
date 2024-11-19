@@ -43,7 +43,9 @@ void const* Tensor::getData() const
 DataType Tensor::getDataType() const
 {
     if (!mTensor)
+    {
         return DataType::kUNKNOWN;
+    }
 
     switch (mTensor->getDataType())
     {
@@ -65,7 +67,9 @@ DataType Tensor::getDataType() const
 MemoryType Tensor::getMemoryType() const
 {
     if (!mTensor)
+    {
         return MemoryType::kUNKNOWN;
+    }
 
     switch (mTensor->getMemoryType())
     {
@@ -83,11 +87,15 @@ MemoryType Tensor::getMemoryType() const
 Shape Tensor::getShape() const
 {
     if (!mTensor)
+    {
         return {};
+    }
 
     auto const& shape = mTensor->getShape();
     if (shape.nbDims < 0)
+    {
         return {};
+    }
 
     return {shape.d, static_cast<Shape::size_type>(shape.nbDims)};
 }
@@ -233,7 +241,9 @@ Tensor Tensor::copyToGpu(Tensor::CudaStreamPtr stream) const
 void Tensor::setZero(CudaStreamPtr stream)
 {
     if (!mTensor)
+    {
         return;
+    }
 
     if (mTensor->getMemoryType() == runtime::MemoryType::kGPU)
     {

@@ -10,6 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/executor.h"
 
 namespace tensorrt_llm::executor
@@ -131,16 +132,16 @@ void KvCacheConfig::setSinkTokenLength(SizeType32 sinkTokenLength)
 
 void KvCacheConfig::setFreeGpuMemoryFraction(FloatType freeGpuMemoryFraction)
 {
-    TLLM_CHECK(freeGpuMemoryFraction > 0.f);
-    TLLM_CHECK(freeGpuMemoryFraction < 1.f);
+    TLLM_CHECK(freeGpuMemoryFraction > 0.F);
+    TLLM_CHECK(freeGpuMemoryFraction < 1.F);
     mFreeGpuMemoryFraction = freeGpuMemoryFraction;
 }
 
 void KvCacheConfig::setCrossKvCacheFraction(FloatType crossKvCacheFraction)
 
 {
-    TLLM_CHECK(crossKvCacheFraction > 0.f);
-    TLLM_CHECK(crossKvCacheFraction < 1.f);
+    TLLM_CHECK(crossKvCacheFraction > 0.F);
+    TLLM_CHECK(crossKvCacheFraction < 1.F);
     mCrossKvCacheFraction = crossKvCacheFraction;
 }
 

@@ -15,12 +15,10 @@
 #include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/common.h"
-#include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-#include "tensorrt_llm/runtime/cudaStream.h"
 #include "tensorrt_llm/runtime/iGptDecoderBatched.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
@@ -43,16 +41,16 @@ namespace tensorrt_llm::batch_manager
 namespace kv_cache_manager
 {
 class KVCacheManager;
-}
+} // namespace kv_cache_manager
 
 namespace rnn_state_manager
 {
 class RnnStateManager;
-}
+} // namespace rnn_state_manager
 class SequenceSlotManager;
 class DecoderStepAsyncSend;
 class DecoderSlotAsyncSend;
-class DecoderBuffers;
+struct DecoderBuffers;
 class SlotDecoderBuffers;
 class LlmRequest;
 class RuntimeBuffers;
@@ -135,7 +133,7 @@ public:
     void forwardAsync(RequestList const& activeRequests) override;
 
     /// @brief Override the runtime batch size for the model
-    void setRuntimeBatchSize(SizeType32 runtimeBatchSize) override;
+    void setRuntimeBatchSize(SizeType32 runtimeMaxBatchSize) override;
 
     void updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest) override;
 
@@ -256,7 +254,7 @@ private:
     /// @brief It gathers the logits if they need to be returned, calls getDecoderSlotHostOutputs,
     /// and overwrites the llmRequest tokens buffer.
     /// Called either on request finishing, or at every step when doing beam search and streaming.
-    void postProcessRequest(LlmRequest& llmReq, SizeType32 bid, std::vector<SizeType32> const& numDroppedTokens);
+    void postProcessRequest(LlmRequest& llmReq, SizeType32 batchIdx, std::vector<SizeType32> const& numDroppedTokens);
     /// @brief Calls gatherTree (via finalize) and transmits the received data across ranks if PP>1
     void getDecoderSlotHostOutputs(
         SizeType32 seqSlot, bool returnLogProbs, runtime::SamplingConfig const& samplingConfig, bool streaming);
@@ -287,10 +285,10 @@ private:
 
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
 
-    void reshapeKvTensors(KVCacheManager const& kvCacheManager);
+    void reshapeKvTensors(SizeType32 maxBlocksPerSeq, kv_cache_manager::CacheType kvCacheType, SizeType32 numPools);
 
     void draftModelSendLogitsThread();
-    std::optional<TensorPtr> targetModelReceiveLogits(
+    static std::optional<TensorPtr> targetModelReceiveLogits(
         executor::SpeculativeDecodingFastLogitsInfo const& fastLogitsInfo);
 
     [[nodiscard]] bool hasSpeculativeDecodingFastLogits() const noexcept override

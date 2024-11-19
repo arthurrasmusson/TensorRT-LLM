@@ -14,6 +14,7 @@
 
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheConfig.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -29,7 +30,7 @@ namespace tensorrt_llm::batch_manager
 namespace kv_cache_manager
 {
 class KVCacheManager;
-}
+} // namespace kv_cache_manager
 
 class TransformerBuffers
 {
@@ -38,6 +39,35 @@ public:
     using TensorPtr = runtime::ITensor::SharedPtr;
     using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
     using KvCacheType = batch_manager::kv_cache_manager::CacheType;
+
+    static constexpr std::string_view kInputIdsTensorName = "input_ids";
+    static constexpr std::string_view kAttentionMaskTensorName = "attention_mask";
+    static constexpr std::string_view kCrossAttentionMaskTensorName = "cross_attention_mask";
+    static constexpr std::string_view kCrossAttentionPackedMaskTensorName = "cross_attention_packed_mask";
+    static constexpr std::string_view kPositionIdsTensorName = "position_ids";
+    static constexpr std::string_view kContextLengthsTensorName = "context_lengths";
+    static constexpr std::string_view kHostContextLengthsTensorName = "host_context_lengths";
+    static constexpr std::string_view kSequenceLengthsTensorName = "sequence_length";
+    static constexpr std::string_view kHiddenStatesInputTensorName = "hidden_states_input";
+    static constexpr std::string_view kHiddenStatesOutputTensorName = "hidden_states_output";
+    static constexpr std::string_view kLogitsTensorName = "logits";
+    static constexpr std::string_view kLastTokenIdsTensorName = "last_token_ids";
+    static constexpr std::string_view kCacheIndirectionsTensorName = "cache_indirection";
+    static constexpr std::string_view kHostPastKeyValueLengthsTensorName = "host_past_key_value_lengths";
+    static constexpr std::string_view kHostRequestTypesTensorName = "host_request_types";
+    static constexpr std::string_view kHostSinkTokenLengthTensorName = "host_sink_token_length";
+    static constexpr std::string_view kHostMaxAttentionWindowSizesTensorName = "host_max_attention_window_sizes";
+    static constexpr std::string_view kHostRuntimePerfKnobsTensorName = "host_runtime_perf_knobs";
+    static constexpr std::string_view kHostContextProgressTensorName = "host_context_progress";
+    static constexpr std::string_view kKvCacheBlockOffsetsTensorName = "kv_cache_block_offsets";
+    static constexpr std::string_view kHostKvCacheBlockOffsetsTensorName = "host_kv_cache_block_offsets";
+    static constexpr std::string_view kHostKvCachePoolPointersTensorName = "host_kv_cache_pool_pointers";
+    static constexpr std::string_view kHostKvCachePoolMappingTensorName = "host_kv_cache_pool_mapping";
+    static constexpr std::string_view kCrossKvCacheBlockOffsetsTensorName = "cross_kv_cache_block_offsets";
+    static constexpr std::string_view kHostCrossKvCacheBlockOffsetsTensorName = "host_cross_kv_cache_block_offsets";
+    static constexpr std::string_view kHostCrossKvCachePoolPointersTensorName = "host_cross_kv_cache_pool_pointers";
+    static constexpr std::string_view kHostCrossKvCachePoolMappingTensorName = "host_cross_kv_cache_pool_mapping";
+    static constexpr std::string_view kSkipCrossAttentionBlocksTensorName = "skip_cross_attn_blocks";
 
     TensorPtr pastKeyValueLengths; // Host tensor
     TensorPtr positionIds;
@@ -93,28 +123,25 @@ public:
     void reshape(SizeType32 numSequences, SizeType32 numInputTokens);
 
     void reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
-        runtime::TllmRuntime const& runtime, kv_cache_manager::KVCacheManager const& kvCacheManager);
+        kv_cache_manager::CacheType kvCacheType, SizeType32 numPools, runtime::BufferManager const& manager);
 
     void getBuffers(TensorMap& inputBuffers) const;
 
     void reshapePositionIds(std::vector<SizeType32> const& positionIdsHost, bool isChatGlm);
 
-    void copyPositionIds(
-        runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost, bool isChatGlm);
-
     void copyPositionIds(runtime::TllmRuntime const& runtime, std::vector<SizeType32> const& positionIdsHost,
-        bool isChatGlm, TensorPtr decoderPositionIds);
+        bool isChatGlm, TensorPtr const& decoderPositionIds);
 
     void resetCacheIndirection(RequestVector const& contextRequests, SizeType32 maxBeamWidth,
         SizeType32 maxAttentionWindow, TensorPtr const& decoderCacheIndirectionInput,
-        TensorPtr const& decoderCacheIndirectionOutput, runtime::TllmRuntime const& runtime);
+        TensorPtr const& decoderCacheIndirectionOutput, runtime::BufferManager const& manager);
 
     void copyKvBlockOffsets(RequestVector const& contextRequests, RequestVector const& genRequests,
         kv_cache_manager::KVCacheManager const* kvCacheManager,
-        kv_cache_manager::KVCacheManager const* crossKvCacheManager, runtime::TllmRuntime const& runtime);
+        kv_cache_manager::KVCacheManager const* crossKvCacheManager, runtime::BufferManager const& manager);
 
     void copyCacheIndirection(RequestVector const& genRequests, TensorPtr const& decoderCacheIndirectionOutput,
-        runtime::TllmRuntime const& runtime);
+        runtime::CudaStream const& stream);
 
     void copyCrossAttentionMasks(RequestVector const& contextRequests, RequestVector const& genRequests,
         TensorPtr const& decoderContextLengthsDevice, TensorPtr const& encoderInputLengths,

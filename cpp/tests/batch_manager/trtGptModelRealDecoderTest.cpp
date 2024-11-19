@@ -1594,7 +1594,7 @@ INSTANTIATE_TEST_SUITE_P(EagleTests, ParamTest,
         testing::Values(false),        // enableTrtOverlap
         testing::Values(false),        // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
-        testing::Values(false)         // enableCudaGraphMode
+        testing::Values(true, false)   // enableCudaGraphMode
         ),
     generateTestName);
 

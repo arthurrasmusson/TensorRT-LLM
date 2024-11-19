@@ -73,7 +73,7 @@ public:
 
     [[nodiscard]] BatchState getBatchState() const noexcept
     {
-        return BatchState(numContextRequests, numGenRequests, getNumTokens(), maxKvCacheLengthRounded);
+        return {numContextRequests, numGenRequests, getNumTokens(), maxKvCacheLengthRounded};
     };
 
 private:
@@ -123,6 +123,9 @@ private:
 
     // Prompt tuning
     PromptTuningBuffers promptTuningBuffers;
+    // Mrope
+    TensorPtr mropeRotarySinCos;
+    TensorPtr mropePositionDeltas;
 
     // LoRA
     LoraBuffers loraBuffers;
@@ -236,7 +239,7 @@ private:
 
     //! @brief set max sizes for pre-allocation
     void setMaxBufferSizes(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::ModelConfig const& modelConfig,
-        std::optional<SizeType32> maxNumTokens);
+        std::optional<SizeType32> maxNumRuntimeTokens);
 
     //! @brief set sizes depending on scheduled requests
     void setBufferSizes(RequestVector const& contextRequests, RequestVector const& genRequests);
@@ -248,8 +251,7 @@ private:
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
 
-    void fillIOMaps(rnn_state_manager::RnnStateManager* rnnStateManager, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig);
+    void fillIOMaps(runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 };
 
 } // namespace tensorrt_llm::batch_manager

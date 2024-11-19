@@ -85,6 +85,7 @@ static_assert(hasSerializedSize<Request>(size_t()));
 static_assert(hasSerializedSize<SamplingConfig>(size_t()));
 static_assert(hasSerializedSize<OutputConfig>(size_t()));
 static_assert(hasSerializedSize<PromptTuningConfig>(size_t()));
+static_assert(hasSerializedSize<MropeConfig>(size_t()));
 static_assert(hasSerializedSize<LoraConfig>(size_t()));
 static_assert(hasSerializedSize<kv_cache::CommState>(size_t()));
 static_assert(hasSerializedSize<kv_cache::SocketState>(size_t()));
@@ -175,6 +176,7 @@ static_assert(hasSerialize<Request>(nullptr));
 static_assert(hasSerialize<SamplingConfig>(nullptr));
 static_assert(hasSerialize<OutputConfig>(nullptr));
 static_assert(hasSerialize<PromptTuningConfig>(nullptr));
+static_assert(hasSerialize<MropeConfig>(nullptr));
 static_assert(hasSerialize<LoraConfig>(nullptr));
 static_assert(hasSerialize<ExternalDraftTokensConfig>(nullptr));
 static_assert(hasSerialize<Tensor>(nullptr));
@@ -305,6 +307,10 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializePromptTuningConfig(is);
     }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::MropeConfig>::value)
+    {
+        return Serialization::deserializeMropeConfig(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::LoraConfig>::value)
     {
         return Serialization::deserializeLoraConfig(is);
@@ -421,6 +427,22 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::ExecutorConfig>::value)
     {
         return Serialization::deserializeExecutorConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::DisServingRequestStats>::value)
+    {
+        return Serialization::deserializeDisServingRequestStats(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStage>::value)
+    {
+        return Serialization::deserializeRequestStage(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStats>::value)
+    {
+        return Serialization::deserializeRequestStats(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStatsPerIteration>::value)
+    {
+        return Serialization::deserializeRequestStatsPerIteration(is);
     }
     // Optional
     else if constexpr (std::is_same_v<T, std::optional<typename ValueType<T>::type>>)
