@@ -892,18 +892,45 @@ size_t Serialization::serializedSize(KvCacheConfig const& kvCacheConfig)
     return totalSize;
 }
 
+// DynamicBatchConfig
+DynamicBatchConfig Serialization::deserializeDynamicBatchConfig(std::istream& is)
+{
+    auto enableBatchSizeTuning = su::deserialize<bool>(is);
+    auto enableMaxNumTokensTuning = su::deserialize<bool>(is);
+    auto dynamicBatchMovingAvgWindow = su::deserialize<SizeType32>(is);
+    return DynamicBatchConfig{enableBatchSizeTuning, enableMaxNumTokensTuning, dynamicBatchMovingAvgWindow};
+}
+
+void Serialization::serialize(DynamicBatchConfig const& DynamicBatchConfig, std::ostream& os)
+{
+    su::serialize(DynamicBatchConfig.getEnableBatchSizeTuning(), os);
+    su::serialize(DynamicBatchConfig.getEnableMaxNumTokensTuning(), os);
+    su::serialize(DynamicBatchConfig.getDynamicBatchMovingAverageWindow(), os);
+}
+
+size_t Serialization::serializedSize(DynamicBatchConfig const& DynamicBatchConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(DynamicBatchConfig.getEnableBatchSizeTuning());
+    totalSize += su::serializedSize(DynamicBatchConfig.getEnableMaxNumTokensTuning());
+    totalSize += su::serializedSize(DynamicBatchConfig.getDynamicBatchMovingAverageWindow());
+    return totalSize;
+}
+
 // SchedulerConfig
 SchedulerConfig Serialization::deserializeSchedulerConfig(std::istream& is)
 {
     auto capacitySchedulerPolicy = su::deserialize<CapacitySchedulerPolicy>(is);
     auto contextChunkingPolicy = su::deserialize<std::optional<ContextChunkingPolicy>>(is);
-    return SchedulerConfig{capacitySchedulerPolicy, contextChunkingPolicy};
+    auto dynamicBatchConfig = su::deserialize<std::optional<DynamicBatchConfig>>(is);
+    return SchedulerConfig{capacitySchedulerPolicy, contextChunkingPolicy, dynamicBatchConfig};
 }
 
 void Serialization::serialize(SchedulerConfig const& schedulerConfig, std::ostream& os)
 {
     su::serialize(schedulerConfig.getCapacitySchedulerPolicy(), os);
     su::serialize(schedulerConfig.getContextChunkingPolicy(), os);
+    su::serialize(schedulerConfig.getDynamicBatchConfig(), os);
 }
 
 size_t Serialization::serializedSize(SchedulerConfig const& schedulerConfig)
@@ -911,6 +938,7 @@ size_t Serialization::serializedSize(SchedulerConfig const& schedulerConfig)
     size_t totalSize = 0;
     totalSize += su::serializedSize(schedulerConfig.getCapacitySchedulerPolicy());
     totalSize += su::serializedSize(schedulerConfig.getContextChunkingPolicy());
+    totalSize += su::serializedSize(schedulerConfig.getDynamicBatchConfig());
     return totalSize;
 }
 
@@ -1375,6 +1403,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
     auto maxBatchSizeStatic = su::deserialize<SizeType32>(is);
     auto maxBatchSizeTunerRecommended = su::deserialize<SizeType32>(is);
     auto maxBatchSizeRuntime = su::deserialize<SizeType32>(is);
+    auto maxNumTokensStatic = su::deserialize<SizeType32>(is);
+    auto maxNumTokensTunerRecommended = su::deserialize<SizeType32>(is);
+    auto maxNumTokensRuntime = su::deserialize<SizeType32>(is);
     auto gpuMemUsage = su::deserialize<size_t>(is);
     auto cpuMemUsage = su::deserialize<size_t>(is);
     auto pinnedMemUsage = su::deserialize<size_t>(is);
@@ -1385,8 +1416,9 @@ IterationStats Serialization::deserializeIterationStats(std::istream& is)
 
     return IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS, numNewActiveRequests,
         numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests, maxBatchSizeStatic,
-        maxBatchSizeTunerRecommended, maxBatchSizeRuntime, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats,
-        crossKvCacheStats, staticBatchingStats, inflightBatchingStats};
+        maxBatchSizeTunerRecommended, maxBatchSizeRuntime, maxNumTokensStatic, maxNumTokensTunerRecommended,
+        maxNumTokensRuntime, gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvCacheStats, crossKvCacheStats,
+        staticBatchingStats, inflightBatchingStats};
 }
 
 IterationStats Serialization::deserializeIterationStats(std::vector<char>& buffer)
@@ -1414,6 +1446,9 @@ size_t Serialization::serializedSize(IterationStats const& iterStats)
     totalSize += su::serializedSize(iterStats.maxBatchSizeStatic);
     totalSize += su::serializedSize(iterStats.maxBatchSizeTunerRecommended);
     totalSize += su::serializedSize(iterStats.maxBatchSizeRuntime);
+    totalSize += su::serializedSize(iterStats.maxNumTokensStatic);
+    totalSize += su::serializedSize(iterStats.maxNumTokensTunerRecommended);
+    totalSize += su::serializedSize(iterStats.maxNumTokensRuntime);
     totalSize += su::serializedSize(iterStats.gpuMemUsage);
     totalSize += su::serializedSize(iterStats.cpuMemUsage);
     totalSize += su::serializedSize(iterStats.pinnedMemUsage);
@@ -1439,6 +1474,9 @@ void Serialization::serialize(IterationStats const& iterStats, std::ostream& os)
     su::serialize(iterStats.maxBatchSizeStatic, os);
     su::serialize(iterStats.maxBatchSizeTunerRecommended, os);
     su::serialize(iterStats.maxBatchSizeRuntime, os);
+    su::serialize(iterStats.maxNumTokensStatic, os);
+    su::serialize(iterStats.maxNumTokensTunerRecommended, os);
+    su::serialize(iterStats.maxNumTokensRuntime, os);
     su::serialize(iterStats.gpuMemUsage, os);
     su::serialize(iterStats.cpuMemUsage, os);
     su::serialize(iterStats.pinnedMemUsage, os);

@@ -1558,7 +1558,7 @@ TEST_F(GptExecutorTest, BatchSizeTuning)
     executorConfig.setRequestStatsMaxIterations(1000);
     executorConfig.setEnableChunkedContext(true);
 
-    DynamicBatchConfig dynamicBatchConfig(true, 1); // Set window size to 1
+    DynamicBatchConfig dynamicBatchConfig(true, false, 1); // Set window size to 1
     SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, std::nullopt, dynamicBatchConfig);
     executorConfig.setSchedulerConfig(schedulerConfig);
 
@@ -2562,11 +2562,10 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
     }
 }
 
-void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorOrchestrator& executor,
-    tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput, ModelIds const& modelIds,
-    FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
-    OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
-    bool returnAllGeneratedTokens)
+void runDisaggTest(DisaggExecutorOrchestrator& executor, tensorrt_llm::runtime::BufferManager& manager,
+    ITensor const& givenInput, ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming,
+    SizeType32 const vocabSizePadded, BeamResult const& beamResult, OutputConfig const& outConfig,
+    bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType, bool returnAllGeneratedTokens)
 {
 
     auto& comm = tensorrt_llm::mpi::MpiComm::world();
@@ -2636,7 +2635,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
         {
             std::chrono::milliseconds waitTime(1);
 
-            auto contextResponses = executor.awaitContextResponses(std::nullopt, waitTime);
+            auto contextResponses = executor.awaitContextResponses(waitTime);
             contextIter++;
             numContextFinished += contextResponses.size();
 
@@ -2657,7 +2656,7 @@ void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecut
         while (numFinished < maxRequests && iter < maxWaitMs)
         {
             std::chrono::milliseconds waitTime(1);
-            auto responses = executor.awaitGenerationResponses(std::nullopt, waitTime);
+            auto responses = executor.awaitGenerationResponses(waitTime);
             for (auto& responseWithId : responses)
             {
                 numResponses++;
@@ -3364,8 +3363,8 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
             genExecutorConfigs.push_back(executorConfig);
         }
     }
-    auto disaggExecutor = tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorOrchestrator(
-        contextModels, genModels, ctxExecutorConfigs, genExecutorConfigs, true, true);
+    auto disaggExecutor
+        = DisaggExecutorOrchestrator(contextModels, genModels, ctxExecutorConfigs, genExecutorConfigs, true, true);
 
     runDisaggTest(disaggExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
         outConfig, isSpeculativeDecoding, mMaxWaitMs, BatchingType::kINFLIGHT, false);
@@ -3669,14 +3668,15 @@ TEST_F(GptExecutorTest, ChangeBwError)
     EXPECT_LT(iter, mMaxWaitMs);
 }
 
-TEST_F(GptExecutorTest, TokenComparisonChangeBw)
+void doTokenComparisonChangeBw(bool enableReuse, SizeType32 maxWaitMs)
 {
     SizeType32 constexpr maxBeamWidth{2};
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
     auto constexpr streaming = false;
 
     // Create executor config
-    auto executorConfig = ExecutorConfig(maxBeamWidth);
+    auto kvCacheConfig = KvCacheConfig(enableReuse);
+    auto executorConfig = ExecutorConfig(maxBeamWidth, SchedulerConfig(), kvCacheConfig);
 
     // Create executor
     auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
@@ -3699,8 +3699,18 @@ TEST_F(GptExecutorTest, TokenComparisonChangeBw)
         beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
 
         runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
-            isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false, 1, false);
+            isSpeculativeDecoding, maxWaitMs, executorConfig.getBatchingType(), false, 1, false);
     }
+}
+
+TEST_F(GptExecutorTest, TokenComparisonChangeBw)
+{
+    doTokenComparisonChangeBw(false, mMaxWaitMs);
+}
+
+TEST_F(GptExecutorTest, TokenComparisonChangeBwBlockReuse)
+{
+    doTokenComparisonChangeBw(true, mMaxWaitMs);
 }
 
 TEST_F(GptExecutorTest, NReturnRandomness)

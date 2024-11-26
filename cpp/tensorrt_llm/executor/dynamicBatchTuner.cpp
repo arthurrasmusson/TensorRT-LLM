@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/executor/dynamicBatchTuner.h"
 #include "tensorrt_llm/common/logger.h"
+#include <cmath>
 
 namespace
 {
@@ -34,6 +35,7 @@ namespace tensorrt_llm::executor
 
 DynamicBatchTuner::DynamicBatchTuner(DynamicBatchConfig const& config)
     : mEnableBatchSizeTuning(config.getEnableBatchSizeTuning())
+    , mEnableMaxNumTokensTuning(config.getEnableMaxNumTokensTuning())
     , mDynamicBatchMovingAverageWindow(config.getDynamicBatchMovingAverageWindow())
     , mBatchSizeTable(config.getBatchSizeTable())
 {
@@ -76,6 +78,31 @@ SizeType32 DynamicBatchTuner::getRuntimeBatchSize(SizeType32 maxCapacityBatchSiz
         return threshold;
     }
     return maxCapacityBatchSize;
+}
+
+SizeType32 DynamicBatchTuner::getRuntimeMaxNumTokens(SizeType32 maxRuntimeBatchSize) const
+{
+    // calculate max num token in fully overlapped case
+    SizeType32 adjustedNumTokens
+        = 1.0 * (maxRuntimeBatchSize * getAverageInputLength() / getAverageOutputLength() + maxRuntimeBatchSize);
+    SizeType32 tokenThreshold;
+    // context heavy (avg ISL/OSL > kMaxNumTokensRatioContextHeavy)
+    if (getAverageInputLength() / getAverageOutputLength() > kMaxNumTokensRatioContextHeavy)
+    {
+        tokenThreshold = kMaxNumTokensThresholdContextHeavy;
+    }
+    // balanced case (kMaxNumTokensRatioBalanced < avg ISL/OSL < kMaxNumTokensRatioContextHeavy)
+    else if (getAverageInputLength() / getAverageOutputLength() > kMaxNumTokensRatioBalanced)
+    {
+        tokenThreshold = kMaxNumTokensThresholdBalanced;
+    }
+    // gen heavy (avg ISL/OSL < kMaxNumTokensRatioBalanced)
+    else
+    {
+        tokenThreshold = kMaxNumTokensThresholdGenHeavy;
+    }
+    // pad it to pow of 2 and max of this value and threshold.
+    return (std::max(1 << int(ceil(log2(adjustedNumTokens))), tokenThreshold));
 }
 
 } // namespace tensorrt_llm::executor

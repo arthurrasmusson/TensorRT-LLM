@@ -535,6 +535,7 @@ std::optional<BlockKey> BlockManager::findNewContextBlock(
         {
             return ret;
         }
+        searchRoot = std::move(matchingBlock);
     }
     return std::nullopt;
 }
@@ -550,8 +551,13 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
     SizeType32 numMatchedTokens{0};
     auto searchRoot = mCachedBlocksRoot;
 
+    // The last block cannot be shared between beams because it will be written to.
+    // Make sure a unique block is allocated per beam.
+    auto const beamWidth = sequence.getBeamWidth();
+    SizeType32 numSharedContextBlocks = beamWidth > 1 ? numContextBlocks - 1 : numContextBlocks;
+
     auto blockItr = blockKeys.begin();
-    for (int block = 0; block < numContextBlocks; ++block)
+    for (int bi = 0; bi < numSharedContextBlocks; ++bi)
     {
         auto matchingBlock
             = searchRoot != nullptr && blockItr != blockKeys.end() ? searchRoot->findMatchingBlock(*blockItr) : nullptr;
@@ -562,18 +568,18 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
                 "Found matching partially filled block, but somebody else is using it. This should not happen.");
 
             numMatchedTokens += blockItr->uniqueTokens.size();
-            if (perBlockRetentions[block].retentionPriority.has_value()
-                && matchingBlock->getPriority() != perBlockRetentions[block].retentionPriority && mEventManager)
+            if (perBlockRetentions[bi].retentionPriority.has_value()
+                && matchingBlock->getPriority() != perBlockRetentions[bi].retentionPriority && mEventManager)
             {
                 mEventManager->enqueueUpdatedEvent(
                     tle::KVCacheUpdatedData(matchingBlock->getHash())
-                        .priorityUpdated(matchingBlock->getPriority(), *perBlockRetentions[block].retentionPriority));
+                        .priorityUpdated(matchingBlock->getPriority(), *perBlockRetentions[bi].retentionPriority));
             }
             if (!matchingBlock->isFull())
             {
                 // Make block private and reuse
                 claimLeafBlock(
-                    matchingBlock, perBlockRetentions[block].retentionPriority, perBlockRetentions[block].durationMs);
+                    matchingBlock, perBlockRetentions[bi].retentionPriority, perBlockRetentions[bi].durationMs);
                 TLLM_LOG_DEBUG(
                     "BlockManager::loadOrAllocateBlocks - Matched partially filled block %d", matchingBlockId);
             }
@@ -581,7 +587,7 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
             {
                 // Recover block and reuse
                 mEvictionPolicy->claimBlock(
-                    matchingBlock, perBlockRetentions[block].retentionPriority, perBlockRetentions[block].durationMs);
+                    matchingBlock, perBlockRetentions[bi].retentionPriority, perBlockRetentions[bi].durationMs);
                 TLLM_LOG_DEBUG("BlockManager::loadOrAllocateBlocks - Matched full block %d", matchingBlockId);
             }
             onboardBlock(matchingBlock);
@@ -598,9 +604,9 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
         else
         {
             // If we haven't set a priority, set it to the default priority level (low)
-            auto freeBlock = getFreeBlock(perBlockRetentions[block].retentionPriority.value_or(
+            auto freeBlock = getFreeBlock(perBlockRetentions[bi].retentionPriority.value_or(
                                               executor::KvCacheRetentionConfig::kDefaultRetentionPriority),
-                perBlockRetentions[block].durationMs);
+                perBlockRetentions[bi].durationMs);
             addBlockToAllBeams(freeBlock, sequence);
             TLLM_LOG_DEBUG(
                 "BlockManager::loadOrAllocateBlocks - No match, allocated new block %d", freeBlock->getBlockId());
@@ -608,6 +614,25 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
             ++mMissedBlocks;
         }
     }
+
+    // Allocate new blocks that cannot be shared by multiple beams.
+    for (int bi = numSharedContextBlocks; bi < numContextBlocks; ++bi)
+    {
+        // TODO: Still look for match. Clone matching block or allocate fresh ones.
+        // This work is described in JIRA task https://jirasw.nvidia.com/browse/TRTLLM-2069.
+        for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+        {
+            // If we haven't set a priority, set it to the default priority level (low)
+            auto freeBlock = getFreeBlock(perBlockRetentions[bi].retentionPriority.value_or(
+                                              executor::KvCacheRetentionConfig::kDefaultRetentionPriority),
+                perBlockRetentions[bi].durationMs);
+            addBlockToBeam(freeBlock, sequence, beamIdx);
+            TLLM_LOG_DEBUG("BlockManager::loadOrAllocateBlocks - Beam %d. Allocated non-shared block %d for bi %d",
+                beamIdx, freeBlock->getBlockId(), bi);
+        }
+        ++mMissedBlocks;
+    }
+
     return numMatchedTokens;
 }
 
@@ -898,9 +923,6 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
           std::move(eventManager))
     , mEnableBlockReuse{enableBlockReuse}
 {
-    TLLM_CHECK_WITH_INFO(
-        mMaxBeamWidth == 1 || !mEnableBlockReuse, "Block reuse is currently not supported with beam width > 1.");
-
     // The sink tokens are stored in blocks separate from other tokens.
     // If the last block of sink tokens is only partially filled,
     // we fill that block with a "bubble" to reach the number of tokens per block.

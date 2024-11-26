@@ -54,6 +54,12 @@ public:
         // By default, we ignore the runtimeBatchSize unless the model actively supports it
     }
 
+    /// @brief Get the runtime batch size for the model
+    [[nodiscard]] virtual SizeType32 getRuntimeBatchSize() const
+    {
+        TLLM_CHECK_WITH_INFO(false, "getRuntimeBatchSize is not implemented");
+    }
+
     /// @brieft Override the runtime max num tokens for the model
     virtual void setRuntimeMaxNumTokens(SizeType32 runtimeMaxNumTokens)
     {

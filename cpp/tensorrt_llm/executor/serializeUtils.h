@@ -359,6 +359,10 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializeKvCacheConfig(is);
     }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::DynamicBatchConfig>::value)
+    {
+        return Serialization::deserializeDynamicBatchConfig(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::SchedulerConfig>::value)
     {
         return Serialization::deserializeSchedulerConfig(is);

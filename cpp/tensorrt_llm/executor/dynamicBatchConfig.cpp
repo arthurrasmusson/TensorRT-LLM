@@ -15,9 +15,10 @@
 namespace tensorrt_llm::executor
 {
 
-DynamicBatchConfig::DynamicBatchConfig(bool enableBatchSizeTuning, SizeType32 dynamicBatchMovingAverageWindow,
-    std::vector<std::pair<SizeType32, SizeType32>> batchSizeTable)
+DynamicBatchConfig::DynamicBatchConfig(bool enableBatchSizeTuning, bool enableMaxNumTokensTuning,
+    SizeType32 dynamicBatchMovingAverageWindow, std::vector<std::pair<SizeType32, SizeType32>> batchSizeTable)
     : mEnableBatchSizeTuning(enableBatchSizeTuning)
+    , mEnableMaxNumTokensTuning(enableMaxNumTokensTuning)
     , mDynamicBatchMovingAverageWindow(dynamicBatchMovingAverageWindow)
     , mBatchSizeTable(batchSizeTable)
 {
@@ -26,6 +27,11 @@ DynamicBatchConfig::DynamicBatchConfig(bool enableBatchSizeTuning, SizeType32 dy
 bool DynamicBatchConfig::getEnableBatchSizeTuning() const
 {
     return mEnableBatchSizeTuning;
+}
+
+bool DynamicBatchConfig::getEnableMaxNumTokensTuning() const
+{
+    return mEnableMaxNumTokensTuning;
 }
 
 SizeType32 DynamicBatchConfig::getDynamicBatchMovingAverageWindow() const

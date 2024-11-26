@@ -240,7 +240,7 @@ int runTest(CapacityScheduler& capacityScheduler,
 
         for (int i = 0; i < expectedStates.size(); ++i)
         {
-            auto expectedState = expectedStates.at(i);
+            auto const& expectedState = expectedStates.at(i);
 
             // If iteration falls within a range, check state
             if (itCount >= expectedState.itBegin && itCount < expectedState.itEnd)
@@ -249,7 +249,7 @@ int runTest(CapacityScheduler& capacityScheduler,
                 std::set<uint64_t> previousScheduled;
                 if (i > 0)
                 {
-                    for (auto state : expectedStates[i - 1].scheduledState)
+                    for (auto const& state : expectedStates[i - 1].scheduledState)
                     {
                         previousScheduled.insert(state.mRequestId);
                     }
@@ -1528,8 +1528,8 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
 {
     SizeType32 kvCacheMaxNumTokens = 200;
     SizeType32 kvCacheTokensPerBlock = 10;
-    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
-    SizeType32 maxNumRequests = 2;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 50;
+    SizeType32 maxNumRequests = 3;
     SizeType32 maxInputLen = 1000;
     bool enableReuse = true;
 
@@ -1547,28 +1547,35 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
                 = CapacityScheduler(maxNumRequests, capacitySchedulerPolicy, kvCacheManager != nullptr);
 
             // Create two requests that should fit in kvCache for entire duration
-            int32_t maxNewTokens = 80;
-            int32_t promptLen = kvCacheTokensPerBlock
+            int32_t maxNewTokens = 2;
+            int32_t promptLen = 2 * kvCacheTokensPerBlock
                 + 1; // must be one greater than kvCacheTokensPerBlock because we don't reuse last input token
 
             RequestList activeRequests;
             auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
             std::iota(inputTokens->begin(), inputTokens->end(), 0);
+
             activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 0, 1234));
             activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 1, 1234));
+            activeRequests.push_back(createRequest(inputTokens, maxNewTokens, 2, 1234));
 
             std::vector<ExpectedState> expectedStates;
             // No delay in static batching.
             if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
             {
-                expectedStates.push_back(ExpectedState{0, 80, {0, 1}, {{0, 80, promptLen, 0}, {1, 80, promptLen, 0}}});
+                expectedStates.push_back(ExpectedState{0, maxNewTokens, {0, 1, 2},
+                    {{0, maxNewTokens, promptLen, 0}, {1, maxNewTokens, promptLen, 0},
+                        {2, maxNewTokens, promptLen, 0}}});
             }
             else
             {
-                expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {{0, 80, promptLen, 0}}});
-                expectedStates.push_back(
-                    ExpectedState{1, 80, {0, 1}, {{0, 80, promptLen, 1, promptLen}, {1, 80, promptLen, 0}}});
-                expectedStates.push_back(ExpectedState{80, 81, {1}, {{1, 80, promptLen, 79, promptLen}}});
+                expectedStates.push_back(ExpectedState{0, 1, {0, 1, 2}, {{0, maxNewTokens, promptLen, 0}}});
+                expectedStates.push_back(ExpectedState{1, maxNewTokens, {0, 1, 2},
+                    {{0, maxNewTokens, promptLen, 1, promptLen}, {1, maxNewTokens, promptLen, 0},
+                        {2, maxNewTokens, promptLen, 0}}});
+                expectedStates.push_back(ExpectedState{maxNewTokens, maxNewTokens + 1, {1, 2},
+                    {{1, maxNewTokens, promptLen, maxNewTokens - 1, promptLen},
+                        {2, maxNewTokens, promptLen, maxNewTokens - 1, promptLen}}});
             }
 
             // Callback to call at each iteration, to have option to add new active Requests
@@ -1579,13 +1586,13 @@ TEST_F(CapacitySchedulerTest, DelayDuplicateRequest)
 
             if (capacitySchedulerPolicy == CapacitySchedulerPolicy::kSTATIC_BATCH)
             {
-                EXPECT_EQ(numIterations, 80);
+                EXPECT_EQ(numIterations, maxNewTokens);
             }
             else
             {
-                EXPECT_EQ(numIterations, 81);
+                EXPECT_EQ(numIterations, maxNewTokens + 1);
             }
-            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), 1);
+            EXPECT_EQ(kvCacheManager->getNumReusedBlocks(), promptLen / kvCacheTokensPerBlock * 2);
         }
     }
 }

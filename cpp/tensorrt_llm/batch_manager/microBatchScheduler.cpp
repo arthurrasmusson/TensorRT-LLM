@@ -20,35 +20,14 @@ namespace tensorrt_llm::batch_manager
 
 using SizeType32 = MicroBatchScheduler::SizeType32;
 
-MicroBatchScheduler::MicroBatchScheduler(std::optional<SizeType32> maxNumTokens,
-    std::optional<batch_scheduler::ContextChunkingConfig> ctxChunkConfig, std::optional<SizeType32> maxContextLength,
-    LlmRequestState noScheduleUntilState, LlmRequestState noScheduleAfterState)
-    : mMaxNumTokens(maxNumTokens)
-    , mMaxContextLength(maxContextLength)
+MicroBatchScheduler::MicroBatchScheduler(std::optional<batch_scheduler::ContextChunkingConfig> ctxChunkConfig,
+    std::optional<SizeType32> maxContextLength, LlmRequestState noScheduleUntilState,
+    LlmRequestState noScheduleAfterState)
+    : mMaxContextLength(maxContextLength)
     , mCtxChunkConfig(ctxChunkConfig)
     , mNoScheduleUntilState(noScheduleUntilState)
     , mNoScheduleAfterState(noScheduleAfterState)
 {
-    if (mCtxChunkConfig)
-    {
-        if (mMaxContextLength)
-        {
-            mCtxChunkConfig.value().chunkUnitSize
-                = std::min(mCtxChunkConfig.value().chunkUnitSize, mMaxContextLength.value());
-        }
-        TLLM_CHECK_WITH_INFO(mCtxChunkConfig.value().chunkUnitSize > 0,
-            "Context chunk size (%d) must be a positive integer.", mMaxContextLength.value());
-    }
-    else
-    {
-        if (mMaxContextLength && mMaxNumTokens)
-        {
-            TLLM_CHECK_WITH_INFO(mMaxContextLength.value() <= mMaxNumTokens.value(),
-                "Without enabling chunked context, the max context length (%d) needs to be less than or equal to the "
-                "max number of tokens (%d).",
-                mMaxContextLength.value(), mMaxNumTokens.value());
-        }
-    }
 }
 
 void MicroBatchScheduler::fitDraftTokens(RequestVector& contextsToBeChunked,
@@ -185,8 +164,9 @@ void MicroBatchScheduler::setCtxRequestsChunkSize(RequestVector& contextsToBeChu
     fitDraftTokens(contextsToBeChunked, ctxTokensCapacity, chunkUnitSize, maxContextLength);
 }
 
-std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
-    RequestVector& activeRequests, ReqIdsSet const& inflightReqIds, SizeType32 maxBatchSizeRuntime) const
+std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(RequestVector& activeRequests,
+    ReqIdsSet const& inflightReqIds, SizeType32 maxBatchSizeRuntime,
+    std::optional<SizeType32> maxNumTokensRuntime) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(microBatcherScheduleRequests);
@@ -222,7 +202,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
             TLLM_CHECK_WITH_INFO(!mMaxContextLength || reqNumTokens <= mMaxContextLength.value(),
                 "The number of encoder tokens (%d) exceeds the limit value (%d)", reqNumTokens,
                 mMaxContextLength.value());
-            if (mMaxNumTokens && batchNumTokens + reqNumTokens > mMaxNumTokens.value())
+            if (maxNumTokensRuntime && batchNumTokens + reqNumTokens > maxNumTokensRuntime.value())
             {
                 break;
             }
@@ -240,7 +220,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
                 TLLM_CHECK_WITH_INFO(!mMaxContextLength || reqNumTokens <= mMaxContextLength.value(),
                     "The number of context tokens (%d) exceeds the limit value (%d)", reqNumTokens,
                     mMaxContextLength.value());
-                if (mMaxNumTokens && batchNumTokens + reqNumTokens > mMaxNumTokens.value())
+                if (maxNumTokensRuntime && batchNumTokens + reqNumTokens > maxNumTokensRuntime.value())
                 {
                     break;
                 }
@@ -283,8 +263,8 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
         }
         else // (llmReq->isGenerationInProgressState())
         {
-            reqNumTokens = llmReq->mSamplingConfig.beamWidth;
-            if (mMaxNumTokens && batchNumTokens + reqNumTokens > mMaxNumTokens.value())
+            reqNumTokens = llmReq->mSamplingConfig.beamWidth + llmReq->getNumDraftTokens();
+            if (maxNumTokensRuntime && batchNumTokens + reqNumTokens > maxNumTokensRuntime.value())
             {
                 break;
             }
@@ -299,7 +279,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
         }
     }
 
-    if (mMaxNumTokens && numChunkedTokens > mMaxNumTokens.value() - batchNumTokens)
+    if (maxNumTokensRuntime && numChunkedTokens > maxNumTokensRuntime.value() - batchNumTokens)
     {
         allContextRequestsFit = false;
     }
@@ -309,7 +289,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
     {
         TLLM_CHECK_WITH_INFO(mCtxChunkConfig, "If chunking is not enabled, context scheduling should be completed.");
         auto const ctxTokensCapacity
-            = mMaxNumTokens ? std::make_optional(mMaxNumTokens.value() - batchNumTokens) : std::nullopt;
+            = maxNumTokensRuntime ? std::make_optional(maxNumTokensRuntime.value() - batchNumTokens) : std::nullopt;
         setCtxRequestsChunkSize(contextsToBeChunked, mCtxChunkConfig.value().chunkingPolicy, ctxTokensCapacity,
             mCtxChunkConfig.value().chunkUnitSize, mMaxContextLength);
     }
@@ -327,7 +307,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(
     TLLM_LOG_DEBUG(
         "batchSize (num ctx/enc requests + num gen requests): %u", contextRequests.size() + generationRequests.size());
     TLLM_LOG_DEBUG("batchNumTokens (num ctx/enc input tokens + num gen input tokens) / maxNumTokens: %d / %d",
-        batchNumTokens, mMaxNumTokens.value_or(0));
+        batchNumTokens, maxNumTokensRuntime.value_or(0));
     TLLM_LOG_DEBUG(
         "[Summary] Micro Batch scheduler schedules %d context/encoder requests, %d generation requests. "
         "%d requests inflight with the model already",

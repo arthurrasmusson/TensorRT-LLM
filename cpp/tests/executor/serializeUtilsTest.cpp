@@ -576,6 +576,9 @@ TEST(SerializeUtilsTest, IterationStats)
     auto maxBatchSizeStatic = texec::SizeType32{100};
     auto maxBatchSizeTunerRecommended = texec::SizeType32{50};
     auto maxBatchSizeRuntime = texec::SizeType32{50};
+    auto maxNumTokensStatic = texec::SizeType32{100};
+    auto maxNumTokensTunerRecommended = texec::SizeType32{50};
+    auto maxNumTokensRuntime = texec::SizeType32{50};
     auto gpuMemUsage = size_t{1024};
     auto cpuMemUsage = size_t{2048};
     auto pinnedMemUsage = size_t{4096};
@@ -586,8 +589,9 @@ TEST(SerializeUtilsTest, IterationStats)
         {
             auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
                 numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests, maxNumActiveRequests,
-                maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime, gpuMemUsage, cpuMemUsage,
-                pinnedMemUsage, kvCacheStats, kvCacheStats, staticBatchingStats, ifbBatchingStats};
+                maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime, maxNumTokensStatic,
+                maxNumTokensTunerRecommended, maxNumTokensRuntime, gpuMemUsage, cpuMemUsage, pinnedMemUsage,
+                kvCacheStats, kvCacheStats, staticBatchingStats, ifbBatchingStats};
 
             // serialize and deserialize using std::vector<char>
             {
@@ -614,7 +618,8 @@ TEST(SerializeUtilsTest, IterationStats)
                 auto stats = texec::IterationStats{timestamp, iter, iterLatencyMS, newActiveRequestsQueueLatencyMS,
                     numNewActiveRequests, numActiveRequests, numQueuedRequests, numCompletedRequests,
                     maxNumActiveRequests, maxBatchSizeStatic, maxBatchSizeTunerRecommended, maxBatchSizeRuntime,
-                    gpuMemUsage, cpuMemUsage, pinnedMemUsage, kvStats, kvStats, staticBatchStats, ifbBatchStats};
+                    maxNumTokensStatic, maxNumTokensTunerRecommended, maxNumTokensRuntime, gpuMemUsage, cpuMemUsage,
+                    pinnedMemUsage, kvStats, kvStats, staticBatchStats, ifbBatchStats};
                 {
                     auto buffer = texec::Serialization::serialize(stats);
                     auto stats2 = texec::Serialization::deserializeIterationStats(buffer);

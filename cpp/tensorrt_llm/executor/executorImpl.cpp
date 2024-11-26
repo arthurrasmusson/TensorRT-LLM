@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/executor/executorImpl.h"
 
+#include "tensorrt_llm/batch_manager/decoderBuffers.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
@@ -53,17 +54,19 @@ class CancelledRequestsAsyncSend
 {
 public:
     CancelledRequestsAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession,
-        std::unordered_set<IdType> const& cancelledReqIds, int const peer)
+        std::unordered_set<IdType> const& cancelledReqIds, int peer)
     {
         TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
         TLLM_LOG_DEBUG("start send cancelled requests to rank %d", peer);
         mNumReq = static_cast<int64_t>(cancelledReqIds.size());
-        mRequest1 = commSession->sendAsync(&mNumReq, 1, mpi::MpiType::kINT64, peer, 0);
+        mRequest1 = commSession->sendAsync(&mNumReq, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset);
         if (mNumReq > 0)
         {
             mIds.assign(cancelledReqIds.begin(), cancelledReqIds.end());
-            mRequest2 = commSession->sendAsync(mIds.data(), mIds.size(), mpi::MpiType::kUINT64, peer, 1);
+            mRequest2
+                = commSession->sendAsync(mIds.data(), mIds.size(), mpi::MpiType::kUINT64, peer, kMpiTagOffset + 1);
         }
+        static_assert(kMpiTagUpperBound >= kMpiTagOffset + 2);
         TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     }
 
@@ -84,6 +87,10 @@ public:
     CancelledRequestsAsyncSend(CancelledRequestsAsyncSend&&) = delete;
     CancelledRequestsAsyncSend& operator=(CancelledRequestsAsyncSend&&) = delete;
 
+    static auto constexpr kMpiTagOffset = 13;
+    static auto constexpr kMpiTagUpperBound = kMpiTagOffset + 2;
+    static_assert(kMpiTagOffset >= tensorrt_llm::batch_manager::DecoderSlotAsyncSend::kMpiTagUpperBound);
+
 private:
     int64_t mNumReq;
     std::vector<IdType> mIds;
@@ -92,17 +99,18 @@ private:
 };
 
 std::unordered_set<IdType> cancelledRequestsRecv(
-    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int const peer)
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int peer)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start recv cancelled requests from rank %d", peer);
     std::unordered_set<IdType> cancelledReqIds;
     int64_t numReq{0};
-    commSession->recv(&numReq, 1, mpi::MpiType::kINT64, peer, 0);
+    commSession->recv(&numReq, 1, mpi::MpiType::kINT64, peer, CancelledRequestsAsyncSend::kMpiTagOffset);
     if (numReq > 0)
     {
         std::vector<IdType> buffer(numReq);
-        commSession->recv(buffer.data(), buffer.size(), mpi::MpiType::kUINT64, peer, 1);
+        commSession->recv(
+            buffer.data(), buffer.size(), mpi::MpiType::kUINT64, peer, CancelledRequestsAsyncSend::kMpiTagOffset + 1);
         cancelledReqIds = std::unordered_set<IdType>(buffer.begin(), buffer.end());
     }
     TLLM_LOG_DEBUG("end recv cancelled requests from rank %d", peer);
@@ -114,19 +122,21 @@ class RequestWithIdAsyncSend
 {
 public:
     RequestWithIdAsyncSend(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession,
-        std::vector<RequestWithId> const& reqWithIds, int const peer)
+        std::vector<RequestWithId> const& reqWithIds, int peer)
     {
         TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
         TLLM_LOG_DEBUG("start send requests to rank %d", peer);
         mNumReq = static_cast<int64_t>(reqWithIds.size());
-        mRequest1 = commSession->sendAsync(&mNumReq, 1, mpi::MpiType::kINT64, peer, 2);
+        mRequest1 = commSession->sendAsync(&mNumReq, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset);
         if (mNumReq > 0)
         {
             mPacked = RequestWithId::serializeReqWithIds(reqWithIds);
             mVecSize = static_cast<int64_t>(mPacked.size());
-            mRequest2 = commSession->sendAsync(&mVecSize, 1, mpi::MpiType::kINT64, peer, 3);
-            mRequest3 = commSession->sendAsync(mPacked.data(), mPacked.size(), mpi::MpiType::kCHAR, peer, 4);
+            mRequest2 = commSession->sendAsync(&mVecSize, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset + 1);
+            mRequest3
+                = commSession->sendAsync(mPacked.data(), mPacked.size(), mpi::MpiType::kCHAR, peer, kMpiTagOffset + 2);
         }
+        static_assert(kMpiTagUpperBound >= kMpiTagOffset + 3);
         TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     }
 
@@ -151,6 +161,10 @@ public:
     RequestWithIdAsyncSend(RequestWithIdAsyncSend&&) = delete;
     RequestWithIdAsyncSend& operator=(RequestWithIdAsyncSend&&) = delete;
 
+    static auto constexpr kMpiTagOffset = 15;
+    static auto constexpr kMpiTagUpperBound = kMpiTagOffset + 3;
+    static_assert(kMpiTagOffset >= CancelledRequestsAsyncSend::kMpiTagUpperBound);
+
 private:
     int64_t mNumReq;
     int64_t mVecSize;
@@ -160,21 +174,21 @@ private:
     std::shared_ptr<tensorrt_llm::mpi::MpiRequest> mRequest3;
 };
 
-std::vector<RequestWithId> requestWithIdRecv(
-    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int const peer)
+std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int peer)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     TLLM_LOG_DEBUG("start recv requests from rank %d", peer);
     std::vector<RequestWithId> reqWithIds;
     int64_t numReq{0};
-    commSession->recv(&numReq, 1, mpi::MpiType::kINT64, peer, 2);
+    commSession->recv(&numReq, 1, mpi::MpiType::kINT64, peer, RequestWithIdAsyncSend::kMpiTagOffset);
     if (numReq > 0)
     {
         std::vector<char> buffer;
         int64_t vecSize = 0;
-        commSession->recv(&vecSize, 1, mpi::MpiType::kINT64, peer, 3);
+        commSession->recv(&vecSize, 1, mpi::MpiType::kINT64, peer, RequestWithIdAsyncSend::kMpiTagOffset + 1);
         buffer.resize(vecSize);
-        commSession->recv(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, peer, 4);
+        commSession->recv(
+            buffer.data(), buffer.size(), mpi::MpiType::kCHAR, peer, RequestWithIdAsyncSend::kMpiTagOffset + 2);
         reqWithIds = RequestWithId::deserializeReqWithIds(buffer);
     }
     TLLM_LOG_DEBUG("end recv requests from rank %d", peer);
@@ -328,6 +342,11 @@ Executor::Impl::Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr
     initialize(executorConfig);
 }
 
+Executor::Impl::~Impl()
+{
+    shutdown();
+}
+
 void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -373,18 +392,20 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
             mCommPipelineParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
                 commSession.split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
 
-            auto numMicroBatches = mModel->getNumMicroBatches();
-            if (numMicroBatches > 1)
+            if (worldConfig.isPipelineParallel())
             {
-                numMicroBatches += 1;
+                mRequestWithIdWaitThread = std::make_unique<tensorrt_llm::mpi::MpiWaitThread>(
+                    std::make_unique<std::thread>(&Executor::Impl::requestWithIdWaitThread, this));
+                mCancelledRequestsWaitThread = std::make_unique<tensorrt_llm::mpi::MpiWaitThread>(
+                    std::make_unique<std::thread>(&Executor::Impl::cancelledRequestsWaitThread, this));
+                if (mIsLeader)
+                {
+                    mRequestWithIdLeaderThread
+                        = std::make_unique<std::thread>(&Executor::Impl::requestWithIdLeaderThread, this);
+                    mCancelledRequestsLeaderThread
+                        = std::make_unique<std::thread>(&Executor::Impl::cancelledRequestsLeaderThread, this);
+                }
             }
-            mRequestWithIdWaitThreads.resize(numMicroBatches);
-            mCancelledRequestsWaitThreads.resize(numMicroBatches);
-        }
-        else
-        {
-            mRequestWithIdWaitThreads.resize(1);
-            mCancelledRequestsWaitThreads.resize(1);
         }
         // Launch the execution thread
         mMaxNumActiveRequests = mModel->getMaxNumSequences();
@@ -504,6 +525,7 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
 
     tensorrt_llm::mpi::initialize(tensorrt_llm::mpi::MpiThreadSupport::THREAD_MULTIPLE);
     mWorldRank = tensorrt_llm::mpi::MpiComm::world().getRank();
+    mUsePipelineParallel = pp > 1;
 
     auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
     validateParallelConfig(parallelConfig, modelType, modelPath);
@@ -559,6 +581,7 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
 
     mIsWorker = false;
     mIsLeader = false;
+    mIsPipelineLeader = false;
     mIsOrchestrator = true;
 
     // Verify that worldSize is 1
@@ -676,6 +699,7 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     mIsWorker = participantIt != participantIds.end();
     // Bool that indicates if current ranks is leader for this model
     mIsLeader = (mWorldRank == participantIds.front());
+    mIsPipelineLeader = (mWorldRank == participantIds[tp * (pp - 1)]);
 
 #if ENABLE_MULTI_DEVICE
     if (mIsWorker)
@@ -1066,7 +1090,8 @@ void Executor::Impl::cancelRequest(IdType requestId)
     if (mCommMode == CommunicationMode::kLEADER)
     {
         std::scoped_lock<std::mutex> lck(mCancelReqMtx);
-        mCancelledReqIds.insert(requestId);
+        auto& selCancelledReqIds = mUsePipelineParallel ? mPipelineCancelledReqIds : mCancelledReqIds;
+        selCancelledReqIds.insert(requestId);
     }
     else if (mCommMode == CommunicationMode::kORCHESTRATOR)
     {
@@ -1128,78 +1153,162 @@ std::optional<std::shared_ptr<KVCacheEventManager>> Executor::Impl::getKVCacheEv
     return cacheEventManager ? std::optional(std::make_shared<KVCacheEventManager>(cacheEventManager)) : std::nullopt;
 }
 
+void Executor::Impl::requestWithIdWaitThread()
+{
+    while (!mRequestWithIdWaitThread->shouldExit())
+    {
+        mRequestWithIdWaitThread->notifyStop();
+        mRequestWithIdWaitThread->waitStart();
+        mRequestWithIdAsyncSndHdl.reset(nullptr);
+    }
+}
+
+void Executor::Impl::cancelledRequestsWaitThread()
+{
+    while (!mCancelledRequestsWaitThread->shouldExit())
+    {
+        mCancelledRequestsWaitThread->notifyStop();
+        mCancelledRequestsWaitThread->waitStart();
+        mCancelledRequestsAsyncSndHdl.reset(nullptr);
+    }
+}
+
+void Executor::Impl::requestWithIdLeaderThread()
+{
+    static_assert(kMpiTagOffset >= RequestWithIdAsyncSend::kMpiTagUpperBound);
+    TLLM_CUDA_CHECK(cudaSetDevice(mModel->getWorldConfig().getDevice()));
+    auto constexpr peer = 0;
+    while (true)
+    {
+        int64_t numActiveRequests;
+        mCommPipelineParallel->recv(&numActiveRequests, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset);
+        if (numActiveRequests < 0)
+        {
+            break;
+        }
+
+        bool lowestPriorityActiveHasValue;
+        std::optional<PriorityType> lowestPriorityActive;
+        mCommPipelineParallel->recv(&lowestPriorityActiveHasValue, 1, mpi::MpiType::kBOOL, peer, kMpiTagOffset + 1);
+        if (lowestPriorityActiveHasValue)
+        {
+            PriorityType lowestPriorityActiveValue;
+            mCommPipelineParallel->recv(&lowestPriorityActiveValue, 1, mpi::MpiType::kFLOAT, peer, kMpiTagOffset + 2);
+            lowestPriorityActive = lowestPriorityActiveValue;
+        }
+
+        auto reqWithIds = getLeaderNewReqWithIds(numActiveRequests, lowestPriorityActive);
+        auto requestWithIdAsyncSndHdl
+            = std::make_unique<RequestWithIdAsyncSend>(mCommPipelineParallel, reqWithIds, peer);
+        requestWithIdAsyncSndHdl.reset(nullptr);
+    }
+}
+
+void Executor::Impl::cancelledRequestsLeaderThread()
+{
+    TLLM_CUDA_CHECK(cudaSetDevice(mModel->getWorldConfig().getDevice()));
+    auto constexpr peer = 0;
+    while (true)
+    {
+        bool shouldExit;
+        mCommPipelineParallel->recv(&shouldExit, 1, mpi::MpiType::kBOOL, peer, kMpiTagOffset + 3);
+        if (shouldExit)
+        {
+            break;
+        }
+
+        {
+            std::scoped_lock<std::mutex> lck(mCancelReqMtx);
+            auto cancelledRequestsAsyncSndHdl
+                = std::make_unique<CancelledRequestsAsyncSend>(mCommPipelineParallel, mPipelineCancelledReqIds, peer);
+            cancelledRequestsAsyncSndHdl.reset(nullptr);
+            mPipelineCancelledReqIds.clear();
+        }
+    }
+    static_assert(kMpiTagUpperBound >= kMpiTagOffset + 4);
+}
+
+std::vector<RequestWithId> Executor::Impl::getLeaderNewReqWithIds(
+    SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
+{
+    std::unique_lock<std::mutex> lck(mQueuedReqMtx);
+    mQueuedReqCv.wait(lck, [&]() { return (!mQueuedRequests.empty() || numActiveRequests > 0 || mShutdown); });
+
+    std::vector<RequestWithId> reqWithIds;
+    if (!mQueuedRequests.empty() && !mShutdown)
+    {
+        auto const maxNewRequests = static_cast<size_t>(std::max(mMaxNumActiveRequests - numActiveRequests, 0));
+        auto const insertQueuedRequestIntoReqWithIds = [this, &reqWithIds]()
+        {
+            reqWithIds.emplace_back(std::move(mQueuedRequests.front()));
+            mQueuedRequests.pop_front();
+        };
+
+        if (mQueuedRequests.front().id == mTerminateReqId)
+        {
+            insertQueuedRequestIntoReqWithIds();
+        }
+
+        for (size_t req = 0; mQueuedRequests.size() > 0 && req < maxNewRequests;)
+        {
+            req += (getNumChildRequests(mQueuedRequests.front().req) + 1);
+            if (req > maxNewRequests)
+            {
+                break;
+            }
+            insertQueuedRequestIntoReqWithIds();
+        }
+
+        if (lowestPriorityActive)
+        {
+            while (mQueuedRequests.size() > 0 && mQueuedRequests.front().req.getPriority() > (*lowestPriorityActive))
+            {
+                insertQueuedRequestIntoReqWithIds();
+            }
+        }
+    }
+    return reqWithIds;
+}
+
 std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const& worldConfig = mModel->getWorldConfig();
-    auto const numMicroBatches = static_cast<SizeType32>(mRequestWithIdWaitThreads.size());
 
-    auto prevMicroBatchId = worldConfig.isLastPipelineParallelRank()
-        ? (mNewReqMicroBatchId == 0 ? numMicroBatches - 1 : mNewReqMicroBatchId - 1)
-        : 0;
-    auto& requestWithIdWaitThread = mRequestWithIdWaitThreads.at(prevMicroBatchId);
-
-    if (!mTerminateReqReceived && requestWithIdWaitThread)
+    if (worldConfig.isPipelineParallel())
     {
-        requestWithIdWaitThread->join();
-        requestWithIdWaitThread.reset(nullptr);
+        mRequestWithIdWaitThread->waitStop();
     }
+
     auto originalDevice = tensorrt_llm::common::getDevice();
     cudaSetDevice(worldConfig.getDevice());
     std::vector<RequestWithId> reqWithIds;
-    if (mIsLeader)
+    if (mIsPipelineLeader)
     {
-        if (!mTerminateReqReceived)
+        if (!worldConfig.isPipelineParallel())
         {
-            SizeType32 numBufferedRequests = 0;
-            for (auto const& newReqs : mMicroBatchedNewReqs)
+            reqWithIds = getLeaderNewReqWithIds(numActiveRequests, lowestPriorityActive);
+        }
+        else
+        {
+            auto const peer = worldConfig.getPipelineParallelism() - 1;
+            int64_t numActiveRequestsValue = static_cast<int64_t>(numActiveRequests);
+            auto request1 = mCommPipelineParallel->sendAsync(
+                &numActiveRequestsValue, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset);
+            bool lowestPriorityActiveHasValue = lowestPriorityActive.has_value();
+            auto request2 = mCommPipelineParallel->sendAsync(
+                &lowestPriorityActiveHasValue, 1, mpi::MpiType::kBOOL, peer, kMpiTagOffset + 1);
+            auto request3 = lowestPriorityActiveHasValue ? mCommPipelineParallel->sendAsync(
+                                &lowestPriorityActive.value(), 1, mpi::MpiType::kFLOAT, peer, kMpiTagOffset + 2)
+                                                         : nullptr;
+            request1->wait();
+            request2->wait();
+            if (request3)
             {
-                numBufferedRequests += newReqs.size();
+                request3->wait();
             }
-            std::unique_lock<std::mutex> lck(mQueuedReqMtx);
-            mQueuedReqCv.wait(lck,
-                [&]() {
-                    return (!mQueuedRequests.empty() || numBufferedRequests > 0 || numActiveRequests > 0 || mShutdown);
-                });
-
-            if (!mQueuedRequests.empty() && !mShutdown)
-            {
-                auto const maxNewRequests = static_cast<size_t>(
-                    std::max((numMicroBatches * mMaxNumActiveRequests) - (numBufferedRequests + numActiveRequests), 0));
-                auto const insertQueuedRequestIntoReqWithIds = [this, &reqWithIds]()
-                {
-                    reqWithIds.emplace_back(std::move(mQueuedRequests.front()));
-                    mQueuedRequests.pop_front();
-                };
-
-                if (!mQueuedRequests.empty())
-                {
-                    if (mQueuedRequests.front().id == mTerminateReqId)
-                    {
-                        insertQueuedRequestIntoReqWithIds();
-                    }
-                }
-
-                for (size_t req = 0; !mQueuedRequests.empty() && req < maxNewRequests;)
-                {
-                    req += (getNumChildRequests(mQueuedRequests.front().req) + 1);
-                    if (req > maxNewRequests)
-                    {
-                        break;
-                    }
-                    insertQueuedRequestIntoReqWithIds();
-                }
-
-                if (lowestPriorityActive)
-                {
-                    while (
-                        !mQueuedRequests.empty() && mQueuedRequests.front().req.getPriority() > (*lowestPriorityActive))
-                    {
-                        insertQueuedRequestIntoReqWithIds();
-                    }
-                }
-            }
+            reqWithIds = requestWithIdRecv(mCommPipelineParallel, peer);
         }
 
         if (worldConfig.isTensorParallel())
@@ -1210,7 +1319,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
     }
     else
     {
-        if (worldConfig.isLastPipelineParallelRank())
+        if (worldConfig.isFirstPipelineParallelRank())
         {
             std::vector<char> buffer;
             mCommTensorParallel->bcast(buffer, 0);
@@ -1218,63 +1327,15 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
         }
         else
         {
-            auto const peer = worldConfig.isFirstPipelineParallelRank() ? worldConfig.getPipelineParallelism() - 1
-                                                                        : worldConfig.getPipelineParallelRank() - 1;
+            auto const peer = worldConfig.getPipelineParallelRank() - 1;
             reqWithIds = requestWithIdRecv(mCommPipelineParallel, peer);
         }
     }
-    if (worldConfig.isPipelineParallel() && worldConfig.isLastPipelineParallelRank())
-    {
-        auto constexpr peer = 0;
-        // At the beginning mMicroBatchedNewReqs is empty
-        if (mMicroBatchedNewReqs.empty())
-        {
-            TLLM_CHECK_WITH_INFO(mNewReqMicroBatchId == 0, "Micro batch should be zero in first invocation");
-            // Prefill micro-batches and send all micro-batches to rank 0
-            mMicroBatchedNewReqs.resize(numMicroBatches);
-            mMicroBatchedNewReqs.at(0) = std::move(reqWithIds);
-            for (SizeType32 batchId = 0; batchId < numMicroBatches; batchId++)
-            {
-                auto reqWithIdAsyncSndHdl = std::make_unique<RequestWithIdAsyncSend>(
-                    mCommPipelineParallel, mMicroBatchedNewReqs.at(batchId), peer);
-                mRequestWithIdWaitThreads.at(batchId)
-                    = std::make_unique<std::thread>([handle = std::move(reqWithIdAsyncSndHdl)]() {});
-            }
-        }
-        else if (!mTerminateReqReceived)
-        {
-            auto reqWithIdAsyncSndHdl
-                = std::make_unique<RequestWithIdAsyncSend>(mCommPipelineParallel, reqWithIds, peer);
-            mRequestWithIdWaitThreads.at(prevMicroBatchId)
-                = std::make_unique<std::thread>([handle = std::move(reqWithIdAsyncSndHdl)]() {});
-
-            for (auto const& reqWithId : reqWithIds)
-            {
-                if (reqWithId.id == mTerminateReqId)
-                {
-                    TLLM_LOG_DEBUG("Terminate request received in last pipeline parallel rank");
-                    mTerminateReqReceived = true;
-                    break;
-                }
-            }
-
-            // Overwrite micro-batch that was consumed in previous iteration
-            mMicroBatchedNewReqs.at(prevMicroBatchId) = std::move(reqWithIds);
-        }
-        reqWithIds = std::move(mMicroBatchedNewReqs.at(mNewReqMicroBatchId));
-        mMicroBatchedNewReqs.at(mNewReqMicroBatchId).clear();
-        mNewReqMicroBatchId = (mNewReqMicroBatchId + 1) % numMicroBatches;
-    }
-    else
+    if (!worldConfig.isLastPipelineParallelRank())
     {
         auto const peer = worldConfig.getPipelineParallelRank() + 1;
-        if (worldConfig.isPipelineParallel() && peer != worldConfig.getPipelineParallelism() - 1)
-        {
-            auto reqWithIdAsyncSndHdl
-                = std::make_unique<RequestWithIdAsyncSend>(mCommPipelineParallel, reqWithIds, peer);
-            mRequestWithIdWaitThreads[0]
-                = std::make_unique<std::thread>([handle = std::move(reqWithIdAsyncSndHdl)]() {});
-        }
+        mRequestWithIdAsyncSndHdl = std::make_unique<RequestWithIdAsyncSend>(mCommPipelineParallel, reqWithIds, peer);
+        mRequestWithIdWaitThread->notifyStart();
     }
     cudaSetDevice(originalDevice);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -1521,6 +1582,13 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
             {
                 auto runtimeBatchSize = mDynamicBatchTuner->getRuntimeBatchSize(maxCapacityBatchSize);
                 mModel->setRuntimeBatchSize(runtimeBatchSize);
+            }
+
+            if (mDynamicBatchTuner->isMaxNumTokensTuningEnabled())
+            {
+                auto runtimeBatchSize = mModel->getRuntimeBatchSize();
+                auto runtimeMaxNumTokens = mDynamicBatchTuner->getRuntimeMaxNumTokens(runtimeBatchSize);
+                mModel->setRuntimeMaxNumTokens(runtimeMaxNumTokens);
             }
         }
 
@@ -1819,27 +1887,29 @@ void Executor::Impl::appendCurrentDebugTensors()
 void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
 {
     NVTX3_SCOPED_RANGE(terminateCancelledRequests);
-    auto const broadcastCancelledRequests = [this, &activeRequests]
+    auto const& worldConfig = mModel->getWorldConfig();
+    auto const broadcastCancelledRequests = [this, &activeRequests, &worldConfig]
     {
         auto const& commSession = COMM_SESSION;
-        auto const& worldConfig = mModel->getWorldConfig();
 
-        auto const numMicroBatches = static_cast<SizeType32>(mCancelledRequestsWaitThreads.size());
-        auto const prevMicroBatchId = worldConfig.isLastPipelineParallelRank()
-            ? (mCancelReqMicroBatchId == 0 ? numMicroBatches - 1 : mCancelReqMicroBatchId - 1)
-            : 0;
-
-        auto& cancelledRequestsWaitThread = mCancelledRequestsWaitThreads.at(prevMicroBatchId);
-        if (cancelledRequestsWaitThread)
+        if (worldConfig.isPipelineParallel())
         {
-            cancelledRequestsWaitThread->join();
-            cancelledRequestsWaitThread.reset(nullptr);
+            mCancelledRequestsWaitThread->waitStop();
         }
 
         if (commSession.getSize() > 1 && !activeRequests.empty())
         {
-            if (mIsLeader)
+            if (mIsPipelineLeader)
             {
+                if (worldConfig.isPipelineParallel())
+                {
+                    auto const peer = worldConfig.getPipelineParallelism() - 1;
+                    bool shouldExit = false;
+                    mCommPipelineParallel->send(&shouldExit, 1, mpi::MpiType::kBOOL, peer, kMpiTagOffset + 3);
+                    auto pipelineCancelledReqIds = cancelledRequestsRecv(mCommPipelineParallel, peer);
+                    mCancelledReqIds.insert(pipelineCancelledReqIds.begin(), pipelineCancelledReqIds.end());
+                }
+
                 auto numCancelledRequests = static_cast<int64_t>(mCancelledReqIds.size());
                 if (worldConfig.isTensorParallel())
                 {
@@ -1855,7 +1925,7 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
             // If not leader
             else
             {
-                if (worldConfig.isLastPipelineParallelRank())
+                if (worldConfig.isFirstPipelineParallelRank())
                 {
                     int64_t numCancelledRequests = 0;
                     mCommTensorParallel->bcastValue(numCancelledRequests, 0);
@@ -1870,57 +1940,25 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
                 }
                 else
                 {
-                    auto const peer = worldConfig.isFirstPipelineParallelRank()
-                        ? worldConfig.getPipelineParallelism() - 1
-                        : worldConfig.getPipelineParallelRank() - 1;
+                    auto const peer = worldConfig.getPipelineParallelRank() - 1;
                     mCancelledReqIds = cancelledRequestsRecv(mCommPipelineParallel, peer);
                 }
             }
-            if (worldConfig.isPipelineParallel() && worldConfig.isLastPipelineParallelRank())
-            {
-                auto constexpr peer = 0;
-                // At the beginning mMicroBatchedCancelIds is empty
-                if (mMicroBatchedCancelIds.empty())
-                {
-                    TLLM_CHECK_WITH_INFO(mCancelReqMicroBatchId == 0, "Micro batch should be zero in first invocation");
-                    mMicroBatchedCancelIds.resize(numMicroBatches);
-                    mMicroBatchedCancelIds.at(0) = std::move(mCancelledReqIds);
-
-                    for (SizeType32 batchId = 0; batchId < numMicroBatches; batchId++)
-                    {
-                        auto cancelledRequestsAsyncSndHdl = std::make_unique<CancelledRequestsAsyncSend>(
-                            mCommPipelineParallel, mMicroBatchedCancelIds.at(batchId), peer);
-                        mCancelledRequestsWaitThreads.at(batchId)
-                            = std::make_unique<std::thread>([handle = std::move(cancelledRequestsAsyncSndHdl)]() {});
-                    }
-                }
-                else
-                {
-                    auto cancelledRequestsAsyncSndHdl
-                        = std::make_unique<CancelledRequestsAsyncSend>(mCommPipelineParallel, mCancelledReqIds, peer);
-                    mCancelledRequestsWaitThreads.at(prevMicroBatchId)
-                        = std::make_unique<std::thread>([handle = std::move(cancelledRequestsAsyncSndHdl)]() {});
-                    mMicroBatchedCancelIds.at(prevMicroBatchId) = std::move(mCancelledReqIds);
-                }
-                mCancelledReqIds = std::move(mMicroBatchedCancelIds.at(mCancelReqMicroBatchId));
-                mMicroBatchedCancelIds.at(mCancelReqMicroBatchId).clear();
-                mCancelReqMicroBatchId = (mCancelReqMicroBatchId + 1) % numMicroBatches;
-            }
-            else
+            if (!worldConfig.isLastPipelineParallelRank())
             {
                 auto const peer = worldConfig.getPipelineParallelRank() + 1;
-                if (worldConfig.isPipelineParallel() && peer != worldConfig.getPipelineParallelism() - 1)
-                {
-                    auto cancelledRequestsAsyncSndHdl
-                        = std::make_unique<CancelledRequestsAsyncSend>(mCommPipelineParallel, mCancelledReqIds, peer);
-                    mCancelledRequestsWaitThreads.at(0)
-                        = std::make_unique<std::thread>([handle = std::move(cancelledRequestsAsyncSndHdl)]() {});
-                }
+                mCancelledRequestsAsyncSndHdl
+                    = std::make_unique<CancelledRequestsAsyncSend>(mCommPipelineParallel, mCancelledReqIds, peer);
+                mCancelledRequestsWaitThread->notifyStart();
             }
         }
     };
 
-    std::scoped_lock<std::mutex> lck(mCancelReqMtx);
+    std::unique_lock<std::mutex> lck{mCancelReqMtx, std::defer_lock};
+    if (!worldConfig.isPipelineParallel())
+    {
+        lck.lock();
+    }
 
     broadcastCancelledRequests();
 
@@ -2036,15 +2074,11 @@ void Executor::Impl::executionLoop()
     bool firstIteration{true};
     RequestList activeRequests;
     RequestList inTransmissionRequests;
-    bool runCancelReqEpilogue{false};
     bool hasUpdateStatsForEmptyActiveRequests{false};
     while (!mShutdown || !activeRequests.empty())
     {
         double iterLatencyMS{0.0};
         double newActiveRequestsQueueLatencyMS{0.0};
-        auto const iterCounter = mModel->getIterCounter();
-        auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
-        auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
         bool reportFinishedRequests = true;
         RequestList finishedRequests;
         if (!activeRequests.empty())
@@ -2052,9 +2086,10 @@ void Executor::Impl::executionLoop()
             hasUpdateStatsForEmptyActiveRequests = false;
             forwardSync(activeRequests);
             terminateCancelledRequests(activeRequests);
-            runCancelReqEpilogue = runCancelReqEpilogue || !activeRequests.empty();
             finishedRequests = populateNewResponses(activeRequests, inTransmissionRequests);
             iterEnd = std::chrono::steady_clock::now();
+            auto const iterCounter = mModel->getIterCounter();
+            auto const stopIter = !stopIterIdxs.empty() && (stopIterIdxs.count(iterCounter - 1) > 0);
             if (stopIter)
             {
                 cudaProfilerStop();
@@ -2069,6 +2104,8 @@ void Executor::Impl::executionLoop()
 
         if (!mShutdown)
         {
+            auto const iterCounter = mModel->getIterCounter();
+            auto const profileIter = !profileIterIdxs.empty() && (profileIterIdxs.count(iterCounter) > 0);
             if (profileIter)
             {
                 cudaProfilerStart();
@@ -2138,31 +2175,34 @@ void Executor::Impl::executionLoop()
         }
     }
 
+    if (mCancelledRequestsWaitThread)
+    {
+        mCancelledRequestsWaitThread->exit();
+        mCancelledRequestsWaitThread.reset(nullptr);
+    }
+    if (mRequestWithIdWaitThread)
+    {
+        mRequestWithIdWaitThread->exit();
+        mRequestWithIdWaitThread.reset(nullptr);
+    }
     auto const& worldConfig = mModel->getWorldConfig();
-    if (runCancelReqEpilogue && worldConfig.isPipelineParallel() && worldConfig.isFirstPipelineParallelRank())
+    if (worldConfig.isPipelineParallel() && mIsPipelineLeader)
     {
-        // Matching recvs for extra sends in first iteration
         auto const peer = worldConfig.getPipelineParallelism() - 1;
-        for (SizeType32 i = 0; i < static_cast<SizeType32>(mCancelledRequestsWaitThreads.size()) - 1; i++)
-        {
-            mCancelledReqIds = cancelledRequestsRecv(mCommPipelineParallel, peer);
-        }
+        int64_t numActiveRequests = -1;
+        mCommPipelineParallel->send(&numActiveRequests, 1, mpi::MpiType::kINT64, peer, kMpiTagOffset);
+        bool shouldExit = true;
+        mCommPipelineParallel->send(&shouldExit, 1, mpi::MpiType::kBOOL, peer, kMpiTagOffset + 3);
     }
-    for (auto& waitThread : mCancelledRequestsWaitThreads)
+    if (mRequestWithIdLeaderThread)
     {
-        if (waitThread)
-        {
-            waitThread->join();
-            waitThread.reset(nullptr);
-        }
+        mRequestWithIdLeaderThread->join();
+        mRequestWithIdLeaderThread.reset(nullptr);
     }
-    for (auto& waitThread : mRequestWithIdWaitThreads)
+    if (mCancelledRequestsLeaderThread)
     {
-        if (waitThread)
-        {
-            waitThread->join();
-            waitThread.reset(nullptr);
-        }
+        mCancelledRequestsLeaderThread->join();
+        mCancelledRequestsLeaderThread.reset(nullptr);
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -2198,7 +2238,6 @@ void Executor::Impl::enqueueNewResponses(std::vector<Response>&& newResponses)
 void Executor::Impl::orchSendReqThread()
 {
     tensorrt_llm::common::setThreadName("orchSendReq");
-    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 
     while (true)
     {
@@ -2259,6 +2298,7 @@ void Executor::Impl::leaderRecvReqThread()
     tensorrt_llm::common::setThreadName("leaderRecvReq");
     TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 #if ENABLE_MULTI_DEVICE
+    auto& selCancelledReqIds = mUsePipelineParallel ? mPipelineCancelledReqIds : mCancelledReqIds;
     while (true)
     {
         if (mRecvPollPeriodMs > 0)
@@ -2320,6 +2360,7 @@ void Executor::Impl::leaderRecvReqThread()
                 }
                 for (auto&& req : requestWithIds)
                 {
+                    req.queuedStart = std::chrono::steady_clock::now();
                     insertRequestInOrder(mQueuedRequests, std::move(req));
                 }
             }
@@ -2334,7 +2375,7 @@ void Executor::Impl::leaderRecvReqThread()
             MPICHECK(MPI_Mrecv(cancelledReqIds.data(), count, MPI_UINT64_T, &msg, &status)); // NOLINT
 
             std::scoped_lock<std::mutex> lck(mCancelReqMtx);
-            mCancelledReqIds.insert(cancelledReqIds.begin(), cancelledReqIds.end());
+            selCancelledReqIds.insert(cancelledReqIds.begin(), cancelledReqIds.end());
         }
         else
         {
@@ -2397,7 +2438,6 @@ void Executor::Impl::leaderSendThread(MpiMessageQueue& sendQueue, int32_t idTag,
 void Executor::Impl::orchRecvThread(int32_t idTag, int32_t dataTag)
 {
     tensorrt_llm::common::setThreadName("orchRecv");
-    TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
 
 #if ENABLE_MULTI_DEVICE
     while (true)

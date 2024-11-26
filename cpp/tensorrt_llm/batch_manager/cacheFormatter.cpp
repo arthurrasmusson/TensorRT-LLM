@@ -24,6 +24,7 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
     CacheState const& destConfig)
 {
     NVTX3_SCOPED_RANGE(formatOutput);
+    TLLM_LOG_DEBUG("Start sending kvCache for request id:%ld ", llmRequest.mRequestId);
 
     TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
     constexpr SizeType32 beam{0};
@@ -73,6 +74,7 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
             }
         }
     }
+    TLLM_LOG_DEBUG("End sending kvCache for request id:%ld ", llmRequest.mRequestId);
 }
 
 void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
@@ -81,6 +83,8 @@ void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, L
 {
     NVTX3_SCOPED_RANGE(formatInput);
     TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
+    TLLM_LOG_DEBUG("Start receiving kvCache for request id:%ld , context request id:%ld", llmRequest.mRequestId,
+        llmRequest.getContextPhaseParams().value().getReqId());
     constexpr SizeType32 beam{0};
     std::vector<runtime::ITensor::SharedPtr> recvBufferTmps;
     std::vector<runtime::ITensor::SharedPtr> outputBuffers;
@@ -178,6 +182,8 @@ void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, L
             selfIdx, selfConfig, bufferManager);
         bufferManager.getStream().synchronize();
     }
+    TLLM_LOG_DEBUG("Start receiving kvCache for request id:%ld , context request id:%ld", llmRequest.mRequestId,
+        llmRequest.getContextPhaseParams().value().getReqId());
 }
 
 [[nodiscard]] bool CacheFormatter::inquireSupport(CacheState const& selfConfig, CacheState const& destConfig) const

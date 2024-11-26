@@ -81,8 +81,7 @@ TrtEncoderModel::TrtEncoderModel(runtime::ModelConfig const& modelConfig, WorldC
         std::nullopt, LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT);
 
     mMicroBatchScheduler = std::make_unique<tensorrt_llm::batch_manager::MicroBatchScheduler>(
-        mModelConfig.getMaxNumTokens(), std::nullopt, mModelConfig.getMaxInputLen(), LlmRequestState::kENCODER_INIT,
-        LlmRequestState::kCONTEXT_INIT);
+        std::nullopt, mModelConfig.getMaxInputLen(), LlmRequestState::kENCODER_INIT, LlmRequestState::kCONTEXT_INIT);
 
     mHiddenSize = modelConfig.getHiddenSize();
 
@@ -272,8 +271,8 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
         TLLM_LOG_DEBUG("Running ENCODER request scheduler");
 
         auto [fittingRequests, requestsToPause] = (*mCapacityScheduler)(activeRequests);
-        std::tie(currRequests.contextRequests, std::ignore)
-            = (*mMicroBatchScheduler)(fittingRequests, mInflightReqIds, getMaxBatchSize());
+        std::tie(currRequests.contextRequests, std::ignore) = (*mMicroBatchScheduler)(
+            fittingRequests, mInflightReqIds, getMaxBatchSize(), mModelConfig.getMaxNumTokens());
 
         {
             NVTX3_SCOPED_RANGE(pauseRequestsFlaggedByScheduler);

@@ -39,7 +39,7 @@ namespace tensorrt_llm::batch_manager
 {
 
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
-    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens)
@@ -55,21 +55,7 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
-    auto const maxBatchTokens = getNumTokens();
     reshape(runtime, modelConfig, worldConfig);
-    inputsIds->reshape(ITensor::makeShape({maxBatchTokens}));
-    if (worldConfig.isPipelineParallel())
-    {
-        auto hiddenSize = modelConfig.getHiddenSize();
-
-        if (!(modelConfig.getPpReduceScatter() && !worldConfig.isFirstPipelineParallelRank()))
-        {
-            hiddenSize *= worldConfig.getTensorParallelism();
-        }
-
-        auto const hiddenStatesShape = ITensor::makeShape({maxBatchTokens, hiddenSize});
-        hiddenStates->reshape(hiddenStatesShape);
-    }
 }
 
 void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig)
@@ -177,6 +163,19 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         mropePositionDeltas->reshape(ITensor::makeShape({numRequests, 1}));
     }
 
+    auto const numTokens = getNumTokens();
+    inputsIds->reshape(ITensor::makeShape({numTokens}));
+
+    if (worldConfig.isPipelineParallel())
+    {
+        auto const hiddenSize = (!modelConfig.getPpReduceScatter() || worldConfig.isFirstPipelineParallelRank())
+            ? modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()
+            : modelConfig.getHiddenSize();
+
+        auto const hiddenStatesShape = ITensor::makeShape({numTokens, hiddenSize});
+        hiddenStates->reshape(hiddenStatesShape);
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -216,7 +215,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     seqSlotRemappingDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
     // TODO(rkobus) check which tensors can be allocated as pinned for max size
-    requestTypes = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
+    requestTypes = manager.emptyTensor(MemoryType::kCPU, TRTDataType<runtime::RequestType>::value);
 
     contextLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     contextLengthsDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
@@ -396,22 +395,18 @@ void RuntimeBuffers::prepareBuffersForCudaGraph()
 
     TLLM_CHECK(numContextRequests == 0);
 
-    auto* pastKeyValueLengthsPtr
-        = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths) : nullptr;
-
-    if (static_cast<bool>(pastKeyValueLengthsPtr))
+    if (transformerBuffers)
     {
-        auto* maxAttentionWindowsPtr
-            = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->maxAttentionWindows) : nullptr;
-        auto const maxKvLength = static_cast<bool>(maxAttentionWindowsPtr) ? *std::max_element(maxAttentionWindowsPtr,
-                                     maxAttentionWindowsPtr + transformerBuffers->maxAttentionWindows->getShape().d[0])
-                                                                           : 0;
+        auto const maxAttentionWindowsRange = BufferRange<SizeType32>(*transformerBuffers->maxAttentionWindows);
+        auto const maxKvLength = *std::max_element(maxAttentionWindowsRange.begin(), maxAttentionWindowsRange.end());
 
         // Set pastKeyValueLength for graph capturing. This way we will capture graph with
         // maxKvCacheLengthRounded rounded to the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE.
         // MMHA will launch excessive amount of blocks and some of them will exit early during the actual launch.
         // We can reuse the same graph for the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE iterations.
         auto const kvCacheLength = std::min(maxKvLength, maxKvCacheLengthRounded);
+
+        auto* pastKeyValueLengthsPtr = bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths);
         std::fill_n(pastKeyValueLengthsPtr, getNumSequences(), kvCacheLength);
     }
 
@@ -431,6 +426,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
 
+    { // fill requestTypes
+        auto* hostRequestTypes = bufferCast<runtime::RequestType>(*requestTypes);
+        std::fill_n(hostRequestTypes, numContextRequests, runtime::RequestType::kCONTEXT);
+        std::fill_n(hostRequestTypes + numContextRequests, numGenSequences, runtime::RequestType::kGENERATION);
+    }
+
     SizeType32 totalInputSize = 0;
     std::vector<TokenIdType> inputHost;
     std::vector<TokenIdType> decoderInputHost;
@@ -439,7 +440,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     std::vector<float> mropeRotarySinCosHost;
     std::vector<SizeType32> mropePositionDeltasHost;
 
-    auto* hostRequestTypes = bufferCast<SizeType32>(*requestTypes);
     auto* contextLengthsHostPtr = bufferCast<SizeType32>(*contextLengthsHost);
     auto* decoderInputLengthsHostPtr = bufferCast<SizeType32>(*decoderInputLengthsHost);
     auto* sequenceLengthsHostPtr = bufferCast<SizeType32>(*sequenceLengthsHost);
@@ -489,9 +489,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             auto optMropeRotarySinCos = llmReq->getMropeRotarySinCos().value();
             TLLM_CHECK_WITH_INFO(optMropeRotarySinCos->getShape().d[0] == mropeRotarySinCosSize,
-                "Provided MropeRotarySinCos is %d and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
+                "Provided MropeRotarySinCos is %lu and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
                 mropeRotarySinCosSize);
-            float* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
+            auto* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
             auto mropePositionDeltas = llmReq->getMropePositionDeltas().value();
             mropeRotarySinCosHost.insert(
                 mropeRotarySinCosHost.end(), mropeRotarySinCos, mropeRotarySinCos + mropeRotarySinCosSize);
@@ -512,9 +512,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 "The request should be in context phase or disaggregated generation init phase.");
             TLLM_CHECK_WITH_INFO(
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
-
-            SizeType32 constexpr requestType{0};
-            hostRequestTypes[batchIdx] = requestType;
 
             auto const promptLen = llmReq->mPromptLen;
             auto const& reqTokens = llmReq->getTokens(0);
@@ -629,12 +626,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
 
-            SizeType32 constexpr requestType{1};
-            std::fill_n(hostRequestTypes + numSequences, reqBeamWidth, requestType);
-
-            // Get position of the current sequence in the decoder
-            auto const seqSlot = llmReq->mSeqSlot.value();
-
             auto const draftLength = llmReq->getNumDraftTokens();
             auto const& draftTokens = llmReq->getDraftTokens();
             auto const numLogits = draftLength + reqBeamWidth;
@@ -688,10 +679,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 processMropeData(llmReq);
             }
 
-            SizeType32 pastKeyValueLength = sequenceLen - 1;
-
             if (static_cast<bool>(pastKeyValueLengthsPtr))
             {
+                SizeType32 pastKeyValueLength = sequenceLen - 1;
                 std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
             }
             totalInputSize += numLogits;
@@ -702,6 +692,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
             if (rnnStateBuffers)
             {
+                auto const seqSlot = llmReq->mSeqSlot.value();
                 auto& rnnStateManager = *rnnStateManagerPtr;
                 rnnStateManager.fillSlotMapping(*rnnStateBuffers->slotMappingHost, numSequences, seqSlot, reqBeamWidth);
             }
@@ -795,7 +786,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
     {
         NVTX3_SCOPED_RANGE(bufferCopies);
-        inputsIds->reshape(ITensor::makeShape({totalInputSize}));
         manager.copy(inputHost.data(), *inputsIds);
         // In generation phase, device ptr of context lengths need to be tiled.
         manager.copy(*contextLengthsHost, *contextLengthsDevice);
@@ -840,18 +830,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             * kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE;
     }
 
-    if (worldConfig.isPipelineParallel())
-    {
-        auto hiddenSize = modelConfig.getHiddenSize();
-
-        if (!(modelConfig.getPpReduceScatter() && !worldConfig.isFirstPipelineParallelRank()))
-        {
-            hiddenSize *= worldConfig.getTensorParallelism();
-        }
-        auto const hiddenStatesShape = ITensor::makeShape({totalInputSize, hiddenSize});
-        hiddenStates->reshape(hiddenStatesShape);
-    }
-
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -868,15 +846,16 @@ void RuntimeBuffers::prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuf
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void RuntimeBuffers::prepareEagleBuffers(DecoderBuffers& decoderBuffers, TllmRuntime const& runtime,
-    ModelConfig const& modelConfig, WorldConfig const& worldConfig)
+void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, RequestVector const& genRequests,
+    DecoderBuffers& decoderBuffers, TllmRuntime const& runtime, ModelConfig const& modelConfig,
+    WorldConfig const& worldConfig)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
     TLLM_CHECK(eagleBuffers);
 
-    eagleBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
-        decoderBuffers.eagleBuffers, *transformerBuffers->positionIds, runtime, modelConfig, worldConfig);
+    eagleBuffers->setFromInputs(contextRequests, genRequests, *requestTypes, *seqSlots, decoderBuffers.eagleBuffers,
+        runtime, modelConfig, worldConfig);
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }

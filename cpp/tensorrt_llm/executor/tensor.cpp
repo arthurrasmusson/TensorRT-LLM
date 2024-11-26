@@ -47,6 +47,10 @@ DataType Tensor::getDataType() const
         return DataType::kUNKNOWN;
     }
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+#endif
     switch (mTensor->getDataType())
     {
     case nvinfer1::DataType::kBOOL: return DataType::kBOOL;
@@ -60,6 +64,9 @@ DataType Tensor::getDataType() const
     case nvinfer1::DataType::kINT64: return DataType::kINT64;
     case nvinfer1::DataType::kINT4: /* do nothing */;
     }
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
     TLLM_THROW("Unsupported data type");
 }

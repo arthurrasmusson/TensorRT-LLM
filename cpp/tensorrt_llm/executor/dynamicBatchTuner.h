@@ -32,6 +32,12 @@ public:
         return mEnableBatchSizeTuning;
     }
 
+    /// @brief Check if max num tokens tuning is enabled.
+    [[nodiscard]] bool isMaxNumTokensTuningEnabled() const
+    {
+        return mEnableMaxNumTokensTuning;
+    }
+
     /// @brief Update current stats given the input and output length from a single request.
     void updateStats(SizeType32 inputLen, SizeType32 outputLen);
 
@@ -44,8 +50,13 @@ public:
     /// @brief Get the dynamic batch size based on the current statistics.
     [[nodiscard]] SizeType32 getRuntimeBatchSize(SizeType32 maxCapacityBatchSize) const;
 
+    /// @brief Get the dynamic max num tokens based on the current statistics.
+    [[nodiscard]] SizeType32 getRuntimeMaxNumTokens(SizeType32 runtimeBatchSize) const;
+
 private:
     bool mEnableBatchSizeTuning = false;
+
+    bool mEnableMaxNumTokensTuning = false;
 
     SizeType32 mDynamicBatchMovingAverageWindow = 0;
 
@@ -59,6 +70,13 @@ private:
 
     static SizeType32 const kBatchSizeFallbackGranularity = 512;
     static SizeType32 const kBatchSizeFallbackThreshold = 128;
+
+    static double constexpr kMaxNumTokensRatioContextHeavy = 2.0;
+    static double constexpr kMaxNumTokensRatioBalanced = 0.5;
+
+    static SizeType32 const kMaxNumTokensThresholdContextHeavy = 8192;
+    static SizeType32 const kMaxNumTokensThresholdBalanced = 4096;
+    static SizeType32 const kMaxNumTokensThresholdGenHeavy = 2048;
 };
 
 } // namespace tensorrt_llm::executor

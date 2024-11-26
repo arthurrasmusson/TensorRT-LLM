@@ -87,6 +87,11 @@ private:
         return numContextRequests + numGenSequences;
     };
 
+    [[nodiscard]] SizeType32 constexpr getNumTokens() const noexcept
+    {
+        return numContextTokens + numGenTokens;
+    };
+
     // sizes
     SizeType32 numContextRequests{};
     SizeType32 numGenRequests{};
@@ -200,8 +205,8 @@ private:
     TensorMap outputMap;
 
 public:
-    RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
-        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
+        std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
         executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
@@ -219,13 +224,9 @@ public:
     void prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
-    void prepareEagleBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
-        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
-
-    [[nodiscard]] SizeType32 constexpr getNumTokens() const noexcept
-    {
-        return numContextTokens + numGenTokens;
-    };
+    void prepareEagleBuffers(RequestVector const& contextRequests, RequestVector const& genRequests,
+        DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+        runtime::WorldConfig const& worldConfig);
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,

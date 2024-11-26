@@ -44,6 +44,8 @@ class RequestWithIdAsyncSend;
 class CancelledRequestsAsyncSend;
 
 std::vector<RequestWithId> requestWithIdRecv(std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int peer);
+std::unordered_set<IdType> cancelledRequestsRecv(
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> const& commSession, int peer);
 
 class MpiMessageQueue
 {
@@ -88,10 +90,7 @@ public:
     Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr<Model>> encoderModel,
         ExecutorConfig const& executorConfig);
 
-    ~Impl()
-    {
-        shutdown();
-    }
+    ~Impl();
 
     Impl(Impl const& executor) = delete;
     Impl& operator=(Impl const& executor) = delete;
@@ -127,6 +126,9 @@ public:
     bool isParticipant() const;
 
     std::optional<std::shared_ptr<KVCacheEventManager>> getKVCacheEventManager() const;
+
+    static auto constexpr kMpiTagOffset = 18;
+    static auto constexpr kMpiTagUpperBound = kMpiTagOffset + 4;
 
 private:
     using RtTensorPtr = runtime::ITensor::SharedPtr;
@@ -172,6 +174,8 @@ private:
         return (mLastReqId++ % UINT64_MAX);
     }
 
+    std::vector<RequestWithId> getLeaderNewReqWithIds(
+        SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
     std::vector<RequestWithId> getNewReqWithIds(
         SizeType32 numActiveRequests, std::optional<PriorityType> lowestPriorityActive);
 
@@ -231,6 +235,13 @@ private:
     // Check that the current process is the leader or orchestrator
     void checkParallelApiUsage(std::string const& methodName) const;
 
+    // These functions wait for MPI async sends on separate threads
+    void requestWithIdWaitThread();
+    void cancelledRequestsWaitThread();
+    // These functions send data from leader to pipeline leader on separate threads
+    void requestWithIdLeaderThread();
+    void cancelledRequestsLeaderThread();
+
     // The model to execute
     std::shared_ptr<Model> mModel = nullptr;
     std::shared_ptr<Model> mEncoderModel = nullptr;
@@ -256,6 +267,7 @@ private:
     // Cancelled requests
     std::mutex mCancelReqMtx;
     std::unordered_set<IdType> mCancelledReqIds;
+    std::unordered_set<IdType> mPipelineCancelledReqIds;
 
     // Ready responses
     std::unordered_map<IdType, std::vector<Response>> mResponses;
@@ -267,13 +279,6 @@ private:
     IntervalSet<IdType> mTerminatedReqIds;
 
     std::unordered_map<IdType, std::vector<IdType>> mChildReqIdsMap;
-
-    // Micro batching of new and cancelled requests
-    std::vector<std::vector<RequestWithId>> mMicroBatchedNewReqs;
-    std::vector<std::unordered_set<IdType>> mMicroBatchedCancelIds;
-    SizeType32 mNewReqMicroBatchId{0};
-    SizeType32 mCancelReqMicroBatchId{0};
-    bool mTerminateReqReceived = false;
 
     // Iteration stats
     IterationType mIterStatsMaxIterations;
@@ -302,6 +307,8 @@ private:
     CommunicationMode mCommMode;
     bool mIsWorker = false;
     bool mIsLeader = false;
+    bool mIsPipelineLeader = false;
+    bool mUsePipelineParallel = false;
 
     std::unordered_map<std::string, LogitsPostProcessor> mLogitsPostProcessorMap;
     std::optional<Model::LogitsPostProcessorBatched> mLogitsPostProcessorBatched;
@@ -326,8 +333,12 @@ private:
 
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommTensorParallel;
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommPipelineParallel;
-    std::vector<std::unique_ptr<std::thread>> mRequestWithIdWaitThreads;
-    std::vector<std::unique_ptr<std::thread>> mCancelledRequestsWaitThreads;
+    std::unique_ptr<RequestWithIdAsyncSend> mRequestWithIdAsyncSndHdl;
+    std::unique_ptr<CancelledRequestsAsyncSend> mCancelledRequestsAsyncSndHdl;
+    std::unique_ptr<std::thread> mRequestWithIdLeaderThread;
+    std::unique_ptr<std::thread> mCancelledRequestsLeaderThread;
+    std::unique_ptr<tensorrt_llm::mpi::MpiWaitThread> mRequestWithIdWaitThread;
+    std::unique_ptr<tensorrt_llm::mpi::MpiWaitThread> mCancelledRequestsWaitThread;
 
     // for validating requests
     bool mEnableBlockReuse;

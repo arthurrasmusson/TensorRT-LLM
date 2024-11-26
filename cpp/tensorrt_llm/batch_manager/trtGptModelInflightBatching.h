@@ -135,6 +135,12 @@ public:
     /// @brief Override the runtime batch size for the model
     void setRuntimeBatchSize(SizeType32 runtimeMaxBatchSize) override;
 
+    /// @brief Get the runtime batch size for the model
+    [[nodiscard]] SizeType32 getRuntimeBatchSize() const override;
+
+    /// @brief Override the runtime max num tokens for the model
+    void setRuntimeMaxNumTokens(SizeType32 runtimeMaxNumTokens) override;
+
     void updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest) override;
 
     [[nodiscard]] IterationStatsIFB getLastIterationStats() const
@@ -268,6 +274,8 @@ private:
     /// @param[in] genBufferId The id of the generation buffers for those requests.
     void copyCacheIndirectionFromOutputsToInputs(ScheduledRequests const& scheduledRequests, SizeType32 genBufferId);
 
+    void invokeLogitsPostProcessors(ScheduledRequests const& scheduledRequests);
+
     [[nodiscard]] runtime::ModelConfig const& getModelConfig() const override
     {
         return mModelConfig;
@@ -286,6 +294,9 @@ private:
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
 
     void reshapeKvTensors(SizeType32 maxBlocksPerSeq, kv_cache_manager::CacheType kvCacheType, SizeType32 numPools);
+
+    // This function waits for MPI async sends on a separate thread
+    void asyncSendWaitThread();
 
     void draftModelSendLogitsThread();
     static std::optional<TensorPtr> targetModelReceiveLogits(
@@ -394,7 +405,7 @@ private:
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> mDecStepAsyncSndHdls;
     std::vector<std::unique_ptr<DecoderSlotAsyncSend>> mDecSlotAsyncSndHdls;
-    std::unique_ptr<std::thread> mMpiWaitThread;
+    std::unique_ptr<tensorrt_llm::mpi::MpiWaitThread> mAsyncSendWaitThread;
 
     /******************** Tensor parallelism ********************/
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommTensorPara;
@@ -417,6 +428,13 @@ private:
     SizeType32 mMaxBatchSizeTunerRecommended;
     /// The min of mMaxBatchSize and mMaxBatchSizeTunerRecommended
     SizeType32 mMaxBatchSizeRuntime;
+    // Runtime max num tokens optimized during execution for microBatchScheduler:
+    /// Build time max num tokens
+    std::optional<SizeType32> mMaxNumTokensStatic;
+    /// The max num tokens recommended by the dynamic tuner
+    SizeType32 mMaxNumTokensTunerRecommended;
+    /// The min of mMaxNumTokens and mMaxNumTokensTunerRecommended
+    std::optional<SizeType32> mMaxNumTokensRuntime;
 
     /******************** Buffers ********************/
     // Buffers for each micro batch. Unfused path (mCtxGenFusion==false) uses two times the buffers.

@@ -48,6 +48,7 @@ set(SRCS
     types.cpp
     requestUtils.cpp
     contextPhaseParams.cpp
+    disaggServerUtil.cpp
     cache_transmission/cacheConcatenate.cu)
 
 if(NOT WIN32)

@@ -64,7 +64,8 @@ protected:
             draftTokens /*,std::optional<TensorPtr> draftLogits = std::nullopt*/);
     }
 
-    RequestTable forward(RequestVector& activeRequests, SizeType32 maxBatchSizeRuntime)
+    RequestTable forward(
+        RequestVector& activeRequests, SizeType32 maxBatchSizeRuntime, std::optional<SizeType32> maxNumTokensRuntime)
     {
         for (auto const& [reqId, req] : mContextRequests.at(mRuntimeContextId))
         {
@@ -72,7 +73,7 @@ protected:
         }
 
         auto const [contextRequests, genRequests]
-            = (*mMicroBatchScheduler)(activeRequests, mInflightReqIds, maxBatchSizeRuntime);
+            = (*mMicroBatchScheduler)(activeRequests, mInflightReqIds, maxBatchSizeRuntime, maxNumTokensRuntime);
 
         for (auto const& requests : {contextRequests, genRequests})
         {
@@ -161,7 +162,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlap)
 
     for (int it = 0; it < 170; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, std::nullopt);
         if (it < 80)
         {
             EXPECT_EQ(newRequests.size(), 2) << " in iteration " << it;
@@ -196,8 +197,8 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxNumTokens)
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
 
-    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(
-        maxNumTokens, ContextChunkingConfig{ctxChunkPolicy, chunkUnitSize}, std::nullopt);
+    mMicroBatchScheduler
+        = std::make_shared<MicroBatchScheduler>(ContextChunkingConfig{ctxChunkPolicy, chunkUnitSize}, std::nullopt);
 
     constexpr int32_t maxNewTokens = 5;
 
@@ -212,7 +213,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxNumTokens)
 
     for (int it = 0; it < 9; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
         if (it == 0)
         {
             // When it equals 0:
@@ -286,8 +287,8 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxContextLength)
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
 
-    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(
-        std::nullopt, ContextChunkingConfig{ctxChunkPolicy, chunkUnitSize}, maxContextLength);
+    mMicroBatchScheduler
+        = std::make_shared<MicroBatchScheduler>(ContextChunkingConfig{ctxChunkPolicy, chunkUnitSize}, maxContextLength);
 
     constexpr int32_t maxNewTokens = 5;
 
@@ -303,7 +304,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxContextLength)
     RequestTable newRequests;
     for (int it = 0; it < 12; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, std::nullopt);
         if (it == 0)
         {
             // The context for requests 0 and 1 can be processed in one batch.
@@ -387,7 +388,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleWithOverlap)
 
     for (int it = 0; it < 170; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, std::nullopt);
         if (it < 160)
         {
             if (it % 2 == 1)
@@ -427,7 +428,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW1)
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
 
-    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(maxNumTokens);
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>();
 
     constexpr int32_t maxNewTokens = 10;
     constexpr int32_t promptLen = 10;
@@ -440,7 +441,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW1)
 
     for (int it = 0; it < 21; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
         if (it < 3)
         {
             EXPECT_EQ(newRequests.size(), it + 1);
@@ -488,7 +489,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW4)
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
 
-    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(maxNumTokens);
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>();
 
     constexpr int32_t maxNewTokens = 10;
     constexpr int32_t promptLen = 10;
@@ -502,7 +503,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleMaxNumTokensBW4)
     //
     for (int it = 0; it < 22; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
         if (it < 2)
         {
             EXPECT_EQ(newRequests.size(), it + 1);
@@ -551,7 +552,7 @@ TEST_F(MicroBatchSchedulerTest, DraftTokensMaxNumTokens)
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
 
-    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(maxNumTokens);
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>();
 
     constexpr int32_t maxNewTokens = 10;
     constexpr int32_t promptLen = 1024;
@@ -565,7 +566,7 @@ TEST_F(MicroBatchSchedulerTest, DraftTokensMaxNumTokens)
 
     for (int it = 0; it < 12; ++it)
     {
-        RequestTable newRequests = forward(activeRequests, maxBatchSize);
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
         if (it == 0)
         {
             // Due to draft tokens, only 3 requests can fit.
@@ -588,6 +589,66 @@ TEST_F(MicroBatchSchedulerTest, DraftTokensMaxNumTokens)
             EXPECT_NE(newRequests.find(3), newRequests.end());
         }
         else if (it == 11)
+        {
+            EXPECT_EQ(newRequests.size(), 0);
+        }
+    }
+}
+
+TEST_F(MicroBatchSchedulerTest, GenDraftTokensMaxNumTokens)
+{
+    // This test checks that draft tokens will not cause maxNumTokens to be exceeded.
+    constexpr SizeType32 maxNumTokens = 128;
+    constexpr SizeType32 maxBatchSize = 64;
+    constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+
+    mNumContexts = 1;
+    mContextRequests.resize(mNumContexts);
+
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>();
+
+    constexpr int32_t maxNewTokens = 2;
+    constexpr int32_t promptLen = 2;
+    constexpr int32_t genDraftLen = 63;
+
+    RequestVector activeRequests;
+    // No ctx draft tokens.
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, 1));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 1));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2, 1));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 3, 1));
+
+    for (int it = 0; it < 4; ++it)
+    {
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
+        if (it == 0)
+        {
+            EXPECT_EQ(newRequests.size(), 4);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+            EXPECT_NE(newRequests.find(3), newRequests.end());
+
+            // Set gen draft tokens.
+            newRequests.find(0)->second->setDraftTokens(std::make_shared<std::vector<SizeType32>>(genDraftLen));
+            newRequests.find(1)->second->setDraftTokens(std::make_shared<std::vector<SizeType32>>(genDraftLen));
+            newRequests.find(2)->second->setDraftTokens(std::make_shared<std::vector<SizeType32>>(genDraftLen));
+            newRequests.find(3)->second->setDraftTokens(std::make_shared<std::vector<SizeType32>>(genDraftLen));
+        }
+        if (it == 1)
+        {
+            // Due to draft tokens, only 2 gen requests can fit
+            EXPECT_EQ(newRequests.size(), 2);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+        }
+        if (it == 2)
+        {
+            EXPECT_EQ(newRequests.size(), 2);
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+            EXPECT_NE(newRequests.find(3), newRequests.end());
+        }
+        else if (it == 3)
         {
             EXPECT_EQ(newRequests.size(), 0);
         }

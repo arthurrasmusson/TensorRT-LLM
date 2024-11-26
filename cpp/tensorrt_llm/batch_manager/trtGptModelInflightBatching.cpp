@@ -252,6 +252,11 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
         }
     }
 
+    if (mWorldConfig.isPipelineParallel() || broadcastPostDecoder())
+    {
+        mAsyncSendWaitThread = std::make_unique<tensorrt_llm::mpi::MpiWaitThread>(
+            std::make_unique<std::thread>(&TrtGptModelInflightBatching::asyncSendWaitThread, this));
+    }
     if (mWorldConfig.isPipelineParallel())
     {
         auto const& commSession = COMM_SESSION;
@@ -306,6 +311,9 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
     mMaxBatchSizeTunerRecommended = 0;
     mMaxBatchSizeRuntime = getMaxBatchSize();
+    mMaxNumTokensStatic = maxNumTokens;
+    mMaxNumTokensTunerRecommended = 0;
+    mMaxNumTokensRuntime = maxNumTokens;
 
     if (mKvCacheManager && ctxChunkConfig)
     {
@@ -318,7 +326,28 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     mCapacityScheduler = std::make_unique<CapacityScheduler>(getMaxBatchSize() * mNumMicroBatches,
         optionalParams.schedulerConfig.getCapacitySchedulerPolicy(), mKvCacheManager != nullptr, mNumMicroBatches > 1);
 
-    mMicroBatchScheduler = std::make_unique<MicroBatchScheduler>(maxNumTokens, ctxChunkConfig, maxContextLength);
+    mMicroBatchScheduler = std::make_unique<MicroBatchScheduler>(ctxChunkConfig, maxContextLength);
+
+    if (ctxChunkConfig)
+    {
+        if (maxContextLength)
+        {
+            ctxChunkConfig.value().chunkUnitSize
+                = std::min(ctxChunkConfig.value().chunkUnitSize, maxContextLength.value());
+        }
+        TLLM_CHECK_WITH_INFO(ctxChunkConfig.value().chunkUnitSize > 0,
+            "Context chunk size (%d) must be a positive integer.", maxContextLength.value());
+    }
+    else
+    {
+        if (maxContextLength && maxNumTokens)
+        {
+            TLLM_CHECK_WITH_INFO(maxContextLength.value() <= maxNumTokens.value(),
+                "Without enabling chunked context, the max context length (%d) needs to be less than or equal to the "
+                "max number of tokens (%d).",
+                maxContextLength.value(), maxNumTokens.value());
+        }
+    }
 
     mPauseRequests = std::make_unique<PauseRequests>(getMaxInputLen());
     mAssignReqSeqSlots = std::make_unique<AssignReqSeqSlots>();
@@ -343,11 +372,6 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
             = std::make_unique<std::thread>(&TrtGptModelInflightBatching::draftModelSendLogitsThread, this);
     }
 
-    if (modelConfig.getSpeculativeDecodingMode().isEagle())
-    {
-        TLLM_CHECK_WITH_INFO(!optionalParams.enableChunkedContext, "Chunked context is not supported with EAGLE yet");
-    }
-
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -357,10 +381,10 @@ TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
     {
         mCacheTransceiver->checkTranferStatus(true);
     }
-    if (mMpiWaitThread)
+    if (mAsyncSendWaitThread)
     {
-        mMpiWaitThread->join();
-        mMpiWaitThread.reset(nullptr);
+        mAsyncSendWaitThread->exit();
+        mAsyncSendWaitThread.reset(nullptr);
     }
     if (mDraftModelSendLogitsThread)
     {
@@ -409,6 +433,18 @@ void TrtGptModelInflightBatching::reshapeKvTensors(
         // transformerBuffers is not managed by KVCacheManager same rule applies to kv pool pointers below
         buffers->transformerBuffers->reshapeKvTensors(
             getMaxBatchSize(), mOperatingBeamWidth, maxBlocksPerSeq, kvCacheType, numPools, manager);
+    }
+}
+
+void TrtGptModelInflightBatching::asyncSendWaitThread()
+{
+    TLLM_CUDA_CHECK(cudaSetDevice(mWorldConfig.getDevice()));
+    while (!mAsyncSendWaitThread->shouldExit())
+    {
+        mAsyncSendWaitThread->notifyStop();
+        mAsyncSendWaitThread->waitStart();
+        mDecStepAsyncSndHdls.clear();
+        mDecSlotAsyncSndHdls.clear();
     }
 }
 
@@ -726,11 +762,7 @@ void TrtGptModelInflightBatching::forwardSync()
     if (!mWorldConfig.isLastPipelineParallelRank()
         || (broadcastPostDecoder() && !mWorldConfig.isFirstTensorParallelRank()))
     {
-        if (mMpiWaitThread)
-        {
-            mMpiWaitThread->join();
-            mMpiWaitThread.reset(nullptr);
-        }
+        mAsyncSendWaitThread->waitStop();
     }
 
     auto& currRequests = mMicroBatchScheduledRequests.at(mMicroBatchId);
@@ -751,14 +783,7 @@ void TrtGptModelInflightBatching::forwardSync()
             if (!mWorldConfig.isLastPipelineParallelRank()
                 || (broadcastPostDecoder() && !mWorldConfig.isFirstTensorParallelRank()))
             {
-                mMpiWaitThread = std::make_unique<std::thread>(
-                    [this]()
-                    {
-                        auto const device = mWorldConfig.getDevice();
-                        TLLM_CUDA_CHECK(cudaSetDevice(device));
-                        mDecStepAsyncSndHdls.clear();
-                        mDecSlotAsyncSndHdls.clear();
-                    });
+                mAsyncSendWaitThread->notifyStart();
             }
         }
         else
@@ -867,7 +892,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
         auto [fittingRequests, requestsToPause]
             = (*mCapacityScheduler)(activeRequests, mKvCacheManager, mPeftCacheManager, mCrossKvCacheManager);
         std::tie(currRequests.contextRequests, currRequests.generationRequests)
-            = (*mMicroBatchScheduler)(fittingRequests, mInflightReqIds, mMaxBatchSizeRuntime);
+            = (*mMicroBatchScheduler)(fittingRequests, mInflightReqIds, mMaxBatchSizeRuntime, mMaxNumTokensRuntime);
 
         TLLM_CHECK(currRequests.size() <= static_cast<size_t>(getMaxBatchSize()));
 
@@ -953,12 +978,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
         if ((mWorldConfig.isPipelineParallel() && mWorldConfig.isLastPipelineParallelRank())
             || (broadcastPostDecoder() && mWorldConfig.isFirstTensorParallelRank()))
         {
-            if (mMpiWaitThread)
-            {
-                mMpiWaitThread->join();
-                mMpiWaitThread.reset(nullptr);
-            }
-
+            mAsyncSendWaitThread->waitStop();
             if (!currRequests.empty())
             {
                 for (auto& hdl : mDecStepAsyncSndHdls)
@@ -967,14 +987,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                 }
                 // Wait for decoding for requests in flight for the current micro batch
                 mDecStepAsyncSndHdls = decoderSync(currRequests, decoderFinishedEvent);
-                mMpiWaitThread = std::make_unique<std::thread>(
-                    [this]()
-                    {
-                        auto const device = mWorldConfig.getDevice();
-                        TLLM_CUDA_CHECK(cudaSetDevice(device));
-                        mDecStepAsyncSndHdls.clear();
-                        mDecSlotAsyncSndHdls.clear();
-                    });
+                mAsyncSendWaitThread->notifyStart();
             }
         }
 
@@ -998,6 +1011,18 @@ void TrtGptModelInflightBatching::setRuntimeBatchSize(SizeType32 runtimeMaxBatch
 {
     mMaxBatchSizeTunerRecommended = runtimeMaxBatchSize;
     mMaxBatchSizeRuntime = std::min(getMaxBatchSize(), runtimeMaxBatchSize);
+}
+
+SizeType32 TrtGptModelInflightBatching::getRuntimeBatchSize() const
+{
+    return mMaxBatchSizeRuntime;
+}
+
+void TrtGptModelInflightBatching::setRuntimeMaxNumTokens(SizeType32 runtimeMaxNumTokens)
+{
+    mMaxNumTokensTunerRecommended = runtimeMaxNumTokens;
+    mMaxNumTokensRuntime
+        = (mMaxNumTokensStatic) ? std::min(mMaxNumTokensStatic.value(), runtimeMaxNumTokens) : runtimeMaxNumTokens;
 }
 
 void TrtGptModelInflightBatching::updatePeftCache(std::shared_ptr<LlmRequest> const& llmRequest)
@@ -1464,7 +1489,8 @@ TrtGptModelInflightBatching::prepareBuffers(
         }
         if (mModelConfig.getSpeculativeDecodingMode().isEagle())
         {
-            mBuffers[bufferId]->prepareEagleBuffers(*mDecoderBuffers, *mRuntime, mModelConfig, mWorldConfig);
+            mBuffers[bufferId]->prepareEagleBuffers(
+                contextRequests, generationRequests, *mDecoderBuffers, *mRuntime, mModelConfig, mWorldConfig);
         }
     }
 
@@ -2054,54 +2080,7 @@ TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching
     // TODO: Could we avoid this by modifying batchDecoder to take a vector of tensors instead?
     copyCacheIndirectionFromOutputsToInputs(scheduledRequests, genBufferId);
 
-    mLogitsPostProcessorIsApplied = false;
-    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
-    {
-        for (auto const& llmReq : requests)
-        {
-            if (llmReq->mLogitsPostProcessor)
-            {
-                mLogitsPostProcessorIsApplied = true;
-                if (mReplicateLogitsPostProcessor || mWorldConfig.isFirstTensorParallelRank())
-                {
-                    auto& logits = mDecoderBuffers->logits.at(llmReq->mSeqSlot.value());
-                    llmReq->mLogitsPostProcessor.value()(
-                        llmReq->mRequestId, logits, llmReq->getTokens(), mRuntime->getStreamPtr(), llmReq->mClientId);
-                }
-            }
-        }
-    }
-
-    std::vector<LlmRequest::RequestIdType> reqIdsVec;
-    std::vector<LlmRequest::TensorPtr> logitsVec;
-    std::vector<std::reference_wrapper<LlmRequest::BeamTokens const>> beamTokensVec;
-    std::vector<std::optional<LlmRequest::RequestIdType>> clientIdsVec;
-
-    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
-    {
-        for (auto const& llmReq : requests)
-        {
-            if (llmReq->mApplyLogitsPostProcessorBatched)
-            {
-                reqIdsVec.push_back(llmReq->mRequestId);
-
-                auto& logits = mDecoderBuffers->logits.at(llmReq->mSeqSlot.value());
-                logitsVec.push_back(logits);
-
-                beamTokensVec.emplace_back(llmReq->getTokens());
-                clientIdsVec.push_back(llmReq->mClientId);
-            }
-        }
-    }
-    if (!reqIdsVec.empty())
-    {
-        mLogitsPostProcessorIsApplied = true;
-        if (mReplicateLogitsPostProcessor || mWorldConfig.isFirstTensorParallelRank())
-        {
-            mLogitsPostProcessorBatched.value()(
-                reqIdsVec, logitsVec, beamTokensVec, mRuntime->getStreamPtr(), clientIdsVec);
-        }
-    }
+    invokeLogitsPostProcessors(scheduledRequests);
 
     auto& decodingInput = mDecodingInputs.at(mMicroBatchId);
     auto const active = computeActiveVec(scheduledRequests);
@@ -2593,6 +2572,60 @@ void TrtGptModelInflightBatching::rewindKVCacheBlocks(SizeType32 numSequences)
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void TrtGptModelInflightBatching::invokeLogitsPostProcessors(ScheduledRequests const& scheduledRequests)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    // Arguments for batched processor
+    std::vector<LlmRequest::RequestIdType> reqIdsVec;
+    std::vector<LlmRequest::TensorPtr> logitsVec;
+    std::vector<std::reference_wrapper<LlmRequest::BeamTokens const>> beamTokensVec;
+    std::vector<std::optional<LlmRequest::RequestIdType>> clientIdsVec;
+
+    mLogitsPostProcessorIsApplied = false;
+    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
+    {
+        for (auto const& llmReq : requests)
+        {
+            if (llmReq->isContextInitState() ? llmReq->isLastContextChunk() : llmReq->isGenerationInProgressState())
+            {
+                // Invoke non-batched processor or collect arguments for batched processor
+                if (llmReq->mLogitsPostProcessor)
+                {
+                    mLogitsPostProcessorIsApplied = true;
+                    if (mReplicateLogitsPostProcessor || mWorldConfig.isFirstTensorParallelRank())
+                    {
+                        auto& logits = mDecoderBuffers->logits.at(llmReq->mSeqSlot.value());
+                        llmReq->mLogitsPostProcessor.value()(llmReq->mRequestId, logits, llmReq->getTokens(),
+                            mRuntime->getStreamPtr(), llmReq->mClientId);
+                    }
+                }
+                else if (llmReq->mApplyLogitsPostProcessorBatched)
+                {
+                    reqIdsVec.push_back(llmReq->mRequestId);
+
+                    auto& logits = mDecoderBuffers->logits.at(llmReq->mSeqSlot.value());
+                    logitsVec.push_back(logits);
+
+                    beamTokensVec.emplace_back(llmReq->getTokens());
+                    clientIdsVec.push_back(llmReq->mClientId);
+                }
+            }
+        }
+    }
+
+    // Invoke batched processor
+    if (!reqIdsVec.empty())
+    {
+        mLogitsPostProcessorIsApplied = true;
+        if (mReplicateLogitsPostProcessor || mWorldConfig.isFirstTensorParallelRank())
+        {
+            mLogitsPostProcessorBatched.value()(
+                reqIdsVec, logitsVec, beamTokensVec, mRuntime->getStreamPtr(), clientIdsVec);
+        }
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 nvinfer1::DataType TrtGptModelInflightBatching::getLogitDataType() const
 {
     return mModelConfig.getLogitsDtype();
@@ -2630,10 +2663,13 @@ void TrtGptModelInflightBatching::getCurrentIterationStats(executor::IterationSt
 {
     stats.iter = mIterCounter;
 
-    // Max batch size can be tuned at runtime
+    // Max batch size and max num tokens can be tuned at runtime
     stats.maxBatchSizeStatic = getMaxBatchSize();
     stats.maxBatchSizeTunerRecommended = mMaxBatchSizeTunerRecommended;
     stats.maxBatchSizeRuntime = mMaxBatchSizeRuntime;
+    stats.maxNumTokensStatic = mMaxNumTokensStatic.value_or(0);
+    stats.maxNumTokensTunerRecommended = mMaxNumTokensTunerRecommended;
+    stats.maxNumTokensRuntime = mMaxNumTokensRuntime.value_or(0);
 
     // KVCacheManager statistics
     auto const& kvCacheManager = getKVCacheManager();

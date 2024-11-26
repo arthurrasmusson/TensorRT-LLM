@@ -246,7 +246,7 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     mCapacityScheduler = std::make_unique<tensorrt_llm::batch_manager::CapacityScheduler>(mPpTimesMaxBatchSize,
         optionalParams.schedulerConfig.getCapacitySchedulerPolicy(), static_cast<bool>(mSession->mKvCacheManager));
 
-    mMicroBatchScheduler = std::make_unique<tensorrt_llm::batch_manager::MicroBatchScheduler>(maxNumTokens);
+    mMicroBatchScheduler = std::make_unique<tensorrt_llm::batch_manager::MicroBatchScheduler>();
 }
 
 runtime::ModelConfig const& TrtGptModelV1::getModelConfig() const
@@ -436,7 +436,8 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     TLLM_CUDA_CHECK(cudaSetDevice(device));
 
     auto [fittingRequests, pausedRequests] = (*mCapacityScheduler)(activeRequests, mSession->mKvCacheManager);
-    auto [scheduledRequests, genRequests] = (*mMicroBatchScheduler)(fittingRequests, {}, mPpTimesMaxBatchSize);
+    auto [scheduledRequests, genRequests]
+        = (*mMicroBatchScheduler)(fittingRequests, {}, mPpTimesMaxBatchSize, getModelConfig().getMaxNumTokens());
 
     TLLM_CHECK(genRequests.empty());
 
