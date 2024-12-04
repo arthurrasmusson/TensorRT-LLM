@@ -95,6 +95,12 @@ public:
         return *this;
     }
 
+    ModelSpec& useContextParallelism(int contextParallelism)
+    {
+        mCPSize = contextParallelism;
+        return *this;
+    }
+
     ModelSpec& useRandomEndId()
     {
         mRandomEndId = true;
@@ -302,6 +308,7 @@ public:
     bool mDecoderPerRequest{false};
     int mPPSize{1};
     int mTPSize{1};
+    int mCPSize{1};
     bool mRandomEndId{false};
     int mMaxDraftTokens{0};
     bool mAcceptDraftByLogits{false};

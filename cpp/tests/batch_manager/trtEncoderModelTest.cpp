@@ -76,8 +76,8 @@ protected:
 
         auto const json = GptJsonConfig::parse(trtEnginePath / "config.json");
         mModelConfig = json.getModelConfig();
-        mWorldConfig
-            = WorldConfig::mpi(json.getGpusPerNode(), json.getTensorParallelism(), json.getPipelineParallelism());
+        mWorldConfig = WorldConfig::mpi(json.getGpusPerNode(), json.getTensorParallelism(),
+            json.getPipelineParallelism(), json.getContextParallelism());
         mVocabSizePadded = mModelConfig.getVocabSizePadded(mWorldConfig.getSize());
 
         auto const enginePath = trtEnginePath / json.engineFilename(mWorldConfig);

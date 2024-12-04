@@ -32,7 +32,6 @@
 
 using namespace tensorrt_llm::runtime;
 using namespace tensorrt_llm::batch_manager;
-using namespace tensorrt_llm::batch_manager;
 using tensorrt_llm::executor::insertRequestInOrder;
 namespace tc = tensorrt_llm::common;
 
@@ -115,7 +114,7 @@ protected:
 
     void TearDown() override {}
 
-    static std::shared_ptr<kv_cache_manager::KVCacheManager> getKvCacheManager(SizeType32 maxNumRequests,
+    static std::shared_ptr<kv_cache_manager::BaseKVCacheManager> getKvCacheManager(SizeType32 maxNumRequests,
         SizeType32 tokensPerBlock, SizeType32 maxNumTokens, SizeType32 maxNumTokensPerSeq,
         SizeType32 sinkTokenLength = 0, bool enableReuse = false,
         kv_cache_manager::CacheType cacheType = kv_cache_manager::CacheType::kSELF)
@@ -123,7 +122,6 @@ protected:
         auto const numLayers = 10;
         auto const nbKvHeads = 10;
         auto constexpr sizePerHead = 1;
-        auto const useOneMoreBlock = false;
         auto const maxNumBlocks = tc::divUp(maxNumTokens, tokensPerBlock);
         auto const kvDtype = nvinfer1::DataType::kHALF;
         bool onboardBlocks = true;
@@ -131,7 +129,7 @@ protected:
 
         // init KV cache block manager
         return std::make_shared<kv_cache_manager::KVCacheManager>(numLayers, nbKvHeads, sizePerHead, tokensPerBlock,
-            maxNumBlocks, 0, maxNumRequests, 1, maxNumTokensPerSeq, sinkTokenLength, useOneMoreBlock, streamPtr,
+            maxNumBlocks, 0, maxNumRequests, 1, maxNumTokensPerSeq, 0, sinkTokenLength, streamPtr, std::nullopt,
             enableReuse, onboardBlocks, cacheType);
     }
 
@@ -215,10 +213,10 @@ void prepRequestsForEncoderSkip(RequestList& activeRequests)
 }
 
 int runTest(CapacityScheduler& capacityScheduler,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> const& kvCacheManager, RequestList& activeRequests,
+    std::shared_ptr<kv_cache_manager::BaseKVCacheManager> const& kvCacheManager, RequestList& activeRequests,
     std::vector<ExpectedState> const& expectedStates, AddNewRequestsCallback const& addNewRequestsCb,
     SizeType32 maxInputLen, std::shared_ptr<BasePeftCacheManager> const& peftCacheManager = nullptr,
-    std::shared_ptr<kv_cache_manager::KVCacheManager> const& crossKvCacheManager = nullptr)
+    std::shared_ptr<kv_cache_manager::BaseKVCacheManager> const& crossKvCacheManager = nullptr)
 {
     int itCount = 0;
     while (!activeRequests.empty())

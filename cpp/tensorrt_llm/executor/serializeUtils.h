@@ -81,6 +81,7 @@ bool constexpr hasSerializedSize(decltype(Serialization::serializedSize(std::dec
     return true;
 }
 
+static_assert(hasSerializedSize<RequestPerfMetrics>(size_t()));
 static_assert(hasSerializedSize<Request>(size_t()));
 static_assert(hasSerializedSize<SamplingConfig>(size_t()));
 static_assert(hasSerializedSize<OutputConfig>(size_t()));
@@ -107,6 +108,9 @@ static_assert(hasSerializedSize<EagleConfig>(size_t()));
 static_assert(hasSerializedSize<KvCacheRetentionConfig>(size_t()));
 static_assert(hasSerializedSize<DecodingConfig>(size_t()));
 static_assert(hasSerializedSize<DebugConfig>(size_t()));
+static_assert(hasSerializedSize<SpeculativeDecodingConfig>(size_t()));
+static_assert(hasSerializedSize<GuidedDecodingConfig>(size_t()));
+static_assert(hasSerializedSize<GuidedDecodingParams>(size_t()));
 static_assert(!hasSerializedSize<std::string>(size_t()));
 static_assert(!hasSerializedSize<std::optional<float>>(size_t()));
 
@@ -172,6 +176,7 @@ bool constexpr hasSerialize(
     return true;
 }
 
+static_assert(hasSerialize<RequestPerfMetrics>(nullptr));
 static_assert(hasSerialize<Request>(nullptr));
 static_assert(hasSerialize<SamplingConfig>(nullptr));
 static_assert(hasSerialize<OutputConfig>(nullptr));
@@ -190,6 +195,9 @@ static_assert(hasSerialize<PeftCacheConfig>(nullptr));
 static_assert(hasSerialize<DecodingMode>(nullptr));
 static_assert(hasSerialize<LookaheadDecodingConfig>(nullptr));
 static_assert(hasSerialize<EagleConfig>(nullptr));
+static_assert(hasSerialize<SpeculativeDecodingConfig>(nullptr));
+static_assert(hasSerialize<GuidedDecodingConfig>(nullptr));
+static_assert(hasSerialize<GuidedDecodingParams>(nullptr));
 static_assert(hasSerialize<KvCacheRetentionConfig>(nullptr));
 static_assert(hasSerialize<DecodingConfig>(nullptr));
 static_assert(hasSerialize<kv_cache::CommState>(nullptr));
@@ -291,6 +299,14 @@ T deserialize(std::istream& is)
         return static_cast<T>(value);
     }
     // deserialize from serialization class
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestPerfMetrics::TimePoint>::value)
+    {
+        return Serialization::deserializeTimePoint(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestPerfMetrics>::value)
+    {
+        return Serialization::deserializeRequestPerfMetrics(is);
+    }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::SamplingConfig>::value)
     {
         return Serialization::deserializeSamplingConfig(is);
@@ -394,6 +410,18 @@ T deserialize(std::istream& is)
     else if constexpr (std::is_same<T, tensorrt_llm::executor::EagleConfig>::value)
     {
         return Serialization::deserializeEagleConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::SpeculativeDecodingConfig>::value)
+    {
+        return Serialization::deserializeSpeculativeDecodingConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::GuidedDecodingConfig>::value)
+    {
+        return Serialization::deserializeGuidedDecodingConfig(is);
+    }
+    else if constexpr (std::is_same<T, tensorrt_llm::executor::GuidedDecodingParams>::value)
+    {
+        return Serialization::deserializeGuidedDecodingParams(is);
     }
     else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheRetentionConfig>::value)
     {

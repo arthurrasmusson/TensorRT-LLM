@@ -16,12 +16,13 @@ namespace tensorrt_llm::executor
 {
 
 OutputConfig::OutputConfig(bool inReturnLogProbs, bool inReturnContextLogits, bool inReturnGenerationLogits,
-    bool inExcludeInputFromOutput, bool inReturnEncoderOutput)
+    bool inExcludeInputFromOutput, bool inReturnEncoderOutput, bool inReturnPerfMetrics)
     : returnLogProbs(inReturnLogProbs)
     , returnContextLogits(inReturnContextLogits)
     , returnGenerationLogits(inReturnGenerationLogits)
     , excludeInputFromOutput(inExcludeInputFromOutput)
     , returnEncoderOutput(inReturnEncoderOutput)
+    , returnPerfMetrics(inReturnPerfMetrics)
 {
 }
 

@@ -104,9 +104,14 @@ public:
 
     void resetIterationStats() override;
 
+    [[nodiscard]] SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override
+    {
+        return 0;
+    };
+
 protected:
-    [[nodiscard]] std::shared_ptr<kv_cache_manager::KVCacheManager> getKVCacheManager() override;
-    [[nodiscard]] std::shared_ptr<kv_cache_manager::KVCacheManager const> getKVCacheManager() const override;
+    [[nodiscard]] std::shared_ptr<kv_cache_manager::BaseKVCacheManager> getKVCacheManager() override;
+    [[nodiscard]] std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> getKVCacheManager() const override;
 
     [[nodiscard]] std::shared_ptr<BasePeftCacheManager> getPeftCacheManager() override
     {

@@ -36,7 +36,7 @@ public:
         UCX = 2
     };
 
-    CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManager, CommType commType,
+    CacheTransceiver(kv_cache_manager::BaseKVCacheManager* cacheManager, CommType commType,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     ~CacheTransceiver();

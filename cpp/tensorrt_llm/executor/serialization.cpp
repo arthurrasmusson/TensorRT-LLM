@@ -27,6 +27,95 @@ namespace su = tensorrt_llm::executor::serialize_utils;
 namespace tensorrt_llm::executor
 {
 
+// TimePoint
+RequestPerfMetrics::TimePoint Serialization::deserializeTimePoint(std::istream& is)
+{
+    auto serialized_time = su::deserialize<uint64_t>(is);
+    std::chrono::microseconds duration(serialized_time);
+    return std::chrono::steady_clock::time_point(duration);
+}
+
+void Serialization::serialize(RequestPerfMetrics::TimePoint const& tp, std::ostream& os)
+{
+    su::serialize(std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count(), os);
+}
+
+size_t Serialization::serializedSize(RequestPerfMetrics::TimePoint const&)
+{
+    return sizeof(uint64_t);
+}
+
+// RequestPerfMetrics
+RequestPerfMetrics Serialization::deserializeRequestPerfMetrics(std::istream& is)
+{
+    auto arrivalTime = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+    auto firstScheduledTime = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+    auto firstTokenTime = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+    auto lastTokenTime = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+    auto kvCacheTransferStart = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+    auto kvCacheTransferEnd = su::deserialize<RequestPerfMetrics::TimePoint>(is);
+
+    auto numTotalAllocatedBlocks = su::deserialize<SizeType32>(is);
+    auto numNewAllocatedBlocks = su::deserialize<SizeType32>(is);
+    auto numReusedBlocks = su::deserialize<SizeType32>(is);
+    auto numMissedBlocks = su::deserialize<SizeType32>(is);
+    auto kvCacheHitRate = su::deserialize<SizeType32>(is);
+
+    auto firstIter = su::deserialize<std::optional<IterationType>>(is);
+    auto lastIter = su::deserialize<std::optional<IterationType>>(is);
+    auto iter = su::deserialize<std::optional<IterationType>>(is);
+
+    RequestPerfMetrics::TimingMetrics timingMetrics{
+        arrivalTime, firstScheduledTime, firstTokenTime, lastTokenTime, kvCacheTransferStart, kvCacheTransferEnd};
+    RequestPerfMetrics::KvCacheMetrics kvCacheMetrics{
+        numTotalAllocatedBlocks, numNewAllocatedBlocks, numReusedBlocks, numMissedBlocks, kvCacheHitRate};
+    return RequestPerfMetrics{std::move(timingMetrics), std::move(kvCacheMetrics), firstIter, lastIter, iter};
+}
+
+void Serialization::serialize(RequestPerfMetrics const& metrics, std::ostream& os)
+{
+    su::serialize(metrics.timingMetrics.arrivalTime, os);
+    su::serialize(metrics.timingMetrics.firstScheduledTime, os);
+    su::serialize(metrics.timingMetrics.firstTokenTime, os);
+    su::serialize(metrics.timingMetrics.lastTokenTime, os);
+    su::serialize(metrics.timingMetrics.kvCacheTransferStart, os);
+    su::serialize(metrics.timingMetrics.kvCacheTransferEnd, os);
+
+    su::serialize(metrics.kvCacheMetrics.numTotalAllocatedBlocks, os);
+    su::serialize(metrics.kvCacheMetrics.numNewAllocatedBlocks, os);
+    su::serialize(metrics.kvCacheMetrics.numReusedBlocks, os);
+    su::serialize(metrics.kvCacheMetrics.numMissedBlocks, os);
+    su::serialize(metrics.kvCacheMetrics.kvCacheHitRate, os);
+
+    su::serialize(metrics.firstIter, os);
+    su::serialize(metrics.lastIter, os);
+    su::serialize(metrics.iter, os);
+}
+
+size_t Serialization::serializedSize(RequestPerfMetrics const& metrics)
+{
+    size_t totalSize = 0;
+
+    totalSize += su::serializedSize(metrics.timingMetrics.arrivalTime);
+    totalSize += su::serializedSize(metrics.timingMetrics.firstScheduledTime);
+    totalSize += su::serializedSize(metrics.timingMetrics.firstTokenTime);
+    totalSize += su::serializedSize(metrics.timingMetrics.lastTokenTime);
+    totalSize += su::serializedSize(metrics.timingMetrics.kvCacheTransferStart);
+    totalSize += su::serializedSize(metrics.timingMetrics.kvCacheTransferEnd);
+
+    totalSize += su::serializedSize(metrics.kvCacheMetrics.numTotalAllocatedBlocks);
+    totalSize += su::serializedSize(metrics.kvCacheMetrics.numNewAllocatedBlocks);
+    totalSize += su::serializedSize(metrics.kvCacheMetrics.numReusedBlocks);
+    totalSize += su::serializedSize(metrics.kvCacheMetrics.numMissedBlocks);
+    totalSize += su::serializedSize(metrics.kvCacheMetrics.kvCacheHitRate);
+
+    totalSize += su::serializedSize(metrics.firstIter);
+    totalSize += su::serializedSize(metrics.lastIter);
+    totalSize += su::serializedSize(metrics.iter);
+
+    return totalSize;
+}
+
 // SamplingConfig
 SamplingConfig Serialization::deserializeSamplingConfig(std::istream& is)
 {
@@ -105,8 +194,9 @@ OutputConfig Serialization::deserializeOutputConfig(std::istream& is)
     auto returnGenerationLogits = su::deserialize<bool>(is);
     auto excludeInputFromOutput = su::deserialize<bool>(is);
     auto returnEncoderOutput = su::deserialize<bool>(is);
-    return OutputConfig{
-        returnLogProbs, returnContextLogits, returnGenerationLogits, excludeInputFromOutput, returnEncoderOutput};
+    auto returnPerfMetrics = su::deserialize<bool>(is);
+    return OutputConfig{returnLogProbs, returnContextLogits, returnGenerationLogits, excludeInputFromOutput,
+        returnEncoderOutput, returnPerfMetrics};
 }
 
 void Serialization::serialize(OutputConfig const& config, std::ostream& os)
@@ -116,6 +206,7 @@ void Serialization::serialize(OutputConfig const& config, std::ostream& os)
     su::serialize(config.returnGenerationLogits, os);
     su::serialize(config.excludeInputFromOutput, os);
     su::serialize(config.returnEncoderOutput, os);
+    su::serialize(config.returnPerfMetrics, os);
 }
 
 size_t Serialization::serializedSize(OutputConfig const& config)
@@ -126,6 +217,7 @@ size_t Serialization::serializedSize(OutputConfig const& config)
     totalSize += su::serializedSize(config.returnGenerationLogits);
     totalSize += su::serializedSize(config.excludeInputFromOutput);
     totalSize += su::serializedSize(config.returnEncoderOutput);
+    totalSize += su::serializedSize(config.returnPerfMetrics);
     return totalSize;
 }
 
@@ -450,6 +542,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto numReturnSequences = su::deserialize<SizeType32>(is);
     auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
     auto skipCrossAttnBlocks = su::deserialize<std::optional<Tensor>>(is);
+    auto guidedDecodingParams = su::deserialize<std::optional<GuidedDecodingParams>>(is);
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
@@ -457,7 +550,8 @@ Request Serialization::deserializeRequest(std::istream& is)
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
-        std::move(crossAttentionMask), numReturnSequences, std::move(eagleConfig), std::move(skipCrossAttnBlocks));
+        std::move(crossAttentionMask), numReturnSequences, std::move(eagleConfig), std::move(skipCrossAttnBlocks),
+        std::move(guidedDecodingParams));
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -636,11 +730,12 @@ Result Serialization::deserializeResult(std::istream& is)
     auto decodingIter = su::deserialize<SizeType32>(is);
     auto sequenceIndex = su::deserialize<SizeType32>(is);
     auto isSequenceFinal = su::deserialize<bool>(is);
+    auto requestPerfMetrics = su::deserialize<std::optional<RequestPerfMetrics>>(is);
 
     return Result{isFinal, std::move(outputTokenIds), std::move(cumLogProbs), std::move(logProbs),
         std::move(contextLogits), std::move(generationLogits), std::move(specDecFastLogitsInfo),
         std::move(encoderOutput), std::move(finishReasons), std::move(contextPhaseParams), decodingIter, sequenceIndex,
-        isSequenceFinal};
+        isSequenceFinal, requestPerfMetrics};
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -658,6 +753,7 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.decodingIter, os);
     su::serialize(result.sequenceIndex, os);
     su::serialize(result.isSequenceFinal, os);
+    su::serialize(result.requestPerfMetrics, os);
 }
 
 size_t Serialization::serializedSize(Result const& result)
@@ -676,6 +772,7 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.decodingIter);
     totalSize += su::serializedSize(result.sequenceIndex);
     totalSize += su::serializedSize(result.isSequenceFinal);
+    totalSize += su::serializedSize(result.requestPerfMetrics);
     return totalSize;
 }
 
@@ -783,11 +880,15 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
     auto maxSeqIdleMicroseconds
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxSeqIdleMicroseconds), ExecutorConfig>>(
             is);
+    auto specDecConfig
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getSpecDecConfig), ExecutorConfig>>(is);
+    auto guidedDecodingConfig
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGuidedDecodingConfig), ExecutorConfig>>(is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
         peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig,
-        debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds};
+        debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds, specDecConfig, guidedDecodingConfig};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -816,6 +917,8 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getDebugConfig());
     totalSize += su::serializedSize(executorConfig.getRecvPollPeriodMs());
     totalSize += su::serializedSize(executorConfig.getMaxSeqIdleMicroseconds());
+    totalSize += su::serializedSize(executorConfig.getSpecDecConfig());
+    totalSize += su::serializedSize(executorConfig.getGuidedDecodingConfig());
 
     return totalSize;
 }
@@ -844,6 +947,8 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getDebugConfig(), os);
     su::serialize(executorConfig.getRecvPollPeriodMs(), os);
     su::serialize(executorConfig.getMaxSeqIdleMicroseconds(), os);
+    su::serialize(executorConfig.getSpecDecConfig(), os);
+    su::serialize(executorConfig.getGuidedDecodingConfig(), os);
 }
 
 // KvCacheConfig
@@ -858,9 +963,10 @@ KvCacheConfig Serialization::deserializeKvCacheConfig(std::istream& is)
     auto onboardBlocks = su::deserialize<bool>(is);
     auto crossKvCacheFraction = su::deserialize<std::optional<FloatType>>(is);
     auto secondaryOffloadMinPriority = su::deserialize<std::optional<executor::RetentionPriority>>(is);
+    auto eventBufferMaxSize = su::deserialize<size_t>(is);
 
     return KvCacheConfig{enableBlockReuse, maxTokens, maxAttentionWindowVec, sinkTokenLength, freeGpuMemoryFraction,
-        hostCacheSize, onboardBlocks, crossKvCacheFraction, secondaryOffloadMinPriority};
+        hostCacheSize, onboardBlocks, crossKvCacheFraction, secondaryOffloadMinPriority, eventBufferMaxSize};
 }
 
 void Serialization::serialize(KvCacheConfig const& kvCacheConfig, std::ostream& os)
@@ -874,6 +980,7 @@ void Serialization::serialize(KvCacheConfig const& kvCacheConfig, std::ostream& 
     su::serialize(kvCacheConfig.getOnboardBlocks(), os);
     su::serialize(kvCacheConfig.getCrossKvCacheFraction(), os);
     su::serialize(kvCacheConfig.getSecondaryOffloadMinPriority(), os);
+    su::serialize(kvCacheConfig.getEventBufferMaxSize(), os);
 }
 
 size_t Serialization::serializedSize(KvCacheConfig const& kvCacheConfig)
@@ -889,6 +996,7 @@ size_t Serialization::serializedSize(KvCacheConfig const& kvCacheConfig)
     totalSize += su::serializedSize(kvCacheConfig.getOnboardBlocks());
     totalSize += su::serializedSize(kvCacheConfig.getCrossKvCacheFraction());
     totalSize += su::serializedSize(kvCacheConfig.getSecondaryOffloadMinPriority());
+    totalSize += su::serializedSize(kvCacheConfig.getEventBufferMaxSize());
     return totalSize;
 }
 
@@ -1130,19 +1238,105 @@ size_t Serialization::serializedSize(LookaheadDecodingConfig const& lookaheadDec
 EagleConfig Serialization::deserializeEagleConfig(std::istream& is)
 {
     auto eagleChoices = su::deserialize<std::optional<EagleChoices>>(is);
+    auto isGreedySampling = su::deserialize<bool>(is);
+    auto posteriorThreshold = su::deserialize<std::optional<float>>(is);
 
-    return EagleConfig{eagleChoices};
+    return EagleConfig{eagleChoices, isGreedySampling, posteriorThreshold};
 }
 
 void Serialization::serialize(EagleConfig const& eagleConfig, std::ostream& os)
 {
     su::serialize(eagleConfig.getEagleChoices(), os);
+    su::serialize(eagleConfig.isGreedySampling(), os);
+    su::serialize(eagleConfig.getPosteriorThreshold(), os);
 }
 
 size_t Serialization::serializedSize(EagleConfig const& eagleConfig)
 {
     size_t totalSize = 0;
     totalSize += su::serializedSize(eagleConfig.getEagleChoices());
+    totalSize += su::serializedSize(eagleConfig.isGreedySampling());
+    totalSize += su::serializedSize(eagleConfig.getPosteriorThreshold());
+    return totalSize;
+}
+
+// SpeculativeDecodingConfig
+SpeculativeDecodingConfig Serialization::deserializeSpeculativeDecodingConfig(std::istream& is)
+{
+    auto fastLogits = su::deserialize<decltype(SpeculativeDecodingConfig::fastLogits)>(is);
+    return SpeculativeDecodingConfig(fastLogits);
+}
+
+void Serialization::serialize(SpeculativeDecodingConfig const& specDecConfig, std::ostream& os)
+{
+    su::serialize(specDecConfig.fastLogits, os);
+}
+
+size_t Serialization::serializedSize(SpeculativeDecodingConfig const& specDecConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(specDecConfig.fastLogits);
+    return totalSize;
+}
+
+// GuidedDecodingConfig
+GuidedDecodingConfig Serialization::deserializeGuidedDecodingConfig(std::istream& is)
+{
+    auto backend
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getBackend), GuidedDecodingConfig>>(is);
+    auto encodedVocab
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getEncodedVocab), GuidedDecodingConfig>>(
+            is);
+    auto tokenizerStr
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getTokenizerStr), GuidedDecodingConfig>>(
+            is);
+    auto stopTokenIds
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getStopTokenIds), GuidedDecodingConfig>>(
+            is);
+    return GuidedDecodingConfig(backend, encodedVocab, tokenizerStr, stopTokenIds);
+}
+
+void Serialization::serialize(GuidedDecodingConfig const& guidedDecodingConfig, std::ostream& os)
+{
+    su::serialize(guidedDecodingConfig.getBackend(), os);
+    su::serialize(guidedDecodingConfig.getEncodedVocab(), os);
+    su::serialize(guidedDecodingConfig.getTokenizerStr(), os);
+    su::serialize(guidedDecodingConfig.getStopTokenIds(), os);
+}
+
+size_t Serialization::serializedSize(GuidedDecodingConfig const& guidedDecodingConfig)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(guidedDecodingConfig.getBackend());
+    totalSize += su::serializedSize(guidedDecodingConfig.getEncodedVocab());
+    totalSize += su::serializedSize(guidedDecodingConfig.getTokenizerStr());
+    totalSize += su::serializedSize(guidedDecodingConfig.getStopTokenIds());
+    return totalSize;
+}
+
+// GuidedDecodingParams
+GuidedDecodingParams Serialization::deserializeGuidedDecodingParams(std::istream& is)
+{
+
+    auto guideType
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingParams::getGuideType), GuidedDecodingParams>>(
+            is);
+    auto guide
+        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingParams::getGuide), GuidedDecodingParams>>(is);
+    return GuidedDecodingParams(guideType, guide);
+}
+
+void Serialization::serialize(GuidedDecodingParams const& guidedDecodingParams, std::ostream& os)
+{
+    su::serialize(guidedDecodingParams.getGuideType(), os);
+    su::serialize(guidedDecodingParams.getGuide(), os);
+}
+
+size_t Serialization::serializedSize(GuidedDecodingParams const& guidedDecodingParams)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(guidedDecodingParams.getGuideType());
+    totalSize += su::serializedSize(guidedDecodingParams.getGuide());
     return totalSize;
 }
 

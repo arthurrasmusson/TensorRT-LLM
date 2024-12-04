@@ -31,14 +31,14 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
     std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
     std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
-    std::optional<Tensor> skipCrossAttnBlocks)
+    std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
-        numReturnSequences, eagleConfig, skipCrossAttnBlocks))
+        numReturnSequences, eagleConfig, skipCrossAttnBlocks, std::move(guidedDecodingParams)))
 {
 }
 
@@ -221,6 +221,11 @@ std::optional<Tensor> Request::getSkipCrossAttnBlocks() const
     return mImpl->getSkipCrossAttnBlocks();
 }
 
+std::optional<GuidedDecodingParams> Request::getGuidedDecodingParams() const
+{
+    return mImpl->getGuidedDecodingParams();
+}
+
 void Request::setStreaming(bool streaming)
 {
     return mImpl->setStreaming(streaming);
@@ -362,6 +367,11 @@ void Request::setEagleConfig(std::optional<EagleConfig> const& eagleConfig)
 void Request::setSkipCrossAttnBlocks(Tensor skipCrossAttnBlocks)
 {
     return mImpl->setSkipCrossAttnBlocks(skipCrossAttnBlocks);
+}
+
+void Request::setGuidedDecodingParams(GuidedDecodingParams const& guidedDecodingParams)
+{
+    mImpl->setGuidedDecodingParams(guidedDecodingParams);
 }
 
 } // namespace tensorrt_llm::executor

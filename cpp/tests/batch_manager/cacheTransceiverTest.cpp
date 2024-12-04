@@ -109,12 +109,13 @@ TEST_F(CacheConfigTest, EqualTo)
     constexpr SizeType32 tokensPerBlock{64};
     constexpr SizeType32 tensorParallelism{8};
     constexpr SizeType32 pipelineParallelism{2};
+    constexpr SizeType32 contextParallelism{1};
     constexpr SizeType32 sizePerHead{hiddenSize / nbHeads};
 
     tr::ModelConfig modelConfig{
         vocabSize, nbAttentionLayers + nbRnnLayers, nbAttentionLayers, nbRnnLayers, nbHeads, hiddenSize, dtype};
     modelConfig.setTokensPerBlock(tokensPerBlock);
-    tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism};
+    tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism, contextParallelism};
 
     texec::kv_cache::CacheState state0{modelConfig, worldConfig};
     texec::kv_cache::CacheState state1{
@@ -142,7 +143,7 @@ public:
 
     MOCK_METHOD(RequestInfo, recvRequestInfo, (), (override));
     MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
-    MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const override));
+    MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const));
     MOCK_METHOD(void, setCommState, (texec::kv_cache::CommState), (override));
     MOCK_METHOD(bool, availableRelease, (LlmRequest const&), (override));
 
@@ -248,12 +249,12 @@ protected:
         auto constexpr maxBlocksPerSeq = 10;
         auto constexpr maxBeamWidth = 4;
         auto constexpr sinkTokenLength = 0;
-        auto constexpr useOneMoreBlock = false;
         mMaxNumSequences = 8;
         auto const stream = std::make_shared<tr::CudaStream>();
 
         auto constexpr maxNumTokens = tokensPerBlock * maxBlocksPerSeq;
         auto constexpr maxAttentionWindow = maxNumTokens;
+        auto constexpr temporaryAttentionWindow = 0;
         auto constexpr inputLength = maxNumTokens - tokensPerBlock - 1;
         auto constexpr numSharedBlocks = inputLength / tokensPerBlock;
         auto constexpr numBlocksPerSeq = numSharedBlocks + (maxBlocksPerSeq - numSharedBlocks) * maxBeamWidth;
@@ -266,8 +267,8 @@ protected:
         auto constexpr dataType = nvinfer1::DataType::kFLOAT;
 
         mManager = std::make_unique<KVCacheManager>(numLayers, numHeads, sizePerHead, tokensPerBlock, totalNumBlocks,
-            blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow, sinkTokenLength, useOneMoreBlock,
-            stream, enableBlockReuse, onboardBlocks);
+            blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow, temporaryAttentionWindow,
+            sinkTokenLength, stream, std::nullopt, enableBlockReuse, onboardBlocks);
         mCacheState = std::make_unique<texec::kv_cache::CacheState>(
             numLayers, numHeads, sizePerHead, tokensPerBlock, 1, 1, dataType);
 
@@ -465,12 +466,12 @@ protected:
         auto maxBlocksPerSeq = 10;
         auto maxBeamWidth = 1;
         auto constexpr sinkTokenLength = 0;
-        auto constexpr useOneMoreBlock = false;
         mMaxNumSequences = 8;
         auto const stream = std::make_shared<tr::CudaStream>();
 
         auto maxNumTokens = tokensPerBlock * maxBlocksPerSeq;
         auto maxAttentionWindow = maxNumTokens;
+        auto constexpr temporaryAttentionWindow = 0;
         auto inputLength = maxNumTokens - tokensPerBlock - 1;
         auto numSharedBlocks = inputLength / tokensPerBlock;
         auto numBlocksPerSeq = numSharedBlocks + (maxBlocksPerSeq - numSharedBlocks) * maxBeamWidth;
@@ -482,8 +483,8 @@ protected:
         auto constexpr onboardBlocks = true;
 
         mManager = std::make_unique<KVCacheManager>(numLayers / mPpSize, numHeadsPerRank, sizePerHead, tokensPerBlock,
-            totalNumBlocks, blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow, sinkTokenLength,
-            useOneMoreBlock, stream, enableBlockReuse, onboardBlocks);
+            totalNumBlocks, blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow,
+            temporaryAttentionWindow, sinkTokenLength, stream, std::nullopt, enableBlockReuse, onboardBlocks);
         mCacheState = std::make_unique<texec::kv_cache::CacheState>(
             numLayers, numHeadsPerRank, sizePerHead, tokensPerBlock, mTpSize, mPpSize, dataType);
 

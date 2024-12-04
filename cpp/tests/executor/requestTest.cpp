@@ -160,7 +160,9 @@ TEST(RequestTest, serializeDeserialize)
         std::nullopt, std::nullopt, ExternalDraftTokensConfig({2, 2, 2}),
         PromptTuningConfig(embeddingTable, VecTokenExtraIds({1, 2, 3, 4})), std::nullopt, std::nullopt, std::nullopt,
         KvCacheRetentionConfig({KvCacheRetentionConfig::TokenRangeRetentionConfig(0, 1, 10)}, 10), "Processor",
-        std::nullopt, 1234, false, 0.5);
+        std::nullopt, 1234, false, 0.5, RequestType::REQUEST_TYPE_CONTEXT_AND_GENERATION, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, 1, std::nullopt, std::nullopt,
+        GuidedDecodingParams(GuidedDecodingParams::GuideType::kREGEX, "\\d+"));
 
     auto serializedSize = Serialization::serializedSize(request);
     std::ostringstream os;
@@ -190,6 +192,11 @@ TEST(RequestTest, serializeDeserialize)
         request.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs());
     EXPECT_EQ(newRequest.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs(),
         request.getKvCacheRetentionConfig().value().getTokenRangeRetentionConfigs());
+    EXPECT_EQ(newRequest.getRequestType(), request.getRequestType());
+    EXPECT_TRUE(request.getGuidedDecodingParams().has_value());
+    EXPECT_TRUE(newRequest.getGuidedDecodingParams().has_value());
+    EXPECT_EQ(request.getGuidedDecodingParams(), newRequest.getGuidedDecodingParams());
+
     EXPECT_TRUE(request.getPromptTuningConfig().has_value());
     EXPECT_TRUE(newRequest.getPromptTuningConfig().has_value());
     EXPECT_EQ(newRequest.getPromptTuningConfig()->getInputTokenExtraIds(),

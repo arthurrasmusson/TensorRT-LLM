@@ -29,8 +29,8 @@ namespace tensorrt_llm::batch_manager
 
 namespace kv_cache_manager
 {
-class KVCacheManager;
-} // namespace kv_cache_manager
+class BaseKVCacheManager;
+}
 
 class TransformerBuffers
 {
@@ -57,7 +57,6 @@ public:
     static constexpr std::string_view kHostRequestTypesTensorName = "host_request_types";
     static constexpr std::string_view kHostSinkTokenLengthTensorName = "host_sink_token_length";
     static constexpr std::string_view kHostMaxAttentionWindowSizesTensorName = "host_max_attention_window_sizes";
-    static constexpr std::string_view kHostRuntimePerfKnobsTensorName = "host_runtime_perf_knobs";
     static constexpr std::string_view kHostContextProgressTensorName = "host_context_progress";
     static constexpr std::string_view kKvCacheBlockOffsetsTensorName = "kv_cache_block_offsets";
     static constexpr std::string_view kHostKvCacheBlockOffsetsTensorName = "host_kv_cache_block_offsets";
@@ -79,7 +78,6 @@ public:
     TensorPtr cacheIndirection;
     TensorPtr kvCacheBlockOffsetsHost;   // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
     TensorPtr kvCacheBlockOffsetsDevice; // [numPools, maxBatch * maxBeamWidth, 2, maxBlocksPerSeq]
-    TensorPtr runtimePerfKnobsHost;
     TensorPtr contextProgressHost;
 
     // Cross attention buffers
@@ -115,10 +113,8 @@ public:
     TensorPtr skipCrossAttnBlocks;
 
     TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
-        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig);
+        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     void reshape(SizeType32 numSequences, SizeType32 numInputTokens);
 
@@ -137,8 +133,8 @@ public:
         TensorPtr const& decoderCacheIndirectionOutput, runtime::BufferManager const& manager);
 
     void copyKvBlockOffsets(RequestVector const& contextRequests, RequestVector const& genRequests,
-        kv_cache_manager::KVCacheManager const* kvCacheManager,
-        kv_cache_manager::KVCacheManager const* crossKvCacheManager, runtime::BufferManager const& manager);
+        kv_cache_manager::BaseKVCacheManager const* kvCacheManager,
+        kv_cache_manager::BaseKVCacheManager const* crossKvCacheManager, runtime::BufferManager const& manager);
 
     void copyCacheIndirection(RequestVector const& genRequests, TensorPtr const& decoderCacheIndirectionOutput,
         runtime::CudaStream const& stream);

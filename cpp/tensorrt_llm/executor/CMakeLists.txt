@@ -23,6 +23,8 @@ set(SRCS
     executorImpl.cpp
     executorKVCacheEventManager.cpp
     extendedRuntimePerfKnobConfig.cpp
+    guidedDecodingConfig.cpp
+    guidedDecodingParams.cpp
     jsonSerialization.cpp
     kvCacheConfig.cpp
     kvCacheRetentionConfig.cpp

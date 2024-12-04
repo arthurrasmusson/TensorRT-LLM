@@ -149,7 +149,7 @@ void verifyOutput(RequestList const& finishedRequestList,
         auto const expectedCumLogProbs = testData.expectedCumLogProbs;
         auto const expectedLogProbs = testData.expectedLogProbs;
         auto const draftTokens = llmReq.getDraftTokens();
-        auto const hasDraftTokens = llmReq.hasDraftTokens() && modelSpec.mSpecDecodingMode.isDraftTokensExternal();
+        auto const isDraftTokensExternal = modelSpec.mSpecDecodingMode.isDraftTokensExternal();
 
         for (auto beam = 0; beam < reqBeamWidth; ++beam)
         {
@@ -157,7 +157,7 @@ void verifyOutput(RequestList const& finishedRequestList,
             bool anyMismatch = false;
             auto const predictedTokens = llmReq.getTokens(beam);
             auto numPredTokens = static_cast<SizeType32>(predictedTokens.size() - inputLength);
-            if (hasDraftTokens)
+            if (isDraftTokensExternal)
             {
                 numPredTokens
                     = std::min(numPredTokens, acceptedDraftTokensLengths[givenInputIdx * reqBeamWidth + beam] + 1);
@@ -184,14 +184,14 @@ void verifyOutput(RequestList const& finishedRequestList,
             {
                 // Use the expected data for that beamWidth
                 auto const expectIndex = tc::flat_index3(givenInputIdx, beam,
-                    inputLength + i + static_cast<SizeType32>(hasDraftTokens), reqBeamWidth, maxSeqLen);
+                    inputLength + i + static_cast<SizeType32>(isDraftTokensExternal), reqBeamWidth, maxSeqLen);
 
                 auto const expectedToken = expectedOutputData[expectIndex];
                 if (expectedToken == endId)
                 {
                     break;
                 }
-                auto const predictIndex = hasDraftTokens ? llmReq.mPromptLen + i : inputLength + i;
+                auto const predictIndex = isDraftTokensExternal ? llmReq.mPromptLen + i : inputLength + i;
                 auto const predictedToken = predictedTokens.at(predictIndex);
                 EXPECT_EQ(predictedToken, expectedToken) << "b: " << requestId << " beam: " << beam << " i: " << i;
                 anyMismatch |= (predictedToken != expectedToken);
@@ -678,8 +678,8 @@ void runIfbTest(fs::path const& modelPath, ModelSpec const& modelSpec, ModelIds 
     auto [beamWidths, beamWidthTestData]
         = loadTestData(modelSpec, modelType, modelIds, resultsFilesBeamWidths, *givenInput, maxBeamWidth, manager);
 
-    int const worldSize = modelSpec.mTPSize * modelSpec.mPPSize;
-    auto const worldConfig = WorldConfig::mpi(worldSize, modelSpec.mTPSize, modelSpec.mPPSize);
+    int const worldSize = modelSpec.mTPSize * modelSpec.mPPSize * modelSpec.mCPSize;
+    auto const worldConfig = WorldConfig::mpi(worldSize, modelSpec.mTPSize, modelSpec.mPPSize, modelSpec.mCPSize);
 
     ASSERT_TRUE(fs::exists(modelPath));
 
@@ -834,6 +834,11 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
         name.append("PP" + std::to_string(modelSpec.mPPSize));
     }
 
+    if (modelSpec.mCPSize > 1)
+    {
+        name.append("CP" + std::to_string(modelSpec.mCPSize));
+    }
+
     if (modelSpec.mRandomEndId)
     {
         name.append("EndId");
@@ -892,7 +897,8 @@ TEST_P(ParamTest, Test)
     std::vector<int32_t> batchSizes = modelSpec.mBatchSizes;
 
     std::ostringstream gpuSizePath;
-    gpuSizePath << "tp" << modelSpec.mTPSize << "-pp" << modelSpec.mPPSize << "-gpu";
+    gpuSizePath << "tp" << modelSpec.mTPSize << "-pp" << modelSpec.mPPSize << "-cp" << modelSpec.mCPSize;
+    gpuSizePath << "-gpu";
 
     auto const modelPath{ENGINE_PATH / modelDir / modelSpec.getModelPath() / gpuSizePath.str()};
 
@@ -982,9 +988,9 @@ TEST_P(ParamTest, Test)
 
     // Warning: This should be the last check before running the test.
     // It will initialize MPI which can take significant time.
-    if (modelSpec.mTPSize * modelSpec.mPPSize != COMM_SESSION.getSize())
+    if (modelSpec.mTPSize * modelSpec.mPPSize * modelSpec.mCPSize != COMM_SESSION.getSize())
     {
-        GTEST_SKIP() << "Model's world size " << modelSpec.mPPSize * modelSpec.mTPSize
+        GTEST_SKIP() << "Model's world size " << modelSpec.mPPSize * modelSpec.mTPSize * modelSpec.mCPSize
                      << " is not equal to the system world size";
     }
 

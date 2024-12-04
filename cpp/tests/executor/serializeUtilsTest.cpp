@@ -23,6 +23,26 @@
 namespace su = tensorrt_llm::executor::serialize_utils;
 namespace texec = tensorrt_llm::executor;
 
+void compareRequestPerfMetrics(texec::RequestPerfMetrics const& lh, texec::RequestPerfMetrics const& rh)
+{
+    EXPECT_EQ(lh.timingMetrics.arrivalTime, rh.timingMetrics.arrivalTime);
+    EXPECT_EQ(lh.timingMetrics.firstScheduledTime, rh.timingMetrics.firstScheduledTime);
+    EXPECT_EQ(lh.timingMetrics.firstTokenTime, rh.timingMetrics.firstTokenTime);
+    EXPECT_EQ(lh.timingMetrics.lastTokenTime, rh.timingMetrics.lastTokenTime);
+    EXPECT_EQ(lh.timingMetrics.kvCacheTransferStart, rh.timingMetrics.kvCacheTransferStart);
+    EXPECT_EQ(lh.timingMetrics.kvCacheTransferEnd, rh.timingMetrics.kvCacheTransferEnd);
+
+    EXPECT_EQ(lh.kvCacheMetrics.numTotalAllocatedBlocks, rh.kvCacheMetrics.numTotalAllocatedBlocks);
+    EXPECT_EQ(lh.kvCacheMetrics.numNewAllocatedBlocks, rh.kvCacheMetrics.numNewAllocatedBlocks);
+    EXPECT_EQ(lh.kvCacheMetrics.numReusedBlocks, rh.kvCacheMetrics.numReusedBlocks);
+    EXPECT_EQ(lh.kvCacheMetrics.numMissedBlocks, rh.kvCacheMetrics.numMissedBlocks);
+    EXPECT_EQ(lh.kvCacheMetrics.kvCacheHitRate, rh.kvCacheMetrics.kvCacheHitRate);
+
+    EXPECT_EQ(lh.firstIter, rh.firstIter);
+    EXPECT_EQ(lh.lastIter, rh.lastIter);
+    EXPECT_EQ(lh.iter, rh.iter);
+}
+
 void compareKvCacheStats(texec::KvCacheStats const& lh, texec::KvCacheStats const& rh)
 {
     EXPECT_TRUE(std::make_tuple(lh.maxNumBlocks, lh.freeNumBlocks, lh.usedNumBlocks, lh.tokensPerBlock)
@@ -178,6 +198,10 @@ void testSerializeDeserialize(T val)
     {
         compareRequestStatsPerIteration(val, val2);
     }
+    else if constexpr (std::is_same<T, texec::RequestPerfMetrics>::value)
+    {
+        compareRequestPerfMetrics(val, val2);
+    }
     else
     {
         EXPECT_EQ(val2, val) << typeid(T).name();
@@ -294,6 +318,31 @@ TEST(SerializeUtilsTest, Variant)
     }
 }
 
+static texec::RequestPerfMetrics::TimePoint generateTimePoint(uint64_t microseconds)
+{
+    std::chrono::microseconds duration(microseconds);
+    return std::chrono::steady_clock::time_point(duration);
+}
+
+TEST(SerializeUtilsTest, RequestPerfMetrics)
+{
+    uint64_t x = 42;
+    texec::RequestPerfMetrics::TimingMetrics timingMetrics{
+        generateTimePoint(x++),
+        generateTimePoint(x++),
+        generateTimePoint(x++),
+        generateTimePoint(x++),
+        generateTimePoint(x++),
+        generateTimePoint(x++),
+    };
+
+    texec::RequestPerfMetrics::KvCacheMetrics kvCacheMetrics{1, 2, 3, 4, 5};
+
+    texec::RequestPerfMetrics val{timingMetrics, kvCacheMetrics, 1000, 1001, 1002};
+
+    testSerializeDeserialize(val);
+}
+
 TEST(SerializeUtilsTest, SamplingConfig)
 {
     {
@@ -406,7 +455,7 @@ TEST(SerializeUtilsTest, VectorResponses)
 
 TEST(SerializeUtilsTest, KvCacheConfig)
 {
-    texec::KvCacheConfig kvCacheConfig(true, 10, std::vector(1, 100), 2, 0.1, 10000, false, 0.5, 50);
+    texec::KvCacheConfig kvCacheConfig(true, 10, std::vector(1, 100), 2, 0.1, 10000, false, 0.5, 50, 1024);
     auto kvCacheConfig2 = serializeDeserialize(kvCacheConfig);
 
     EXPECT_EQ(kvCacheConfig.getEnableBlockReuse(), kvCacheConfig2.getEnableBlockReuse());
@@ -418,6 +467,7 @@ TEST(SerializeUtilsTest, KvCacheConfig)
     EXPECT_EQ(kvCacheConfig.getOnboardBlocks(), kvCacheConfig2.getOnboardBlocks());
     EXPECT_EQ(kvCacheConfig.getCrossKvCacheFraction(), kvCacheConfig2.getCrossKvCacheFraction());
     EXPECT_EQ(kvCacheConfig.getSecondaryOffloadMinPriority(), kvCacheConfig2.getSecondaryOffloadMinPriority());
+    EXPECT_EQ(kvCacheConfig.getEventBufferMaxSize(), kvCacheConfig2.getEventBufferMaxSize());
 }
 
 TEST(SerializeUtilsTest, SchedulerConfig)
@@ -668,6 +718,27 @@ TEST(SerializeUtilsTest, SpeculativeDecodingFastLogitsInfo)
     EXPECT_EQ(logitsInfo.draftParticipantId, logitsInfo2.draftParticipantId);
 }
 
+TEST(SerializeUtilsTest, GuidedDecodingConfig)
+{
+    std::vector<std::string> encodedVocab{"eos", "a", "b", "c", "d"};
+    std::vector<texec::TokenIdType> stopTokenIds{0};
+    texec::GuidedDecodingConfig guidedDecodingConfig(
+        texec::GuidedDecodingConfig::GuidedDecodingBackend::kXGRAMMAR, encodedVocab, std::nullopt, stopTokenIds);
+    auto guidedDecodingConfig2 = serializeDeserialize(guidedDecodingConfig);
+    EXPECT_EQ(guidedDecodingConfig.getBackend(), guidedDecodingConfig2.getBackend());
+    EXPECT_EQ(guidedDecodingConfig.getEncodedVocab(), guidedDecodingConfig2.getEncodedVocab());
+    EXPECT_EQ(guidedDecodingConfig.getTokenizerStr(), guidedDecodingConfig2.getTokenizerStr());
+    EXPECT_EQ(guidedDecodingConfig.getStopTokenIds(), guidedDecodingConfig2.getStopTokenIds());
+}
+
+TEST(SerializeUtilsTest, GuidedDecodingParams)
+{
+    texec::GuidedDecodingParams guidedDecodingParams(texec::GuidedDecodingParams::GuideType::kREGEX, R"(\d+)");
+    auto guidedDecodingParams2 = serializeDeserialize(guidedDecodingParams);
+    EXPECT_EQ(guidedDecodingParams.getGuideType(), guidedDecodingParams2.getGuideType());
+    EXPECT_EQ(guidedDecodingParams.getGuide(), guidedDecodingParams2.getGuide());
+}
+
 TEST(SerializeUtilsTest, ExecutorConfig)
 {
     texec::ExecutorConfig executorConfig(2, texec::SchedulerConfig(texec::CapacitySchedulerPolicy::kMAX_UTILIZATION),
@@ -675,7 +746,10 @@ TEST(SerializeUtilsTest, ExecutorConfig)
         texec::ParallelConfig(texec::CommunicationType::kMPI, texec::CommunicationMode::kORCHESTRATOR),
         texec::PeftCacheConfig(10), std::nullopt,
         texec::DecodingConfig(texec::DecodingMode::Lookahead(), texec::LookaheadDecodingConfig(3, 5, 7)), 0.5f, 8,
-        texec::ExtendedRuntimePerfKnobConfig(true), texec::DebugConfig(true), 60000000);
+        texec::ExtendedRuntimePerfKnobConfig(true), texec::DebugConfig(true), 60000000, 180000000,
+        texec::SpeculativeDecodingConfig(true),
+        texec::GuidedDecodingConfig(
+            texec::GuidedDecodingConfig::GuidedDecodingBackend::kXGRAMMAR, std::initializer_list<std::string>{"eos"}));
     auto executorConfig2 = serializeDeserialize(executorConfig);
 
     EXPECT_EQ(executorConfig.getMaxBeamWidth(), executorConfig2.getMaxBeamWidth());
@@ -697,7 +771,10 @@ TEST(SerializeUtilsTest, ExecutorConfig)
     EXPECT_EQ(executorConfig.getMaxQueueSize(), executorConfig2.getMaxQueueSize());
     EXPECT_EQ(executorConfig.getExtendedRuntimePerfKnobConfig(), executorConfig2.getExtendedRuntimePerfKnobConfig());
     EXPECT_EQ(executorConfig.getDebugConfig(), executorConfig2.getDebugConfig());
+    EXPECT_EQ(executorConfig.getRecvPollPeriodMs(), executorConfig2.getRecvPollPeriodMs());
     EXPECT_EQ(executorConfig.getMaxSeqIdleMicroseconds(), executorConfig2.getMaxSeqIdleMicroseconds());
+    EXPECT_EQ(executorConfig.getSpecDecConfig(), executorConfig2.getSpecDecConfig());
+    EXPECT_EQ(executorConfig.getGuidedDecodingConfig(), executorConfig2.getGuidedDecodingConfig());
 }
 
 TEST(SerializeUtilsTest, RequestStats)

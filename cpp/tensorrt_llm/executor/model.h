@@ -106,18 +106,17 @@ public:
         = 0;
     virtual void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) = 0;
 
+    [[nodiscard]] virtual bool hasGuidedDecoder() const noexcept = 0;
+
+    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager>
+    getKVCacheManager() = 0;
+    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager const>
+    getKVCacheManager() const = 0;
+
     //! \brief Get the batch size that can fill the kv cache to the maximum capacity give the sequence length
     //! \param seqLen The sequence length
     //! \return The batch size that can fill the kv cache to the maximum capacity. If unsuporrted, return 0.
-    [[nodiscard]] virtual SizeType32 getMaxCapacityBatchSize(SizeType32 seqLen)
-    {
-        return 0;
-    }
-
-    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager>
-    getKVCacheManager() = 0;
-    [[nodiscard]] virtual std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager const>
-    getKVCacheManager() const = 0;
+    [[nodiscard]] virtual SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const = 0;
 };
 
 } // namespace tensorrt_llm::executor

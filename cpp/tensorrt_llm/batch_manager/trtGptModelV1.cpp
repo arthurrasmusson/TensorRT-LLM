@@ -597,7 +597,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-std::shared_ptr<kv_cache_manager::KVCacheManager> TrtGptModelV1::getKVCacheManager()
+std::shared_ptr<kv_cache_manager::BaseKVCacheManager> TrtGptModelV1::getKVCacheManager()
 {
     return mSession->mKvCacheManager;
 }
@@ -612,7 +612,7 @@ std::string TrtGptModelV1::getLayerProfileInfo() const
     return mSession->getLayerProfileInfo();
 }
 
-std::shared_ptr<kv_cache_manager::KVCacheManager const> TrtGptModelV1::getKVCacheManager() const
+std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> TrtGptModelV1::getKVCacheManager() const
 {
     return mSession->mKvCacheManager;
 }

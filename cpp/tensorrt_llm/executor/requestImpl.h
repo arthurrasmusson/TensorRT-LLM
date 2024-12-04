@@ -40,7 +40,7 @@ public:
         std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
         std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
         SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
-        std::optional<Tensor> skipCrossAttnBlocks)
+        std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -71,6 +71,7 @@ public:
         , mNumReturnSequences(numReturnSequences)
         , mEagleConfig(eagleConfig)
         , mSkipCrossAttnBlocks(skipCrossAttnBlocks)
+        , mGuidedDecodingParams(std::move(guidedDecodingParams))
     {
         validate();
     }
@@ -242,6 +243,11 @@ public:
         return mSkipCrossAttnBlocks;
     }
 
+    [[nodiscard]] std::optional<GuidedDecodingParams> getGuidedDecodingParams() const
+    {
+        return mGuidedDecodingParams;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -386,6 +392,11 @@ public:
         mSkipCrossAttnBlocks = skipCrossAttnBlocks;
     }
 
+    void setGuidedDecodingParams(GuidedDecodingParams const& guidedDecodingParams)
+    {
+        mGuidedDecodingParams = guidedDecodingParams;
+    }
+
 private:
     void validate()
     {
@@ -399,6 +410,11 @@ private:
                 "The 'numReturnSequences' in the Request class is deprecated and will be removed in a future release. "
                 "Please set the number of return sequences directly in 'SamplingConfig'.");
             mSamplingConfig.setNumReturnSequences(mNumReturnSequences);
+        }
+
+        if (mGuidedDecodingParams.has_value() && mSamplingConfig.getBeamWidth() > 1)
+        {
+            TLLM_THROW("Guided decoding does not support with beam search.");
         }
     }
 
@@ -445,6 +461,7 @@ private:
         lambda(mNumReturnSequences);
         lambda(mEagleConfig);
         lambda(mSkipCrossAttnBlocks);
+        lambda(mGuidedDecodingParams);
     }
 
     VecTokens mInputTokenIds;
@@ -477,6 +494,7 @@ private:
     SizeType32 mNumReturnSequences;
     std::optional<EagleConfig> mEagleConfig;
     std::optional<Tensor> mSkipCrossAttnBlocks;
+    std::optional<GuidedDecodingParams> mGuidedDecodingParams;
 };
 
 } // namespace tensorrt_llm::executor

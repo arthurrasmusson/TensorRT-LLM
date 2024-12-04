@@ -35,8 +35,8 @@ namespace tensorrt_llm::batch_manager
 
 TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, runtime::TllmRuntime const& runtime,
-    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
+    runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
+    runtime::WorldConfig const& worldConfig)
     : maxInputLen(modelConfig.getMaxInputLen())
     , maxEncoderOutputLen(modelConfig.getMaxEncoderLen())
 {
@@ -117,15 +117,6 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
     sinkTokenLengths = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
     bufferCast<SizeType32>(*sinkTokenLengths)[0] = sinkTokenLen;
-
-    SizeType32 perfKnobSize = 16;
-    runtimePerfKnobsHost = BufferManager::cpu(ITensor::makeShape({perfKnobSize}), nvinfer1::DataType::kINT64);
-    auto runtimePerfKnobsHostPtr = bufferCast<int64_t>(*runtimePerfKnobsHost);
-    std::fill_n(runtimePerfKnobsHostPtr, perfKnobSize, -1);
-    SizeType32 multiBlockModeVal = extendedRuntimePerfKnobConfig.getMultiBlockMode() ? 1 : 0;
-    SizeType32 enableContextFMHAFP32AccVal = extendedRuntimePerfKnobConfig.getEnableContextFMHAFP32Acc() ? 1 : 0;
-    runtimePerfKnobsHostPtr[0] = multiBlockModeVal;
-    runtimePerfKnobsHostPtr[1] = enableContextFMHAFP32AccVal;
 
     contextProgressHost = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT64);
     bufferCast<int64_t>(*contextProgressHost)[0] = 0;
@@ -259,7 +250,6 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     inputBuffers.insert_or_assign(kHostMaxAttentionWindowSizesTensorName.data(), maxAttentionWindows);
     inputBuffers.insert_or_assign(kKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsDevice);
     inputBuffers.insert_or_assign(kHostKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsHost);
-    inputBuffers.insert_or_assign(kHostRuntimePerfKnobsTensorName.data(), runtimePerfKnobsHost);
     inputBuffers.insert_or_assign(kHostContextProgressTensorName.data(), contextProgressHost);
 
     if (crossKvCacheBlockOffsetsHost)
@@ -343,8 +333,8 @@ void TransformerBuffers::resetCacheIndirection(RequestVector const& contextReque
 }
 
 void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests, RequestVector const& genRequests,
-    kv_cache_manager::KVCacheManager const* kvCacheManager, kv_cache_manager::KVCacheManager const* crossKvCacheManager,
-    BufferManager const& manager)
+    kv_cache_manager::BaseKVCacheManager const* kvCacheManager,
+    kv_cache_manager::BaseKVCacheManager const* crossKvCacheManager, BufferManager const& manager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(copyKvBlockPointers);

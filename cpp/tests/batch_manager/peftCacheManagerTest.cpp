@@ -70,7 +70,7 @@ protected:
     {
         mModelConfig = std::make_unique<ModelConfig>(0, 2, 2, 0, 1, 16, nvinfer1::DataType::kFLOAT);
         mModelConfig->setMlpHiddenSize(32);
-        mWorldConfig = std::make_unique<WorldConfig>(2, 1, 0);
+        mWorldConfig = std::make_unique<WorldConfig>(2, 1, 1, 0);
         std::vector<LoraModule> modules{
             LoraModule(LoraModule::ModuleType::kATTN_QKV, 16, 3 * 16, false, true, -1, 0),
             LoraModule(LoraModule::ModuleType::kATTN_Q, 16, 16, false, true, -1, 0),

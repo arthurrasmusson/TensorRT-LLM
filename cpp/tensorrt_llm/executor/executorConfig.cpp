@@ -26,7 +26,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig,
     SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds,
-    std::optional<SpeculativeDecodingConfig> specDecConfig)
+    std::optional<SpeculativeDecodingConfig> specDecConfig, std::optional<GuidedDecodingConfig> guidedDecodingConfig)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(schedulerConfig)
     , mKvCacheConfig(kvCacheConfig)
@@ -48,6 +48,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& s
     , mRecvPollPeriodMs(recvPollPeriodMs)
     , mMaxSeqIdleMicroseconds(maxSeqIdleMicroseconds)
     , mSpeculativeDecodingConfig(specDecConfig)
+    , mGuidedDecodingConfig(std::move(guidedDecodingConfig))
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -65,7 +66,17 @@ SchedulerConfig ExecutorConfig::getSchedulerConfig() const
     return mSchedulerConfig;
 }
 
+SchedulerConfig& ExecutorConfig::getSchedulerConfigRef()
+{
+    return mSchedulerConfig;
+}
+
 KvCacheConfig ExecutorConfig::getKvCacheConfig() const
+{
+    return mKvCacheConfig;
+}
+
+KvCacheConfig& ExecutorConfig::getKvCacheConfigRef()
 {
     return mKvCacheConfig;
 }
@@ -158,6 +169,11 @@ uint64_t ExecutorConfig::getMaxSeqIdleMicroseconds() const
 std::optional<SpeculativeDecodingConfig> ExecutorConfig::getSpecDecConfig() const
 {
     return mSpeculativeDecodingConfig;
+}
+
+std::optional<GuidedDecodingConfig> ExecutorConfig::getGuidedDecodingConfig() const
+{
+    return mGuidedDecodingConfig;
 }
 
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
@@ -270,6 +286,11 @@ void ExecutorConfig::setMaxSeqIdleMicroseconds(uint64_t maxSeqIdleMicroseconds)
 void ExecutorConfig::setSpecDecConfig(SpeculativeDecodingConfig const& specDecConfig)
 {
     mSpeculativeDecodingConfig = specDecConfig;
+}
+
+void ExecutorConfig::setGuidedDecodingConfig(GuidedDecodingConfig const& guidedDecodingConfig)
+{
+    mGuidedDecodingConfig = guidedDecodingConfig;
 }
 
 } // namespace tensorrt_llm::executor

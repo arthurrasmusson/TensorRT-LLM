@@ -210,8 +210,9 @@ void Executor::Impl::loadModel(std::optional<std::filesystem::path> const& model
     auto const gpusPerNode = jsonConfig.getGpusPerNode();
     auto const tp = jsonConfig.getTensorParallelism();
     auto const pp = jsonConfig.getPipelineParallelism();
+    auto const cp = jsonConfig.getContextParallelism();
     auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
-    auto worldConfig = runtime::WorldConfig::mpi(gpusPerNode, tp, pp, parallelConfig.getDeviceIds());
+    auto worldConfig = runtime::WorldConfig::mpi(gpusPerNode, tp, pp, cp, parallelConfig.getDeviceIds());
 
     TLLM_CHECK_WITH_INFO(modelPathOpt.has_value() || engineBufferOpt.has_value(),
         "Either engine path or deserialized engine buffer should be given to load the model properly.");
@@ -257,7 +258,8 @@ Executor::Impl::Impl(std::filesystem::path const& modelPath,
     // for now, assume encoder & decoder models share the same MPI config
     auto const tp = decoderJsonConfig.getTensorParallelism();
     auto const pp = decoderJsonConfig.getPipelineParallelism();
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType, modelPath, std::nullopt, decoderJsonConfig);
+    auto const cp = decoderJsonConfig.getContextParallelism();
+    initializeCommAndWorkers(tp, pp, cp, executorConfig, modelType, modelPath, std::nullopt, decoderJsonConfig);
 
     if (mIsWorker)
     {
@@ -298,7 +300,8 @@ Executor::Impl::Impl(BufferView const& engineBufferView, std::string const& json
     // for now, assume encoder & decoder models share the same MPI config
     auto const tp = decoderJsonConfig.getTensorParallelism();
     auto const pp = decoderJsonConfig.getPipelineParallelism();
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType, std::nullopt, std::nullopt, decoderJsonConfig);
+    auto const cp = decoderJsonConfig.getContextParallelism();
+    initializeCommAndWorkers(tp, pp, cp, executorConfig, modelType, std::nullopt, std::nullopt, decoderJsonConfig);
 
     if (mIsWorker)
     {
@@ -332,8 +335,9 @@ Executor::Impl::Impl(std::shared_ptr<Model> model, std::optional<std::shared_ptr
     auto const& worldConfig = model->getWorldConfig();
     auto const tp = worldConfig.getTensorParallelism();
     auto const pp = worldConfig.getPipelineParallelism();
+    auto const cp = worldConfig.getContextParallelism();
     auto const modelType = encoderModel.has_value() ? ModelType::kENCODER_DECODER : ModelType::kDECODER_ONLY;
-    initializeCommAndWorkers(tp, pp, executorConfig, modelType, std::nullopt, worldConfig);
+    initializeCommAndWorkers(tp, pp, cp, executorConfig, modelType, std::nullopt, worldConfig);
     if (modelType == ModelType::kENCODER_DECODER)
     {
         mEncoderModel = encoderModel.value();
@@ -387,10 +391,16 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
         {
             auto const& worldConfig = mModel->getWorldConfig();
             auto const& commSession = COMM_SESSION;
+            auto const& rank = commSession.getRank();
+            auto const& tp = worldConfig.getTensorParallelism();
+            auto const& cp = worldConfig.getContextParallelism();
+
             mCommTensorParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
-                commSession.split(worldConfig.getPipelineParallelRank(), worldConfig.getTensorParallelRank()));
+                commSession.split(rank / tp, worldConfig.getTensorParallelRank()));
+            mCommContextParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
+                commSession.split(rank / (tp * cp) * tp + rank % tp, worldConfig.getContextParallelRank()));
             mCommPipelineParallel = std::make_shared<tensorrt_llm::mpi::MpiComm>(
-                commSession.split(worldConfig.getTensorParallelRank(), worldConfig.getPipelineParallelRank()));
+                commSession.split(rank % (tp * cp), worldConfig.getPipelineParallelRank()));
 
             if (worldConfig.isPipelineParallel())
             {
@@ -417,7 +427,17 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
     auto const& dynamicBatchConfig = executorConfig.getSchedulerConfig().getDynamicBatchConfig();
     if (dynamicBatchConfig)
     {
-        mDynamicBatchTuner = std::make_shared<DynamicBatchTuner>(dynamicBatchConfig.value());
+        if (mIsWorker)
+        {
+            if (mModel->getModelConfig().isTransformerBased() && mModel->getModelConfig().isKVCacheEnabled())
+            {
+                mDynamicBatchTuner = std::make_shared<DynamicBatchTuner>(dynamicBatchConfig.value());
+            }
+            else
+            {
+                TLLM_LOG_WARNING("Dynamic batch tuner can only support transformer models that use KV cache.");
+            }
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -454,7 +474,8 @@ std::shared_ptr<Model> Executor::Impl::createEncoderModel(runtime::RawEngine con
         modelConfig, worldConfig, rawEngine, std::make_shared<runtime::TllmLogger>(), optionalParams);
 }
 
-void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelConfig const& parallelConfig)
+void Executor::Impl::setOrchLeaderComm(
+    SizeType32 tp, SizeType32 pp, SizeType32 cp, ParallelConfig const& parallelConfig)
 {
 #if ENABLE_MULTI_DEVICE
     auto optOrchestratorConfig = parallelConfig.getOrchestratorConfig();
@@ -467,8 +488,8 @@ void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelCon
         "When not spawning processes in orchestrator mode, participant IDs must be provided");
     auto participantIds = parallelConfig.getParticipantIds().value();
 
-    TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp,
-        "When specifying participantIds, participantIds size must be equal to tp*pp");
+    TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp * cp,
+        "When specifying participantIds, participantIds size must be equal to tp*pp*cp");
 
     bool isLeader = (mWorldRank == participantIds.front());
     bool isOrchestrator = (mWorldRank == 0);
@@ -511,9 +532,9 @@ void Executor::Impl::setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelCon
 #endif // ENABLE_MULTI_DEVICE
 }
 
-void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
-    std::optional<ModelType> modelType, std::optional<std::filesystem::path> const& modelPath,
-    std::optional<runtime::WorldConfig> const& worldConfig,
+void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, SizeType32 cp,
+    ExecutorConfig const& executorConfig, std::optional<ModelType> modelType,
+    std::optional<std::filesystem::path> const& modelPath, std::optional<runtime::WorldConfig> const& worldConfig,
     std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig)
 {
     if (modelType.has_value() && modelType.value() == ModelType::kENCODER_DECODER)
@@ -538,16 +559,16 @@ void Executor::Impl::initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, Exec
     // Need to create communicator between orchestrator and leader if not spawning processes in orchestrator mode
     if (mCommMode == CommunicationMode::kORCHESTRATOR && !optOrchestratorConfig.value().getSpawnProcesses())
     {
-        setOrchLeaderComm(tp, pp, parallelConfig);
+        setOrchLeaderComm(tp, pp, cp, parallelConfig);
     }
 
     if (mCommMode == CommunicationMode::kORCHESTRATOR && optOrchestratorConfig.value().getIsOrchestrator())
     {
-        initializeOrchestrator(tp, pp, executorConfig, parallelConfig, modelType.value(), modelPath.value());
+        initializeOrchestrator(tp, pp, cp, executorConfig, parallelConfig, modelType.value(), modelPath.value());
     }
     else
     {
-        initializeWorkers(tp, pp, parallelConfig, worldConfig, decoderGptJsonConfig);
+        initializeWorkers(tp, pp, cp, parallelConfig, worldConfig, decoderGptJsonConfig);
     }
 }
 
@@ -570,8 +591,9 @@ void Executor::Impl::validateParallelConfig(ParallelConfig const& parallelConfig
     }
 }
 
-void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
-    ParallelConfig parallelConfig, ModelType modelType, std::filesystem::path const& modelPath)
+void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, SizeType32 cp,
+    ExecutorConfig const& executorConfig, ParallelConfig parallelConfig, ModelType modelType,
+    std::filesystem::path const& modelPath)
 {
 #if ENABLE_MULTI_DEVICE
     auto const& worldComm = tensorrt_llm::mpi::MpiComm::world();
@@ -597,8 +619,8 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
         MPI_Info_create(&mpiInfo);
         MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY");
 
-        MPI_Comm_spawn(
-            workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp, mpiInfo, 0, MPI_COMM_SELF, &intercomm, MPI_ERRCODES_IGNORE);
+        MPI_Comm_spawn(workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp * cp, mpiInfo, 0, MPI_COMM_SELF, &intercomm,
+            MPI_ERRCODES_IGNORE);
 
         mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(intercomm, true);
         // With intercomm, leader is rank 0 in the local group
@@ -636,7 +658,7 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, Execut
 #endif // ENABLE_MULTI_DEVICE
 }
 
-void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig,
+void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, SizeType32 cp, ParallelConfig& parallelConfig,
     std::optional<runtime::WorldConfig> const& worldConfig,
     std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig)
 {
@@ -666,11 +688,11 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
     std::vector<SizeType32> participantIds;
     if (!parallelConfig.getParticipantIds())
     {
-        TLLM_CHECK_WITH_INFO(worldSize == tp * pp,
-            "With communicationMode kLEADER, MPI worldSize is expected to be equal to tp*pp when "
+        TLLM_CHECK_WITH_INFO(worldSize == tp * pp * cp,
+            "With communicationMode kLEADER, MPI worldSize is expected to be equal to tp*pp*cp when "
             "participantIds are not specified");
 
-        participantIds.resize(tp * pp);
+        participantIds.resize(tp * pp * cp);
         std::iota(participantIds.begin(), participantIds.end(), 0);
     }
     else
@@ -682,16 +704,18 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
                 "spawnProcesses=true");
         }
         participantIds = parallelConfig.getParticipantIds().value();
-        TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp,
-            "When specifying participantIds, participantIds size must be equal to tp*pp");
+        TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(participantIds.size()) == tp * pp * cp,
+            tensorrt_llm::common::fmtstr("When specifying participantIds, participantIds size (%lu) must be equal to "
+                                         "tp*pp*cp (tp is %u, pp is %u, cp is %u)",
+                participantIds.size(), tp, pp, cp));
     }
 
-    // If deviceIds are specified, check that they match tp*pp
+    // If deviceIds are specified, check that they match tp*pp*cp
     if (parallelConfig.getDeviceIds())
     {
         auto deviceIds = parallelConfig.getDeviceIds().value();
-        TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(deviceIds.size()) == tp * pp,
-            "When specifying deviceIds, deviceIds size must be equal to tp*pp");
+        TLLM_CHECK_WITH_INFO(static_cast<SizeType32>(deviceIds.size()) == tp * pp * cp,
+            "When specifying deviceIds, deviceIds size must be equal to tp*pp*cp");
     }
 
     // Bool that indicates if current process is worker for this model or not
@@ -749,7 +773,7 @@ void Executor::Impl::initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelCon
         else
         {
             auto gpusPerNode = decoderGptJsonConfig->getGpusPerNode();
-            auto worldConfig = runtime::WorldConfig::mpi(gpusPerNode, tp, pp, parallelConfig.getDeviceIds());
+            auto worldConfig = runtime::WorldConfig::mpi(gpusPerNode, tp, pp, cp, parallelConfig.getDeviceIds());
             mDeviceId = worldConfig.getDevice();
         }
         // Spawn the thread responsible for receiving new requests from the orchestrator
@@ -1310,11 +1334,17 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
             }
             reqWithIds = requestWithIdRecv(mCommPipelineParallel, peer);
         }
-
-        if (worldConfig.isTensorParallel())
+        if (worldConfig.isTensorParallel() || worldConfig.isContextParallel())
         {
             auto packed = RequestWithId::serializeReqWithIds(reqWithIds);
-            mCommTensorParallel->bcast(packed, 0);
+            if (worldConfig.isTensorParallel())
+            {
+                mCommTensorParallel->bcast(packed, 0);
+            }
+            if (worldConfig.isContextParallel())
+            {
+                mCommContextParallel->bcast(packed, 0);
+            }
         }
     }
     else
@@ -1323,6 +1353,7 @@ std::vector<RequestWithId> Executor::Impl::getNewReqWithIds(
         {
             std::vector<char> buffer;
             mCommTensorParallel->bcast(buffer, 0);
+            mCommContextParallel->bcast(buffer, 0);
             reqWithIds = RequestWithId::deserializeReqWithIds(buffer);
         }
         else
@@ -1471,6 +1502,13 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                     }
                 }
 
+                if (newReq->getGuidedDecodingParams() && mModel->getWorldConfig().isLastPipelineParallelRank())
+                {
+                    TLLM_CHECK_WITH_INFO(mModel->hasGuidedDecoder(),
+                        "Request is specified with GuidedDecodingParams, but GuidedDecoder is not setup. Please "
+                        "provide a valid GuidedDecodingConfig to setup GuidedDecoder.");
+                }
+
                 mModel->updatePeftCache(newReq);
 
                 newRequests.emplace_back(std::move(newReq));
@@ -1488,7 +1526,7 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                 // In case  of an expected LoRA exception (e.g. cache full, cache miss), log a warning and enqueue
                 // response
                 TLLM_LOG_WARNING("%s", e.what());
-                enqueueNewResponses({{reqWithId.id, e.what()}});
+                enqueueNewResponses({{reqWithId.id, e.what(), reqWithId.req.getClientId()}});
             }
         }
         catch (std::exception const& e)
@@ -1498,11 +1536,11 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                 // In case of error, create a response with error for this request
                 auto err = std::string("Encountered an error when fetching new request: ") + e.what();
                 TLLM_LOG_ERROR("%s", err.c_str());
-                enqueueNewResponses({{reqWithId.id, err}});
+                enqueueNewResponses({{reqWithId.id, err, reqWithId.req.getClientId()}});
             }
         }
     }
-    TLLM_LOG_DEBUG("num new requests fetched from queue: %d", newRequests.size());
+    TLLM_LOG_DEBUG("[RANK %d] num new requests fetched from queue: %d", COMM_SESSION.getRank(), newRequests.size());
 
     return {newRequests, newActiveRequestsQueueLatencyMS};
 }
@@ -1521,7 +1559,7 @@ void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::s
 
         if (mIsLeader)
         {
-            enqueueNewResponses({{llmReq->mRequestId, err}});
+            enqueueNewResponses({{llmReq->mRequestId, err, llmReq->mClientId}});
         }
 
         // Remove from the requestList
@@ -1531,7 +1569,7 @@ void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::s
 
 void Executor::Impl::forwardSync(RequestList& activeRequests)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE("[RANK %d] %s start", COMM_SESSION.getRank(), __PRETTY_FUNCTION__);
     try
     {
         if (mEncoderModel)
@@ -1545,7 +1583,7 @@ void Executor::Impl::forwardSync(RequestList& activeRequests)
         std::string const err = std::string("Encountered an error in forwardSync function: ") + e.what();
         terminateActiveRequests(activeRequests, err);
     }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE("[RANK %d] %s stop", COMM_SESSION.getRank(), __PRETTY_FUNCTION__);
 }
 
 // The function is used to change the state of a request to context_init from encoder_init for enc-dec model whose
@@ -1574,9 +1612,9 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
 
         if (mDynamicBatchTuner)
         {
-            auto const seqLen
-                = mDynamicBatchTuner->getAverageInputLength() + mDynamicBatchTuner->getAverageOutputLength();
-            auto const maxCapacityBatchSize = mModel->getMaxCapacityBatchSize(seqLen);
+            auto const averageInputLength = static_cast<SizeType32>(mDynamicBatchTuner->getAverageInputLength());
+            auto const averageOutputLength = static_cast<SizeType32>(mDynamicBatchTuner->getAverageOutputLength());
+            auto const maxCapacityBatchSize = mModel->getMaxCapacityBatchSize(averageInputLength, averageOutputLength);
 
             if (mDynamicBatchTuner->isBatchSizeTuningEnabled())
             {
@@ -1921,6 +1959,16 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
                             cancelledReqIdsVec.data(), cancelledReqIdsVec.size(), mpi::MpiType::kUINT64, 0);
                     }
                 }
+                if (worldConfig.isContextParallel())
+                {
+                    mCommContextParallel->bcastValue(numCancelledRequests, 0);
+                    if (numCancelledRequests > 0)
+                    {
+                        std::vector<IdType> cancelledReqIdsVec(mCancelledReqIds.begin(), mCancelledReqIds.end());
+                        mCommContextParallel->bcast(
+                            cancelledReqIdsVec.data(), cancelledReqIdsVec.size(), mpi::MpiType::kUINT64, 0);
+                    }
+                }
             }
             // If not leader
             else
@@ -1929,10 +1977,13 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
                 {
                     int64_t numCancelledRequests = 0;
                     mCommTensorParallel->bcastValue(numCancelledRequests, 0);
+                    mCommContextParallel->bcastValue(numCancelledRequests, 0);
                     if (numCancelledRequests > 0)
                     {
                         std::vector<IdType> cancelledReqIdsVec(numCancelledRequests);
                         mCommTensorParallel->bcast(
+                            cancelledReqIdsVec.data(), cancelledReqIdsVec.size(), mpi::MpiType::kUINT64, 0);
+                        mCommContextParallel->bcast(
                             cancelledReqIdsVec.data(), cancelledReqIdsVec.size(), mpi::MpiType::kUINT64, 0);
                         mCancelledReqIds
                             = std::unordered_set<IdType>(cancelledReqIdsVec.begin(), cancelledReqIdsVec.end());
@@ -2150,8 +2201,8 @@ void Executor::Impl::executionLoop()
             {
                 for (auto const& req : activeRequests)
                 {
-                    auto inputLength = req->mPromptLen;
-                    auto outputLength = req->mMaxNewTokens;
+                    auto const inputLength = req->mPromptLen;
+                    auto const outputLength = req->mMaxNewTokens;
                     mDynamicBatchTuner->updateStats(inputLength, outputLength);
                 }
             }

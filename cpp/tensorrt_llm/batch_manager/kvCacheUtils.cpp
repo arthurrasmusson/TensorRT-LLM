@@ -16,7 +16,7 @@ namespace tensorrt_llm::batch_manager::kv_cache_manager
 {
 
 BlockIterator getBlockBeginIt(
-    KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
+    BaseKVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
 {
     auto const& req = cacheManager.getSequence(request.mRequestId);
     auto blockIds = req.getCacheBlockIds().at(beam);
@@ -24,7 +24,7 @@ BlockIterator getBlockBeginIt(
 }
 
 BlockIterator getBlockEndIt(
-    KVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
+    BaseKVCacheManager const& cacheManager, LlmRequest const& request, SizeType32 beam, SizeType32 poolIdx)
 {
     auto const& req = cacheManager.getSequence(request.mRequestId);
     auto blockIds = req.getCacheBlockIds().at(beam);

@@ -35,7 +35,7 @@ class LlmRequest;
 
 namespace kv_cache_manager
 {
-class KVCacheManager;
+class BaseKVCacheManager;
 }
 
 class TrtGptModel : public executor::Model
@@ -213,6 +213,11 @@ public:
         return false;
     }
 
+    [[nodiscard]] virtual bool hasGuidedDecoder() const noexcept override
+    {
+        return false;
+    }
+
     virtual void setLayerProfiler() = 0;
     [[nodiscard]] virtual std::string getLayerProfileInfo() const = 0;
 
@@ -273,6 +278,9 @@ protected:
     {
         mMaxInputLen = maxInputLen;
     }
+
+    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::BaseKVCacheManager> getKVCacheManager() = 0;
+    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> getKVCacheManager() const = 0;
 
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager> getPeftCacheManager() = 0;
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager const> getPeftCacheManager() const = 0;

@@ -17,7 +17,7 @@
 
 void tensorrt_llm::batch_manager::PauseRequests::operator()(RequestVector& requestsToPause, ReqIdsSet& inflightReqIds,
     ReqIdsSet& reqIdsToPause, bool pauseFlagged, SequenceSlotManager& seqSlotManager,
-    OptionalRef<KVCacheManager> kvCacheManager, OptionalRef<KVCacheManager> crossKvCacheManager,
+    OptionalRef<BaseKVCacheManager> kvCacheManager, OptionalRef<BaseKVCacheManager> crossKvCacheManager,
     OptionalRef<BasePeftCacheManager> peftCacheManager) const
 {
     NVTX3_SCOPED_RANGE(PauseRequests);

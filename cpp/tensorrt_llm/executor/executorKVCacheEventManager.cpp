@@ -17,7 +17,7 @@ namespace tensorrt_llm::executor
 {
 
 KVCacheEventManager::KVCacheEventManager(
-    std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager> kvCacheManager)
+    std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager> kvCacheManager)
     : kvCacheManager{std::move(kvCacheManager)}
 {
 }

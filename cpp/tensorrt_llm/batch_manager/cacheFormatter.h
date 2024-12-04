@@ -35,7 +35,7 @@ class CacheFormatter final : public IOFormatter
 public:
     using CacheState = executor::kv_cache::CacheState;
 
-    CacheFormatter(KVCacheManager* cacheManager)
+    CacheFormatter(BaseKVCacheManager* cacheManager)
         : mCacheManager{cacheManager}
     {
         TLLM_CHECK(mCacheManager);
@@ -58,7 +58,7 @@ public:
     }
 
 private:
-    KVCacheManager* mCacheManager{};
+    BaseKVCacheManager* mCacheManager{};
 };
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

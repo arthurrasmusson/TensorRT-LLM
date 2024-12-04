@@ -44,7 +44,7 @@ enum CacheBufferSize
 
 namespace kv_cache_manager
 {
-class KVCacheManager;
+class BaseKVCacheManager;
 }
 class LlmRequest;
 
@@ -139,8 +139,6 @@ private:
     TensorPtr fillValues;
     TensorPtr fillValuesDevice;
 
-    TensorPtr mAllReduceWorkspace;
-
 public:
     // additional buffers depending on model type
     std::optional<TransformerBuffers> transformerBuffers;
@@ -207,19 +205,18 @@ private:
 public:
     RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
         std::optional<SizeType32> maxNumTokens = std::nullopt);
 
     std::tuple<SizeType32, TensorMap const&, TensorMap&> prepareStep(RequestVector const& contextRequests,
         RequestVector const& genRequests, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
-        DecoderBuffers& decoderBuffers, kv_cache_manager::KVCacheManager* kvCacheManager,
-        kv_cache_manager::KVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
+        DecoderBuffers& decoderBuffers, kv_cache_manager::BaseKVCacheManager* kvCacheManager,
+        kv_cache_manager::BaseKVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
         PeftTable const& peftTable, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
 
-    void prepareBuffersForCudaGraph();
+    void prepareBuffersForCudaGraph(SizeType32 maxSequenceLength);
 
     void prepareExplicitDraftTokenBuffers(DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
@@ -230,10 +227,9 @@ public:
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
-        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig,
-        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig);
+        SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
+        executor::DecodingConfig const& decodingConfig);
 
     void reshape(runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
@@ -247,7 +243,8 @@ private:
 
     void setFromInputs(RequestVector const& contextRequests, RequestVector const& genRequests, SizeType32 maxBeamWidth,
         SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers,
-        kv_cache_manager::KVCacheManager* kvCacheManagerPtr, kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr,
+        kv_cache_manager::BaseKVCacheManager* kvCacheManagerPtr,
+        kv_cache_manager::BaseKVCacheManager* crossKvCacheManagerPtr,
         rnn_state_manager::RnnStateManager* rnnStateManagerPtr, PeftTable const& peftTable,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);

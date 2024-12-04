@@ -40,18 +40,11 @@ namespace tensorrt_llm::batch_manager
 
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TensorPtr allReduceWorkspace,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens)
-    : mAllReduceWorkspace{std::move(allReduceWorkspace)}
 {
-    if (worldConfig.isTensorParallel())
-    {
-        TLLM_CHECK(mAllReduceWorkspace);
-    }
-
-    create(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen,
-        extendedRuntimePerfKnobConfig, runtime, modelConfig, worldConfig, decodingConfig);
+    create(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen, runtime, modelConfig,
+        worldConfig, decodingConfig);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
@@ -181,8 +174,8 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 
 void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
-    executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, TllmRuntime const& runtime,
-    ModelConfig const& modelConfig, WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig)
+    TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+    executor::DecodingConfig const& decodingConfig)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -190,7 +183,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     if (modelConfig.isTransformerBased())
     {
         transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen,
-            extendedRuntimePerfKnobConfig, runtime, modelConfig, worldConfig);
+            runtime, modelConfig, worldConfig);
     }
     if (modelConfig.isRnnBased())
     {
@@ -388,7 +381,7 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void RuntimeBuffers::prepareBuffersForCudaGraph()
+void RuntimeBuffers::prepareBuffersForCudaGraph(SizeType32 maxSequenceLength)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(runtimeBuffersSetFromInputs);
@@ -397,17 +390,16 @@ void RuntimeBuffers::prepareBuffersForCudaGraph()
 
     if (transformerBuffers)
     {
-        auto const maxAttentionWindowsRange = BufferRange<SizeType32>(*transformerBuffers->maxAttentionWindows);
-        auto const maxKvLength = *std::max_element(maxAttentionWindowsRange.begin(), maxAttentionWindowsRange.end());
-
         // Set pastKeyValueLength for graph capturing. This way we will capture graph with
         // maxKvCacheLengthRounded rounded to the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE.
         // MMHA will launch excessive amount of blocks and some of them will exit early during the actual launch.
         // We can reuse the same graph for the next kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE iterations.
-        auto const kvCacheLength = std::min(maxKvLength, maxKvCacheLengthRounded);
+
+        // make sure the size does not overflow the max allowed pastKvCacheLength
+        auto const pastKvCacheLength = std::min(maxSequenceLength - 1, maxKvCacheLengthRounded);
 
         auto* pastKeyValueLengthsPtr = bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths);
-        std::fill_n(pastKeyValueLengthsPtr, getNumSequences(), kvCacheLength);
+        std::fill_n(pastKeyValueLengthsPtr, getNumSequences(), pastKvCacheLength);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -415,7 +407,8 @@ void RuntimeBuffers::prepareBuffersForCudaGraph()
 
 void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, RequestVector const& genRequests,
     SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers,
-    kv_cache_manager::KVCacheManager* kvCacheManagerPtr, kv_cache_manager::KVCacheManager* crossKvCacheManagerPtr,
+    kv_cache_manager::BaseKVCacheManager* kvCacheManagerPtr,
+    kv_cache_manager::BaseKVCacheManager* crossKvCacheManagerPtr,
     rnn_state_manager::RnnStateManager* rnnStateManagerPtr, PeftTable const& peftTable,
     runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
     runtime::WorldConfig const& worldConfig)
@@ -452,8 +445,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto const mropeRotarySinCosSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
     bool isSkipCrossAttn = true;
 
-    maxKvCacheLengthRounded = 0;
-
     // sequence length fill common loop
     {
         NVTX3_SCOPED_RANGE(sequenceLenLoop);
@@ -489,9 +480,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             auto optMropeRotarySinCos = llmReq->getMropeRotarySinCos().value();
             TLLM_CHECK_WITH_INFO(optMropeRotarySinCos->getShape().d[0] == mropeRotarySinCosSize,
-                "Provided MropeRotarySinCos is %lu and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
-                mropeRotarySinCosSize);
-            auto* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
+                "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
+                int(mropeRotarySinCosSize));
+            float* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
             auto mropePositionDeltas = llmReq->getMropePositionDeltas().value();
             mropeRotarySinCosHost.insert(
                 mropeRotarySinCosHost.end(), mropeRotarySinCos, mropeRotarySinCos + mropeRotarySinCosSize);
@@ -821,6 +812,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             encoderBuffers->inputLengths, maxContextLength, encoderBuffers->getMaxInputLengthInBatch(), runtime);
     }
 
+    maxKvCacheLengthRounded = 0;
     if (static_cast<bool>(pastKeyValueLengthsPtr))
     {
         auto const maxKvCacheLength
@@ -862,8 +854,8 @@ void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, R
 
 std::tuple<SizeType32, RuntimeBuffers::TensorMap const&, RuntimeBuffers::TensorMap&> RuntimeBuffers::prepareStep(
     RequestVector const& contextRequests, RequestVector const& genRequests, SizeType32 maxBeamWidth,
-    SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers, kv_cache_manager::KVCacheManager* kvCacheManager,
-    kv_cache_manager::KVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
+    SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers, kv_cache_manager::BaseKVCacheManager* kvCacheManager,
+    kv_cache_manager::BaseKVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
     PeftTable const& peftTable, TllmRuntime const& runtime, ModelConfig const& modelConfig,
     WorldConfig const& worldConfig)
 {
@@ -930,11 +922,6 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign("context_lengths", contextLengthsDevice);
     inputMap.insert_or_assign("host_context_lengths", contextLengthsHost);
     inputMap.insert_or_assign("sequence_length", sequenceLengthsDevice);
-
-    if (worldConfig.isTensorParallel())
-    {
-        inputMap.insert_or_assign("all_reduce_workspace", mAllReduceWorkspace);
-    }
 
     if (modelConfig.useCrossAttention())
     {

@@ -203,7 +203,7 @@ TEST_F(GptManagerTest, BasicValidationTest)
     {
         ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
         modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
-        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -321,7 +321,7 @@ TEST_F(GptManagerTest, ZeroOutputLength)
     {
         ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
         modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
-        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -382,7 +382,7 @@ TEST_F(GptManagerTest, ErrorHandlingLargePrompt)
     {
         ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
         modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
-        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -444,7 +444,7 @@ TEST_F(GptManagerTest, ErrorHandlingForwardFails)
     {
         ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
         modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kCONTINUOUS);
-        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+        fs::path dataPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         TritonStub tritonStub;
 
         tr::SizeType32 constexpr beamWidth{1};
@@ -968,11 +968,11 @@ TEST_P(ParamTest, Test)
         {
             ModelSpec gatherModelSpec(modelSpec);
             gatherModelSpec.gatherLogits();
-            modelPath = GPT_MODEL_PATH / gatherModelSpec.getModelPath() / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / gatherModelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         }
         else
         {
-            modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
         }
         dtype = nvinfer1::DataType::kHALF;
         inputFile = DATA_PATH / modelSpec.mInputFile;
@@ -986,7 +986,7 @@ TEST_P(ParamTest, Test)
         if (versionChatglm == 1) // chatglm-6b
         {
             modelSpec.setInputFile("input_tokens_chatglm-6b.npy");
-            modelPath = CHATGLM_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            modelPath = CHATGLM_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
             inputFile = DATA_PATH / modelSpec.mInputFile;
             resultsFile = CHATGLM_DATA_PATH;
             vocabSizePadded = 130528;
@@ -995,7 +995,7 @@ TEST_P(ParamTest, Test)
         else if (versionChatglm == 2) // chatglm2-6b
         {
             modelSpec.setInputFile("input_tokens_chatglm2-6b.npy");
-            modelPath = CHATGLM2_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            modelPath = CHATGLM2_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
             inputFile = DATA_PATH / modelSpec.mInputFile;
             ;
             resultsFile = CHATGLM2_DATA_PATH;
@@ -1005,7 +1005,7 @@ TEST_P(ParamTest, Test)
         else           // chatglm3-6b
         {
             modelSpec.setInputFile("input_tokens_chatglm3-6b.npy");
-            modelPath = CHATGLM3_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+            modelPath = CHATGLM3_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
             inputFile = DATA_PATH / modelSpec.mInputFile;
             resultsFile = CHATGLM3_DATA_PATH;
             vocabSizePadded = 65024;
@@ -1053,7 +1053,7 @@ TEST_F(GptManagerTest, EarlyStopping)
     ModelSpec modelSpec{"input_tokens.npy", dtype};
     modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
 
-    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
     fs::path inputFile{DATA_PATH / modelSpec.mInputFile};
 
     fs::path resultsFile{GPT_DATA_PATH / "sampling" / modelSpec.getResultsFile()};
@@ -1154,7 +1154,7 @@ TEST_F(GptManagerTest, LogitsPostProcessor)
     auto constexpr dtype = nvinfer1::DataType::kHALF;
     ModelSpec modelSpec{"input_tokens.npy", dtype};
     modelSpec.useGptAttentionPlugin().usePackedInput().setKVCacheType(KVCacheType::kPAGED);
-    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+    auto const modelPath = GPT_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
 
     int constexpr sentinels[] = {42, 29};
     tr::SizeType32 constexpr beamWidth{1};

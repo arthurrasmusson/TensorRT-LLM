@@ -62,6 +62,7 @@ class MicroBatchScheduler;
 class PauseRequests;
 class AssignReqSeqSlots;
 class AllocateKvCache;
+class GuidedDecoder;
 
 namespace utils
 {
@@ -79,6 +80,7 @@ enum class FastLogitsMpiId : uint64_t
 
 class TrtGptModelInflightBatching : public TrtGptModel
 {
+    using BaseKVCacheManager = kv_cache_manager::BaseKVCacheManager;
     using KVCacheManager = kv_cache_manager::KVCacheManager;
     using KvCacheType = kv_cache_manager::CacheType;
     using KvCacheConfig = kv_cache_manager::KvCacheConfig;
@@ -225,12 +227,12 @@ private:
 
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
-    void createBuffers(executor::DecodingConfig const& decodingConfig,
-        executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig);
+    void createBuffers(executor::DecodingConfig const& decodingConfig);
     std::shared_ptr<KVCacheManager> createKvCacheManager(KvCacheConfig const& kvCacheConfig,
         SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool, KvCacheType kvCacheType = KvCacheType::kSELF);
     void createRnnStateManager();
     void createCustomAllReduceWorkspace();
+    void createRuntimePerfKnobsTensor(executor::ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig);
 
     /// @brief Verify draft token length and beam width of all active requests.
     ///        May change operating beam width if all requests agree on same beam width.
@@ -252,6 +254,8 @@ private:
     /// @return The TensorRT execution context index that has been setup.
     void setupContext(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
+
+    TensorPtr retrieveDraftLogits(TensorPtr const& tensor);
 
     void setupDecoderStep(RequestVector const& contextRequests);
     DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
@@ -307,23 +311,35 @@ private:
         return mSpeculativeDecodingFastLogits;
     }
 
+    [[nodiscard]] bool hasGuidedDecoder() const noexcept override
+    {
+        return static_cast<bool>(mGuidedDecoder);
+    }
+
+    /// @brief Based on the KV-cache manager's capacity and configuration, we adjust the maximum supported attention
+    /// window.
+    ///
+    /// @param numPrimaryBlocks The number of blocks in the kv-cache's primary pool.
+    /// @param numTokensPerBlock The number of tokens per kv-cache block.
+    void adjustMaxAttentionWindow(SizeType32 numPrimaryBlocks, SizeType32 numTokensPerBlock);
+
 protected:
-    std::shared_ptr<KVCacheManager> getKVCacheManager() override
+    std::shared_ptr<BaseKVCacheManager> getKVCacheManager() override
     {
         return mKvCacheManager;
     }
 
-    [[nodiscard]] std::shared_ptr<KVCacheManager const> getKVCacheManager() const override
+    [[nodiscard]] std::shared_ptr<BaseKVCacheManager const> getKVCacheManager() const override
     {
         return mKvCacheManager;
     }
 
-    std::shared_ptr<KVCacheManager> getCrossKVCacheManager()
+    std::shared_ptr<BaseKVCacheManager> getCrossKVCacheManager()
     {
         return mCrossKvCacheManager;
     }
 
-    [[nodiscard]] std::shared_ptr<KVCacheManager const> getCrossKVCacheManager() const
+    [[nodiscard]] std::shared_ptr<BaseKVCacheManager const> getCrossKVCacheManager() const
     {
         return mCrossKvCacheManager;
     }
@@ -348,9 +364,9 @@ protected:
         mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
     }
 
-    SizeType32 getMaxCapacityBatchSize(SizeType32 seqLen) override
+    SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override
     {
-        return mKvCacheManager->getMaxCapacityBatchSize(seqLen);
+        return mKvCacheManager->getMaxCapacityBatchSize(inputLength, outputLength);
     }
 
 private:
@@ -365,6 +381,7 @@ private:
     executor::DecodingConfig mDecodingConfig;
     // Performance knobs for the engine.
     executor::ExtendedRuntimePerfKnobConfig mExtendedRuntimePerfKnobConfig;
+    TensorPtr mExtendedRuntimePerfKnobsHost;
     // Config for debugging output
     std::optional<executor::DebugConfig> mDebugConfig;
 
@@ -380,9 +397,9 @@ private:
     // Manager that maps requests to slots
     std::shared_ptr<SequenceSlotManager> mSeqSlotManager;
     // KV cache manager for attention layers (optional)
-    std::shared_ptr<KVCacheManager> mKvCacheManager;
+    std::shared_ptr<BaseKVCacheManager> mKvCacheManager;
     // KV cache manager for cross attention in enc-dec models (optional)
-    std::shared_ptr<KVCacheManager> mCrossKvCacheManager = nullptr;
+    std::shared_ptr<BaseKVCacheManager> mCrossKvCacheManager = nullptr;
     // RNN state manager for recurrent layers (optional)
     std::shared_ptr<RnnStateManager> mRnnStateManager;
     // PEFT cache manager for LoRA tasks (optional)
@@ -400,6 +417,8 @@ private:
     {
         return mWorldConfig.isTensorParallel() && !mReplicateLogitsPostProcessor && mLogitsPostProcessorIsApplied;
     }
+
+    std::unique_ptr<tensorrt_llm::batch_manager::GuidedDecoder> mGuidedDecoder;
 
     /******************** Pipeline parallelism ********************/
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mMpiCommPipelinePara;

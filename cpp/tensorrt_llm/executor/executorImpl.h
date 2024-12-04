@@ -149,9 +149,9 @@ private:
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
         ExecutorConfig const& executorConfig);
 
-    void setOrchLeaderComm(SizeType32 tp, SizeType32 pp, ParallelConfig const& parallelConfig);
+    void setOrchLeaderComm(SizeType32 tp, SizeType32 pp, SizeType32 cp, ParallelConfig const& parallelConfig);
 
-    void initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
+    void initializeCommAndWorkers(SizeType32 tp, SizeType32 pp, SizeType32 cp, ExecutorConfig const& executorConfig,
         std::optional<ModelType> modelType = std::nullopt,
         std::optional<std::filesystem::path> const& modelPath = std::nullopt,
         std::optional<runtime::WorldConfig> const& worldConfig = std::nullopt,
@@ -160,10 +160,10 @@ private:
     static void validateParallelConfig(ParallelConfig const& parallelConfig, std::optional<ModelType> modelType,
         std::optional<std::filesystem::path> const& modelPath);
 
-    void initializeOrchestrator(SizeType32 tp, SizeType32 pp, ExecutorConfig const& executorConfig,
+    void initializeOrchestrator(SizeType32 tp, SizeType32 pp, SizeType32 cp, ExecutorConfig const& executorConfig,
         ParallelConfig parallelConfig, ModelType modelType, std::filesystem::path const& modelPath);
 
-    void initializeWorkers(SizeType32 tp, SizeType32 pp, ParallelConfig& parallelConfig,
+    void initializeWorkers(SizeType32 tp, SizeType32 pp, SizeType32 cp, ParallelConfig& parallelConfig,
         std::optional<runtime::WorldConfig> const& worldConfig = std::nullopt,
         std::optional<runtime::GptJsonConfig> const& decoderGptJsonConfig = std::nullopt);
 
@@ -333,6 +333,7 @@ private:
 
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommTensorParallel;
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommPipelineParallel;
+    std::shared_ptr<tensorrt_llm::mpi::MpiComm> mCommContextParallel;
     std::unique_ptr<RequestWithIdAsyncSend> mRequestWithIdAsyncSndHdl;
     std::unique_ptr<CancelledRequestsAsyncSend> mCancelledRequestsAsyncSndHdl;
     std::unique_ptr<std::thread> mRequestWithIdLeaderThread;

@@ -140,19 +140,42 @@ bool LookaheadDecodingConfig::isLE(LookaheadDecodingConfig const& that) const
         && mVerificationSetSize <= that.mVerificationSetSize;
 }
 
-EagleConfig::EagleConfig(std::optional<EagleChoices> eagleChoices)
+EagleConfig::EagleConfig(
+    std::optional<EagleChoices> eagleChoices, bool greedySampling, std::optional<float> posteriorThreshold)
     : mEagleChoices(std::move(eagleChoices))
+    , mGreedySampling(greedySampling)
+    , mPosteriorThreshold(checkPosteriorValue(posteriorThreshold))
 {
 }
 
 bool EagleConfig::operator==(EagleConfig const& other) const
 {
-    return mEagleChoices == other.mEagleChoices;
+    return mEagleChoices == other.mEagleChoices && mGreedySampling == other.mGreedySampling
+        && mPosteriorThreshold == other.mPosteriorThreshold;
 }
 
 std::optional<EagleChoices> EagleConfig::getEagleChoices() const
 {
     return mEagleChoices;
+}
+
+std::optional<float> EagleConfig::getPosteriorThreshold() const
+{
+    return mPosteriorThreshold;
+}
+
+bool EagleConfig::isGreedySampling() const
+{
+    return mGreedySampling;
+}
+
+std::optional<float> const& EagleConfig::checkPosteriorValue(std::optional<float> const& value)
+{
+    if (value.has_value())
+    {
+        TLLM_CHECK(0.f <= value.value() && value.value() < 1.f);
+    }
+    return value;
 }
 
 DecodingConfig::DecodingConfig(std::optional<DecodingMode> decodingMode,

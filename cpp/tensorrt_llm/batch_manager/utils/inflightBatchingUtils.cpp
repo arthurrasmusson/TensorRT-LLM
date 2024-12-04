@@ -127,8 +127,8 @@ void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, 
 }
 
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, SizeType32 maxInputLen,
-    OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager,
-    OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager,
+    OptionalRef<kv_cache_manager::BaseKVCacheManager> kvCacheManager,
+    OptionalRef<kv_cache_manager::BaseKVCacheManager> crossKvCacheManager,
     OptionalRef<BasePeftCacheManager> peftCacheManager, bool pause)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);

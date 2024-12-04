@@ -59,7 +59,7 @@ protected:
     }
 
     TrtGptModelTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-cp1-gpu")
     {
     }
 
@@ -149,7 +149,7 @@ class TrtGptModelLoraTest : public TrtGptModelTest
 {
 protected:
     TrtGptModelLoraTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-cp1-gpu")
     {
     }
 
@@ -860,7 +860,7 @@ class TrtGptModelIfbHelper : public TrtGptModelInflightBatching
 public:
     using TrtGptModelInflightBatching::TrtGptModelInflightBatching;
 
-    [[nodiscard]] std::shared_ptr<kv_cache_manager::KVCacheManager const> getKVCacheManager() const
+    [[nodiscard]] std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> getKVCacheManager() const
     {
         return TrtGptModelInflightBatching::getKVCacheManager();
     }
@@ -915,11 +915,105 @@ TEST_F(TrtGptModelTest, KVCacheReuseChunked)
     }
 }
 
+TEST_F(TrtGptModelTest, PauseRequestStats)
+{
+    SamplingConfig inSamplingConfig;
+    inSamplingConfig.temperature = std::vector{2.0f};
+    int correlationId = 0;
+    auto maxNewTokens = 3;
+    auto tokens = std::make_shared<std::vector<int32_t>>(std::initializer_list<int32_t>{1, 2, 3, 4});
+    auto llmRequest = std::make_shared<LlmRequest>(correlationId, maxNewTokens, tokens, inSamplingConfig, false,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, false, false,
+        false, std::nullopt, std::nullopt, false, std::nullopt, false, std::nullopt, false, std::nullopt,
+        executor::Request::kDefaultPriority, std::nullopt, std::nullopt, std::nullopt,
+        LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION, std::nullopt, 1, std::nullopt, std::nullopt,
+        true /* returnPerfMetrics */);
+
+    RequestList requestList{llmRequest};
+
+    TrtGptModelOptionalParams optionalParams;
+    optionalParams.enableTrtOverlap = false;
+    optionalParams.maxBeamWidth = mBeamWidth;
+    optionalParams.schedulerConfig = executor::SchedulerConfig{executor::CapacitySchedulerPolicy::kMAX_UTILIZATION};
+
+    auto trtGptModel = std::make_shared<TrtGptModelInflightBatching>(
+        mLogger, mModelConfig, mWorldConfig, *mRawEngine, true, optionalParams);
+
+    // Generate one token for the requests in request_table
+    // We need to sync with decoder
+    trtGptModel->forwardAsync(requestList);
+    trtGptModel->forwardSync();
+
+    EXPECT_EQ(requestList.size(), 1);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_IN_PROGRESS);
+    EXPECT_EQ(requestList.front()->getNumTokens(0), 5);
+    EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
+    EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(1, 2, 3, 4, 2));
+
+    auto perfMetrics = requestList.front()->getPerfMetrics();
+    auto zero = executor::RequestPerfMetrics::TimePoint{};
+
+    EXPECT_NE(perfMetrics.timingMetrics.arrivalTime, zero);
+    EXPECT_NE(perfMetrics.timingMetrics.firstScheduledTime, zero);
+    EXPECT_NE(perfMetrics.timingMetrics.firstTokenTime, zero);
+    EXPECT_EQ(perfMetrics.timingMetrics.lastTokenTime, zero);
+    EXPECT_EQ(perfMetrics.firstIter, 0);
+    EXPECT_EQ(perfMetrics.iter, 0);
+    EXPECT_EQ(perfMetrics.lastIter, std::nullopt);
+
+    // Pause the request
+    trtGptModel->terminateRequest(llmRequest, true);
+
+    // Resume work
+    trtGptModel->forwardAsync(requestList);
+    trtGptModel->forwardSync();
+
+    // Generate one more token
+    EXPECT_EQ(requestList.size(), 1);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_IN_PROGRESS);
+    EXPECT_EQ(requestList.front()->getNumTokens(0), 6);
+    EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
+    EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(1, 2, 3, 4, 2, 4));
+
+    auto newPerfMetrics = requestList.front()->getPerfMetrics();
+    EXPECT_EQ(newPerfMetrics.firstIter, 0);
+    EXPECT_EQ(newPerfMetrics.iter, 1);
+    EXPECT_EQ(newPerfMetrics.lastIter, std::nullopt);
+
+    // Check that firstScheduledTime and firstTokenTime are the same
+    EXPECT_EQ(perfMetrics.timingMetrics.firstScheduledTime, newPerfMetrics.timingMetrics.firstScheduledTime);
+    EXPECT_EQ(perfMetrics.timingMetrics.firstTokenTime, newPerfMetrics.timingMetrics.firstTokenTime);
+
+    // Pause the request
+    trtGptModel->terminateRequest(llmRequest, true);
+
+    // Resume work
+    trtGptModel->forwardAsync(requestList);
+    trtGptModel->forwardSync();
+
+    // Generate last token
+    EXPECT_EQ(requestList.size(), 1);
+    EXPECT_EQ(requestList.front()->mState, LlmRequestState::kGENERATION_COMPLETE);
+    EXPECT_EQ(requestList.front()->getNumTokens(0), 7);
+    EXPECT_EQ(requestList.front()->getMaxNumGeneratedTokens(), 1);
+    EXPECT_THAT(requestList.front()->getTokens(0), ElementsAre(1, 2, 3, 4, 2, 4, 2));
+
+    auto endPerfMetrics = requestList.front()->getPerfMetrics();
+    EXPECT_EQ(endPerfMetrics.firstIter, 0);
+    EXPECT_EQ(endPerfMetrics.iter, 2);
+    EXPECT_EQ(endPerfMetrics.lastIter, 2);
+
+    // Check that firstScheduledTime and firstTokenTime are the same
+    EXPECT_EQ(perfMetrics.timingMetrics.firstScheduledTime, endPerfMetrics.timingMetrics.firstScheduledTime);
+    EXPECT_EQ(perfMetrics.timingMetrics.firstTokenTime, endPerfMetrics.timingMetrics.firstTokenTime);
+}
+
 class TrtGptModelLogitsTest : public TrtGptModelTest
 {
 protected:
     TrtGptModelLogitsTest()
-        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-gpu")
+        : TrtGptModelTest(GPT_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-cp1-gpu")
     {
     }
 

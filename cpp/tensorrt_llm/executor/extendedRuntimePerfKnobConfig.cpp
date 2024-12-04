@@ -10,7 +10,22 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/executor.h"
+
+namespace
+{
+void validateCudaGraphCacheSize(bool cudaGraphMode, tensorrt_llm::executor::SizeType32 cudaGraphCacheSize)
+{
+    TLLM_CHECK_WITH_INFO(cudaGraphCacheSize >= 0, "CUDA graph cache size must be greater or equal to 0.");
+    if (!cudaGraphMode && cudaGraphCacheSize > 0)
+    {
+        TLLM_LOG_WARNING(
+            "Setting cudaGraphCacheSize to a value greater than 0 without enabling cudaGraphMode has no effect.");
+    }
+}
+
+} // namespace
 
 namespace tensorrt_llm::executor
 {
@@ -22,6 +37,7 @@ ExtendedRuntimePerfKnobConfig::ExtendedRuntimePerfKnobConfig(
     , mCudaGraphMode(cudaGraphMode)
     , mCudaGraphCacheSize(cudaGraphCacheSize)
 {
+    validateCudaGraphCacheSize(mCudaGraphMode, mCudaGraphCacheSize);
 }
 
 bool ExtendedRuntimePerfKnobConfig::getMultiBlockMode() const
@@ -62,6 +78,7 @@ void ExtendedRuntimePerfKnobConfig::setCudaGraphMode(bool cudaGraphMode)
 void ExtendedRuntimePerfKnobConfig::setCudaGraphCacheSize(SizeType32 cudaGraphCacheSize)
 {
     mCudaGraphCacheSize = cudaGraphCacheSize;
+    validateCudaGraphCacheSize(mCudaGraphMode, mCudaGraphCacheSize);
 }
 
 } // namespace tensorrt_llm::executor

@@ -71,6 +71,7 @@ namespace
 auto const TEST_RESOURCE_PATH = std::filesystem::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
 auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
 auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
+auto const GPT_XGRAMMAR_TOKENIZER_INFO_PATH = TEST_RESOURCE_PATH / "data" / "gpt2" / "xgrammar_tokenizer_info.json";
 auto const LLAMA_MODEL_PATH = ENGINE_PATH / "llama-7b-hf";
 auto const MEDUSA_MODEL_PATH = ENGINE_PATH / "vicuna-7b-medusa";
 auto const CHATGLM_MODEL_PATH = ENGINE_PATH / "chatglm-6b";
@@ -144,9 +145,9 @@ auto const LORA_CONFIG_FILE = LORA_DATA_PATH / "config.npy";
 auto const EXECUTOR_WORKER_PATH
     = std::filesystem::path{TOP_LEVEL_DIR} / "cpp/build/tensorrt_llm/executor_worker/executorWorker";
 
-std::string getEncDecEnginePath(std::string const& modelName, SizeType32 tp, SizeType32 pp)
+std::string getEncDecEnginePath(std::string const& modelName, SizeType32 tp, SizeType32 pp, SizeType32 cp)
 {
-    return modelName + '/' + std::to_string(tp * pp) + "-gpu/float16";
+    return modelName + '/' + std::to_string(tp * pp * cp) + "-gpu/float16";
 }
 
 TokenIdType getDecTokenFromJsonConfig(std::filesystem::path decEnginePath, std::string const& token_name)
@@ -262,7 +263,7 @@ TEST_F(GptExecutorTest, validCtor)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 }
 
@@ -270,7 +271,7 @@ TEST_F(GptExecutorTest, invalidCtor)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     std::filesystem::path invalidPath{"Bla"};
 
     // Invalid path
@@ -283,7 +284,7 @@ TEST_F(GptExecutorTest, enqueueAfterShutdown)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxNewTokens = 5;
@@ -338,7 +339,7 @@ TEST_F(GptExecutorTest, missingPeftTask)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_LORA_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_LORA_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -386,7 +387,7 @@ TEST_F(GptExecutorTest, ReturnAcceptedTokenLogits)
 
     // Create executor
     auto trtEnginePath
-        = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-gpu");
+        = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create request
@@ -459,7 +460,7 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     executorConfig.setExtendedRuntimePerfKnobConfig(perfKnobConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -595,7 +596,6 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
 
 TEST_F(GptExecutorTest, GenerationChangeEndId)
 {
-    GTEST_SKIP() << "skipped due to https://nvbugspro.nvidia.com/bug/4925919";
     SizeType32 constexpr beamWidth{2};
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
     auto constexpr streaming = false;
@@ -608,7 +608,7 @@ TEST_F(GptExecutorTest, GenerationChangeEndId)
     executorConfig.setExtendedRuntimePerfKnobConfig(perfKnobConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -739,7 +739,7 @@ using ParamCancelReqType = std::tuple<bool, bool, int, int, std::string>;
 using LeaderApiUsageType = std::tuple<bool, std::string>;
 using ParamStatsType = std::tuple<int, bool>;
 using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool, bool, int>;
-using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32>;
+using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32>;
 using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
 using DisaggParamsType = std::tuple<int, std::vector<std::string>, std::vector<std::vector<int>>,
     std::vector<std::vector<int>>, std::vector<int>, int>;
@@ -1029,7 +1029,7 @@ TEST_F(GptExecutorTest, GetLatestStats)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1128,7 +1128,7 @@ TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
@@ -1237,7 +1237,7 @@ TEST_F(GptExecutorTest, GetLatestRequestStats)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
     executorConfig.setEnableChunkedContext(true);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
@@ -1395,7 +1395,7 @@ TEST_F(GptExecutorTest, GetLatestRequestStatsScheduling)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
     executorConfig.setEnableChunkedContext(true);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create 100 requests. Note the max batch size for this model is 64 so some requests won't be scheduled right away.
@@ -1491,7 +1491,7 @@ TEST_F(GptExecutorTest, GetRequestStatsMultipleRequests)
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto sendRequestWaitForResponseFn = [&]()
@@ -1562,7 +1562,7 @@ TEST_F(GptExecutorTest, BatchSizeTuning)
     SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, std::nullopt, dynamicBatchConfig);
     executorConfig.setSchedulerConfig(schedulerConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     std::vector<SizeType32> tunerRecommendedBatchSizes;
@@ -1618,7 +1618,7 @@ TEST_F(GptExecutorTest, GetLatestDebugTensors)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setDebugConfig(debugConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1696,7 +1696,7 @@ TEST_P(ParamTest, SingleRequestDemo)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1774,7 +1774,7 @@ TEST_P(ParamTest, MultipleRequestDemo)
     SizeType32 numRequests = 20;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxPromptLen = 20;
@@ -1868,7 +1868,7 @@ TEST_P(ParamStatsTest, MultipleRequestStats)
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setIterStatsMaxIterations(iterStatsMaxIterations);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
 
     std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
     if (useOrchestratorMode)
@@ -1994,7 +1994,7 @@ TEST_P(ParamTest, MultipleRequestBatchResponses)
     SizeType32 constexpr numRequests{20};
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr maxPromptLen{20};
@@ -2089,7 +2089,7 @@ TEST_P(ParamTest, GetNumResponsesReadyTest)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxNumRequests = 50;
@@ -2999,7 +2999,7 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
             = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         if (outConfig.returnContextLogits || outConfig.returnGenerationLogits)
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
             beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
             beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
@@ -3011,7 +3011,7 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         }
         else
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
             if (outConfig.returnLogProbs)
             {
@@ -3020,42 +3020,42 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
             }
         }
     }
-    else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1" || modelName == "llama_tp1_pp1")
+    else if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
+        || modelName == "llama_tp1_pp2_cp1" || modelName == "llama_tp2_pp1_cp1" || modelName == "llama_tp1_pp1_cp1")
     {
         auto const resultsPath
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         modelIds.padId = 2;
         modelIds.endId = 2;
-        if (modelName == "llama_tp4_pp1")
+        if (modelName == "llama_tp4_pp1_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp4")
+        else if (modelName == "llama_tp1_pp4_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp2")
+        else if (modelName == "llama_tp1_pp2_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
         }
-        else if (modelName == "llama_tp2_pp1")
+        else if (modelName == "llama_tp2_pp1_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
         }
-        else if (modelName == "llama_tp2_pp2")
+        else if (modelName == "llama_tp2_pp2_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp1")
+        else if (modelName == "llama_tp1_pp1_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
         }
     }
     else if (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
@@ -3084,7 +3084,7 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
         resultsPath /= (beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth);
 
         beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-        modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+        modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
 
         char versionChatglm{0};
         if (size_t index = modelPath.string().find("chatglm"); index != std::string::npos)
@@ -3115,8 +3115,8 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
 
     // Warning: This should be the last check before running the test.
     // It will initialize MPI which can take significant time.
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1")
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
+        || modelName == "llama_tp1_pp2_cp1" || modelName == "llama_tp2_pp1_cp1")
     {
         // For llama model, only run for multiple GPUs
         // This is detected by setting an env variable when running the test
@@ -3207,27 +3207,27 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
         fs::path retPath;
         if (modelNN == "llama_tp4_pp1")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
         else if (modelNN == "llama_tp1_pp4")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
         else if (modelNN == "llama_tp1_pp2")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
         }
         else if (modelNN == "llama_tp2_pp1")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
         }
         else if (modelNN == "llama_tp2_pp2")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
         else if (modelNN == "llama_tp1_pp1")
         {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
         }
         return retPath;
     };
@@ -3269,32 +3269,32 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
         if (modelName == "llama_tp4_pp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp2")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
         }
         else if (modelName == "llama_tp2_pp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp2_pp2")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
         }
     }
 
@@ -3428,7 +3428,7 @@ TEST_P(AllParamsTest, TokenComparison)
             = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         if (outConfig.returnContextLogits || outConfig.returnGenerationLogits)
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
             beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
             beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
@@ -3440,7 +3440,7 @@ TEST_P(AllParamsTest, TokenComparison)
         }
         else
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
             if (outConfig.returnLogProbs)
             {
@@ -3449,30 +3449,30 @@ TEST_P(AllParamsTest, TokenComparison)
             }
         }
     }
-    else if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2")
+    else if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
+        || modelName == "llama_tp1_pp2_cp1")
     {
         auto const resultsPath
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        if (modelName == "llama_tp4_pp1")
+        if (modelName == "llama_tp4_pp1_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp4")
+        else if (modelName == "llama_tp1_pp4_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp2")
+        else if (modelName == "llama_tp1_pp2_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
         }
-        else if (modelName == "llama_tp2_pp2")
+        else if (modelName == "llama_tp2_pp2_cp1")
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
     }
     else if (modelName == "medusa")
@@ -3482,7 +3482,7 @@ TEST_P(AllParamsTest, TokenComparison)
         ModelSpec modelSpec
             = getDefaultModelSpec().useMedusa().setInputFile("input_tokens_long.npy").setMaxOutputLength(128);
         beamResult.resultsFile = resultsPath / modelSpec.getResultsFile();
-        modelPath = MEDUSA_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-gpu";
+        modelPath = MEDUSA_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
 
         inputPath = DATA_PATH / "input_vicuna.npy";
         modelIds.padId = 2;
@@ -3518,12 +3518,12 @@ TEST_P(AllParamsTest, TokenComparison)
             ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
             modelSpec.useGptAttentionPlugin();
             beamResult.resultsFile = resultsPath / modelSpec.getResultsFile();
-            modelPath /= modelSpec.getModelPath() + "/tp1-pp1-gpu";
+            modelPath /= modelSpec.getModelPath() + "/tp1-pp1-cp1-gpu";
         }
         else
         {
             beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-            modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+            modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
         }
 
         char versionChatglm{0};
@@ -3560,8 +3560,8 @@ TEST_P(AllParamsTest, TokenComparison)
 
     // Warning: This should be the last check before running the test.
     // It will initialize MPI which can take significant time.
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2")
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
+        || modelName == "llama_tp1_pp2_cp1")
     {
         // For llama model, only run for multiple GPUs
         // This is detected by setting an env variable when running the test
@@ -3591,7 +3591,7 @@ TEST_P(AllParamsTest, TokenComparison)
         }
     }
 
-    if (modelName == "llama_tp1_pp2")
+    if (modelName == "llama_tp1_pp2_cp1")
     {
         auto const& session = tensorrt_llm::mpi::MpiComm::world();
         if (session.getSize() != 4)
@@ -3628,7 +3628,7 @@ TEST_F(GptExecutorTest, ChangeBwError)
     SizeType32 constexpr maxBeamWidth{2};
     auto executorConfig = ExecutorConfig(maxBeamWidth);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr beamWidth1{1};
@@ -3679,7 +3679,7 @@ void doTokenComparisonChangeBw(bool enableReuse, SizeType32 maxWaitMs)
     auto executorConfig = ExecutorConfig(maxBeamWidth, SchedulerConfig(), kvCacheConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -3724,7 +3724,7 @@ TEST_F(GptExecutorTest, NReturnRandomness)
     auto executorConfig = ExecutorConfig(maxBeamWidth);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -3748,7 +3748,7 @@ TEST_F(GptExecutorTest, TimedOut)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // No requests enqueued, expect no responses
@@ -3765,7 +3765,7 @@ TEST_F(GptExecutorTest, MaxSeqIdleMicrosecondsError)
     auto executorConfig = ExecutorConfig(1);
     // Request will time out
     executorConfig.setMaxSeqIdleMicroseconds(1);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr maxNewTokens{5};
@@ -3808,24 +3808,24 @@ TEST_P(LogitsProcParamsTest, All)
     auto const replicated = std::get<2>(GetParam());
 
     std::string modelDir;
-    int tp_size = 1, pp_size = 1;
-    if (modelName == "llama_tp1_pp1")
+    int tp_size = 1, pp_size = 1, cp_size = 1;
+    if (modelName == "llama_tp1_pp1_cp1")
     {
-        modelDir = "tp1-pp1-gpu";
+        modelDir = "tp1-pp1-cp1-gpu";
     }
-    else if (modelName == "llama_tp4_pp1")
+    else if (modelName == "llama_tp4_pp1_cp1")
     {
-        modelDir = "tp4-pp1-gpu";
+        modelDir = "tp4-pp1-cp1-gpu";
         tp_size = 4;
     }
-    else if (modelName == "llama_tp1_pp4")
+    else if (modelName == "llama_tp1_pp4_cp1")
     {
-        modelDir = "tp1-pp4-gpu";
+        modelDir = "tp1-pp4-cp1-gpu";
         pp_size = 4;
     }
-    else if (modelName == "llama_tp2_pp2")
+    else if (modelName == "llama_tp2_pp2_cp1")
     {
-        modelDir = "tp2-pp2-gpu";
+        modelDir = "tp2-pp2-cp1-gpu";
         tp_size = pp_size = 2;
     }
     else
@@ -3838,7 +3838,7 @@ TEST_P(LogitsProcParamsTest, All)
     auto const worldRank = comm.getRank();
     auto const worldSize = comm.getSize();
 
-    if (tp_size * pp_size != 1)
+    if (tp_size * pp_size * cp_size != 1)
     {
         // Run multi GPU test only when env variable is set
         char const* val = getenv("RUN_LLAMA_MULTI_GPU");
@@ -4078,7 +4078,7 @@ TEST_F(GptExecutorTest, LogitsPostProcessorThrow)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     std::string const logitsProcessorName = "UnExistProcessor";
@@ -4145,9 +4145,9 @@ TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtDraftEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-gpu";
+    auto trtDraftEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
     auto trtEnginePath
-        = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-gpu";
+        = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-cp1-gpu";
 
     FloatType freeGpuMemoryFraction = 0.3;
     auto kvCacheConfig
@@ -4238,11 +4238,13 @@ public:
     MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
     MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
     MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
+    MOCK_METHOD(bool, hasGuidedDecoder, (), (const, noexcept));
     MOCK_METHOD(void, resetIterationStats, (), ());
     MOCK_METHOD(
-        std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager>, getKVCacheManager, (), ());
-    MOCK_METHOD(std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::KVCacheManager const>, getKVCacheManager,
-        (), (const));
+        std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager>, getKVCacheManager, (), ());
+    MOCK_METHOD(std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager const>,
+        getKVCacheManager, (), (const));
+    MOCK_METHOD(SizeType32, getMaxCapacityBatchSize, (SizeType32, SizeType32), (const));
 };
 
 TEST_P(ParamTest, MockedModel)
@@ -4409,7 +4411,7 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
 
 TEST_F(GptExecutorTest, OrchestratorMaxQueueSize)
 {
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     SizeType32 maxQueueSize = 6;
     ExecutorConfig executorConfig;
     executorConfig.setMaxQueueSize(maxQueueSize);
@@ -4741,7 +4743,7 @@ TEST_P(ParamTest, MockedModelMultiGpu)
     EXPECT_CALL(*model, getCurrentRequestStats(_))
         .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
 
-    tr::WorldConfig dummyWorldConfig = tr::WorldConfig(tp, 1, worldRank, tp);
+    tr::WorldConfig dummyWorldConfig = tr::WorldConfig(tp, 1, 1, worldRank, tp);
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
 
@@ -5156,7 +5158,7 @@ TEST_F(GptExecutorTest, SingleRequestInvalidInputs)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -5221,7 +5223,7 @@ TEST_F(GptExecutorTest, ExecutorKVCacheManager)
     kvCacheConfig.setEventBufferMaxSize(1024);
     executorConfig.setKvCacheConfig(kvCacheConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto kvCacheManager = *executor.getKVCacheEventManager();
@@ -5317,7 +5319,7 @@ TEST_F(GptExecutorTest, SingleRequestLora)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Load lora weights, config
@@ -5370,6 +5372,146 @@ TEST_F(GptExecutorTest, SingleRequestLora)
     EXPECT_EQ(tokens.size(), maxNewTokens);
 }
 
+TEST_F(GptExecutorTest, GuidedDecoding)
+{
+    bool streaming = false;
+
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+
+    auto const tokenizerInfo = nlohmann::json::parse(std::ifstream{GPT_XGRAMMAR_TOKENIZER_INFO_PATH});
+    auto const encodedVocab = tokenizerInfo["encoded_vocab"].template get<std::vector<std::string>>();
+    auto const tokenizerStr = tokenizerInfo["tokenizer_str"].template get<std::string>();
+    auto const stopTokenIds = tokenizerInfo["stop_token_ids"].template get<std::vector<TokenIdType>>();
+    GuidedDecodingConfig guidedDecodingConfig(
+        GuidedDecodingConfig::GuidedDecodingBackend::kXGRAMMAR, encodedVocab, tokenizerStr, stopTokenIds);
+    executorConfig.setGuidedDecodingConfig(guidedDecodingConfig);
+
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    // Create the requests
+    SizeType32 maxNewTokens = 10;
+    texec::SamplingConfig samplingConfig{};
+    texec::OutputConfig outputConfig{false, false, false, true};
+    VecTokens inputTokens{2061, 318, 352, 10, 16, 30, 23998, 39559, 287, 257, 8633, 287, 33918, 5794, 25, 220};
+
+    std::vector<Request> requests;
+    std::vector<VecTokens> expectedOutputTokens;
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    expectedOutputTokens.push_back({1849, 7, 16, 10, 16, 8, 198, 16, 10, 16});
+
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    requests.back().setGuidedDecodingParams(GuidedDecodingParams(GuidedDecodingParams::GuideType::kJSON));
+    expectedOutputTokens.push_back({90, 366, 3672, 1298, 366, 7554, 31780, 1600, 366, 12888});
+
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    std::string jsonSchema{
+        R"({"properties": {"answer": {"title": "Answer", "type": "integer"}}, "required": ["answer"], "title": "Answer", "type": "object"})"};
+    requests.back().setGuidedDecodingParams(
+        GuidedDecodingParams(GuidedDecodingParams::GuideType::kJSON_SCHEMA, jsonSchema));
+    expectedOutputTokens.push_back({90, 1, 64, 77, 2032, 68, 81, 1298, 352, 92});
+
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    std::string regex{R"(\d+)"};
+    requests.back().setGuidedDecodingParams(GuidedDecodingParams(GuidedDecodingParams::GuideType::kREGEX, regex));
+    expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
+
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    std::string ebnfGrammar{R"(root ::= [0-9]+)"};
+    requests.back().setGuidedDecodingParams(
+        GuidedDecodingParams(GuidedDecodingParams::GuideType::kEBNF_GRAMMAR, ebnfGrammar));
+    expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
+
+    // Enqueue the requests
+    auto reqIds = executor.enqueueRequests(std::move(requests));
+
+    // Get the responses
+    int numFinished = 0;
+    int iter = 0;
+    while (numFinished < 5 && iter < mMaxWaitMs)
+    {
+        std::chrono::milliseconds waitTime(1);
+        auto responses = executor.awaitResponses(waitTime);
+        for (auto& response : responses)
+        {
+            auto reqId = response.getRequestId();
+            if (response.hasError())
+            {
+                // This request failed for some reason, get error msg
+                std::string errStr
+                    = "Request id " + std::to_string(reqId) + " failed with err " + response.getErrorMsg();
+                FAIL();
+            }
+            else
+            {
+                auto result = response.getResult();
+                auto& newTokens = result.outputTokenIds.at(0);
+
+                int reqIdx = std::find(reqIds.begin(), reqIds.end(), reqId) - reqIds.begin();
+                for (int i = 0; i < maxNewTokens; i++)
+                {
+                    EXPECT_EQ(newTokens[i], expectedOutputTokens[reqIdx][i]);
+                }
+            }
+            numFinished++;
+        }
+    }
+    EXPECT_LT(iter, mMaxWaitMs);
+    EXPECT_EQ(numFinished, 5);
+}
+
+TEST_F(GptExecutorTest, GuidedDecodingFailure)
+{
+    bool streaming = false;
+
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+
+    std::vector<int> stopTokenIds{50256};
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+
+    // Create the requests
+    SizeType32 maxNewTokens = 10;
+    texec::SamplingConfig samplingConfig{};
+    texec::OutputConfig outputConfig{false, false, false, true};
+    VecTokens inputTokens{2061, 318, 352, 10, 16, 30, 23998, 39559, 287, 257, 8633, 287, 33918, 5794, 25, 220};
+
+    std::vector<Request> requests;
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
+    requests.back().setGuidedDecodingParams(GuidedDecodingParams(GuidedDecodingParams::GuideType::kJSON));
+
+    // Enqueue the requests
+    auto reqIds = executor.enqueueRequests(std::move(requests));
+
+    // Get the responses
+    int numFinished = 0;
+    int iter = 0;
+    while (numFinished < 2 && iter < mMaxWaitMs)
+    {
+        std::chrono::milliseconds waitTime(1);
+        auto responses = executor.awaitResponses(waitTime);
+        for (auto& response : responses)
+        {
+            auto reqId = response.getRequestId();
+            int reqIdx = std::find(reqIds.begin(), reqIds.end(), reqId) - reqIds.begin();
+            if (reqIdx == 0)
+            {
+                EXPECT_FALSE(response.hasError());
+            }
+            else
+            {
+                EXPECT_TRUE(response.hasError());
+            }
+            numFinished++;
+        }
+    }
+    EXPECT_LT(iter, mMaxWaitMs);
+    EXPECT_EQ(numFinished, 2);
+}
+
 TEST_P(ParamTest, SingleRequestCancelRequest)
 {
     bool const streaming = std::get<0>(GetParam());
@@ -5379,7 +5521,7 @@ TEST_P(ParamTest, SingleRequestCancelRequest)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -5443,7 +5585,7 @@ TEST_F(GptExecutorTest, orchModeFetchNewReqErr)
         CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create a req with invalid parameters
@@ -5490,7 +5632,7 @@ TEST_F(GptExecutorTest, orchModeForwardError)
         CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Setting request beam width to 2 which should cause failure
@@ -5540,19 +5682,19 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
 
     auto executorConfig = ExecutorConfig(beamWidth);
     std::filesystem::path modelPath;
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2")
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1")
     {
-        if (modelName == "llama_tp4_pp1")
+        if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp4")
+        else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
-        else if (modelName == "llama_tp2_pp2")
+        else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
     }
 
@@ -5680,19 +5822,19 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
 
     auto executorConfig = ExecutorConfig(beamWidth);
     std::filesystem::path modelPath;
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2")
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1")
     {
-        if (modelName == "llama_tp4_pp1")
+        if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
         }
-        else if (modelName == "llama_tp1_pp4")
+        else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
         }
-        else if (modelName == "llama_tp2_pp2")
+        else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-gpu";
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
         }
     }
 
@@ -5771,7 +5913,7 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
 TEST_F(GptExecutorTest, validateParallelConfig)
 {
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
     {
         auto executorConfig = ExecutorConfig();
         auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
@@ -5805,8 +5947,9 @@ TEST_P(EncDecParamsTest, validEncDecCtor)
     SizeType32 const maxNewTokens = std::get<2>(GetParam());
     SizeType32 const tp = std::get<3>(GetParam());
     SizeType32 const pp = std::get<4>(GetParam());
+    SizeType32 const cp = std::get<5>(GetParam());
 
-    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp);
+    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp, cp);
     std::filesystem::path encEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "encoder";
     std::filesystem::path decEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "decoder";
     ExecutorConfig executorConfig{};
@@ -5826,9 +5969,10 @@ TEST_P(EncDecParamsTest, Forward)
     SizeType32 const maxNewTokens = std::get<2>(GetParam());
     SizeType32 const tp = std::get<3>(GetParam());
     SizeType32 const pp = std::get<4>(GetParam());
+    SizeType32 const cp = std::get<5>(GetParam());
     bool const streaming = false;
 
-    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp);
+    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp, cp);
     std::filesystem::path encEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "encoder";
     std::filesystem::path decEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "decoder";
 
@@ -6032,11 +6176,12 @@ INSTANTIATE_TEST_SUITE_P(GptExecutorTest, ParamStatsTest,
 
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, ParamCancelReqTest,
     testing::Combine(testing::Values(false, true), testing::Values(false, true), testing::Values(1, 2),
-        testing::Values(1, 2), testing::Values("llama_tp1_pp4", "llama_tp4_pp1", "llama_tp2_pp2")),
+        testing::Values(1, 2), testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1")),
     generateTestNameCancelReq);
 
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LeaderApiUsageTest,
-    testing::Combine(testing::Values(false, true), testing::Values("llama_tp1_pp4", "llama_tp4_pp1", "llama_tp2_pp2")),
+    testing::Combine(
+        testing::Values(false, true), testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1")),
     generateTestNameLeaderApiUsage);
 
 INSTANTIATE_TEST_SUITE_P(GptExecutorTest, AllParamsTest,
@@ -6049,14 +6194,14 @@ INSTANTIATE_TEST_SUITE_P(GptExecutorTest, AllParamsTest,
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false, true), testing::Values(1, 2),
         testing::Values(false, true), testing::Values(false, true), testing::Values(false, true),
-        testing::Values(false, true), testing::Values("llama_tp1_pp4", "llama_tp4_pp1", "llama_tp2_pp2"),
+        testing::Values(false, true), testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1"),
         testing::Values(false, true), testing::Values(false), testing::Values(1)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaMultiExecutorTest, AllParamsTest,
     testing::Combine(testing::Values(BatchingType::kINFLIGHT), testing::Values(false, true), testing::Values(1, 2),
         testing::Values(false), testing::Values(false, true), testing::Values(false), testing::Values(false),
-        testing::Values("llama_tp1_pp2"), testing::Values(false), testing::Values(false), testing::Values(1)),
+        testing::Values("llama_tp1_pp2_cp1"), testing::Values(false), testing::Values(false), testing::Values(1)),
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(MedusaExecutorTest, AllParamsTest,
@@ -6102,38 +6247,39 @@ INSTANTIATE_TEST_SUITE_P(ChatGlm3ExecutorTest, AllParamsTest,
     generateTestNameAllParams);
 
 INSTANTIATE_TEST_SUITE_P(T5BasicTest, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(1), testing::Values(1)),
+    testing::Combine(testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(1),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(T5Beam2Test, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(T5_NAME), testing::Values(2), testing::Values(64), testing::Values(1), testing::Values(1)),
+    testing::Combine(testing::Values(T5_NAME), testing::Values(2), testing::Values(64), testing::Values(1),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(T5MultiGPUTest, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(4), testing::Values(1)),
+    testing::Combine(testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(4),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(BartBasicTest, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(1), testing::Values(1)),
+    testing::Combine(testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(1),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(BartBeam2Test, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(BART_NAME), testing::Values(2), testing::Values(64), testing::Values(1), testing::Values(1)),
+    testing::Combine(testing::Values(BART_NAME), testing::Values(2), testing::Values(64), testing::Values(1),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(BartMultiGPUTest, EncDecParamsTest,
-    testing::Combine(
-        testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(4), testing::Values(1)),
+    testing::Combine(testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(4),
+        testing::Values(1), testing::Values(1)),
     generateTestNameEncDec);
 
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LogitsProcParamsTest,
-    testing::Combine(testing::Values("llama_tp1_pp1", "llama_tp4_pp1", "llama_tp2_pp2"), testing::Values(false, true),
-        testing::Values(false, true)),
+    testing::Combine(
+        testing::Values("llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1", "llama_tp1_pp4_cp1"),
+        testing::Values(false, true), testing::Values(false, true)),
     generateTestNameLogitsProc);
 
 INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest, DisaggParamsTest,
@@ -6165,61 +6311,70 @@ INSTANTIATE_TEST_SUITE_P(ChatGlm2DisaggSymmetricExecutorTest, DisaggParamsTest,
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaTP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp1"}),
+    testing::Combine(testing::Values(4),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp2_pp1_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 INSTANTIATE_TEST_SUITE_P(LlamaPP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp1_pp2", "llama_tp1_pp2"}),
+    testing::Combine(testing::Values(4),
+        testing::Values(std::vector<std::string>{"llama_tp1_pp2_cp1", "llama_tp1_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaTP2PP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(8), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp2_pp2"}),
+    testing::Combine(testing::Values(8),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp2_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5, 6, 7}}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {0, 1, 2, 3}}),
         testing::Values(std::vector<int>{1, 0}), testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConPP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp1_pp2", "llama_tp2_pp1"}),
+    testing::Combine(testing::Values(4),
+        testing::Values(std::vector<std::string>{"llama_tp1_pp2_cp1", "llama_tp2_pp1_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (1,0) (2,3)
         testing::Values(std::vector<std::vector<int>>{{1, 0}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp1_pp2"}),
+    testing::Combine(testing::Values(4),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp1_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (0,1), (3,2)
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp1_pp2"}),
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp1_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1) , (5,4)
         testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {1, 0}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp2", "llama_tp2_pp1"}),
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp2_pp1_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1), (4,5)
         testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {0, 1}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP1GenTP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp2"}),
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp2_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3, 4, 5}}), // (0,1) , (4,5,2,3)%4
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {0, 1, 2, 3}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6), testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp1_pp4"}),
+    testing::Combine(testing::Values(6),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp1_pp4_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{4, 5}, {0, 1, 2, 3}}), // (4,5) ,(3,2,1,0)
         testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2, 1, 0}}), testing::Values(std::vector<int>{1, 0}),
         testing::Values(0)),
@@ -6228,7 +6383,7 @@ INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP4DisaggAsymmetricExecutorTest, DisaggPa
 INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
     testing::Combine(testing::Values(8),
         testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp4_pp1"}),
+            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
         testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
@@ -6236,7 +6391,8 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP4DisaggAsymmetricExecutorTest, Disagg
 
 INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2AndPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
     testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp1", "llama_tp1_pp2"}),
+        testing::Values(std::vector<std::string>{
+            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp2_pp1_cp1", "llama_tp1_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
         testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
@@ -6244,7 +6400,8 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2AndPP2DisaggAsymmetricExecutorTest, 
 
 INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
     testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp2", "llama_tp1_pp2"}),
+        testing::Values(std::vector<std::string>{
+            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp2_cp1", "llama_tp1_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
         testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
@@ -6253,7 +6410,7 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaggAsymmetricExecutorTest, Disagg
 INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
     testing::Combine(testing::Values(8),
         testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp2"}),
+            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp2_pp2_cp1"}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
         testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),

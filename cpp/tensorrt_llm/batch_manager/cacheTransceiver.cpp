@@ -41,7 +41,7 @@ namespace tensorrt_llm::batch_manager
 
 std::mutex CacheTransceiver::mDllMutex;
 
-CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManager, CommType commType,
+CacheTransceiver::CacheTransceiver(kv_cache_manager::BaseKVCacheManager* cacheManager, CommType commType,
     runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
     : mCommType{commType}
 {
@@ -82,9 +82,9 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::KVCacheManager* cacheManage
                 return ret;
             };
             std::unique_ptr<DataResponder> (*makeUcxCacheResponder)(
-                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::KVCacheManager*);
+                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::BaseKVCacheManager*);
             std::unique_ptr<DataRequester> (*makeUcxCacheRequester)(
-                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::KVCacheManager*);
+                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::BaseKVCacheManager*);
             *(void**) (&makeUcxCacheResponder) = load_sym(mWrapperLibHandle, "makeUcxCacheResponder");
             *(void**) (&makeUcxCacheRequester) = load_sym(mWrapperLibHandle, "makeUcxCacheRequester");
             mDataResponder = makeUcxCacheResponder(*mCacheState, worldConfig.getRank(), cacheManager);

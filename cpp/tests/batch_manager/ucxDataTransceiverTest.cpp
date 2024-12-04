@@ -500,7 +500,6 @@ protected:
             auto constexpr maxBlocksPerSeq = 10;
             auto constexpr maxBeamWidth = 4;
             auto constexpr sinkTokenLength = 0;
-            auto constexpr useOneMoreBlock = false;
             mMaxNumSequences = 8;
             auto const stream = std::make_shared<tr::CudaStream>();
             mCacheState = std::make_unique<tle::kv_cache::CacheState>(
@@ -508,6 +507,7 @@ protected:
 
             auto constexpr maxNumTokens = tokensPerBlock * maxBlocksPerSeq;
             auto constexpr maxAttentionWindow = maxNumTokens;
+            auto constexpr temporaryAttentionWindow = 0;
             auto constexpr inputLength = maxNumTokens - tokensPerBlock - 1;
             auto constexpr numSharedBlocks = inputLength / tokensPerBlock;
             auto constexpr numBlocksPerSeq = numSharedBlocks + (maxBlocksPerSeq - numSharedBlocks) * maxBeamWidth;
@@ -521,7 +521,7 @@ protected:
 
             mManager = std::make_unique<KVCacheManager>(numLayers, numHeads, sizePerHead, tokensPerBlock,
                 totalNumBlocks, blocksInSecondaryPool, mMaxNumSequences, maxBeamWidth, maxAttentionWindow,
-                sinkTokenLength, useOneMoreBlock, stream, enableBlockReuse, onboardBlocks);
+                temporaryAttentionWindow, sinkTokenLength, stream, std::nullopt, enableBlockReuse, onboardBlocks);
 
             // UVM seems to be incompatible with MPI, and it is continuing to investigate.
             bool constexpr useUvm = false;

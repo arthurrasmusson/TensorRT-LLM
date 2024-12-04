@@ -25,6 +25,7 @@ set(SRCS
     decoderBuffers.cpp
     encoderBuffers.cpp
     GptManager.cpp
+    guidedDecoder.cpp
     kvCacheUtils.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
@@ -51,6 +52,11 @@ set(SRCS
     utils/staticThreadPool.cpp
     evictionPolicy.cpp)
 
+file(GLOB_RECURSE XGRAMMAR_SRCS "${3RDPARTY_DIR}/xgrammar/cpp/*.cc")
+list(FILTER XGRAMMAR_SRCS EXCLUDE REGEX
+     "${3RDPARTY_DIR}/xgrammar/cpp/pybind/.*\\.cc")
+list(APPEND SRCS ${XGRAMMAR_SRCS})
+
 if(NOT WIN32)
   # additional warnings
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
@@ -64,6 +70,11 @@ else() # Windows
 endif()
 
 add_library(${BATCH_MANAGER_STATIC_TARGET} STATIC ${SRCS})
+target_include_directories(
+  ${BATCH_MANAGER_STATIC_TARGET}
+  PUBLIC ${3RDPARTY_DIR}/xgrammar/3rdparty/picojson
+         ${3RDPARTY_DIR}/xgrammar/3rdparty/dlpack/include
+         ${3RDPARTY_DIR}/xgrammar/include)
 
 set_target_properties(
   ${BATCH_MANAGER_STATIC_TARGET}

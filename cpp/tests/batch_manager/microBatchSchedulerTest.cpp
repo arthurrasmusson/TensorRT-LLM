@@ -21,9 +21,8 @@
 
 using namespace tensorrt_llm::runtime;
 using namespace tensorrt_llm::batch_manager;
-using namespace tensorrt_llm::batch_manager;
 using namespace tensorrt_llm::batch_manager::batch_scheduler;
-namespace tle = tensorrt_llm::executor;
+using namespace tensorrt_llm::executor;
 
 using RequestTable = std::map<RequestIdType, std::shared_ptr<LlmRequest>>;
 using CudaStreamPtr = std::shared_ptr<tensorrt_llm::runtime::CudaStream>;
@@ -192,7 +191,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxNumTokens)
     constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
     constexpr SizeType32 maxNumTokens = 7;
     constexpr SizeType32 chunkUnitSize = 5;
-    constexpr tle::ContextChunkingPolicy ctxChunkPolicy{tle::ContextChunkingPolicy::kEQUAL_PROGRESS};
+    constexpr ContextChunkingPolicy ctxChunkPolicy{ContextChunkingPolicy::kEQUAL_PROGRESS};
 
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
@@ -282,7 +281,7 @@ TEST_F(MicroBatchSchedulerTest, SimpleNoOverlapMaxContextLength)
     constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
     constexpr SizeType32 chunkUnitSize = 5;
     constexpr SizeType32 maxContextLength = 12;
-    tle::ContextChunkingPolicy ctxChunkPolicy{tle::ContextChunkingPolicy::kEQUAL_PROGRESS};
+    ContextChunkingPolicy ctxChunkPolicy{ContextChunkingPolicy::kEQUAL_PROGRESS};
 
     mNumContexts = 1;
     mContextRequests.resize(mNumContexts);
@@ -658,7 +657,7 @@ TEST_F(MicroBatchSchedulerTest, GenDraftTokensMaxNumTokens)
 class ContextChunkingTest : public MicroBatchSchedulerTest
 {
 protected:
-    using Policy = tle::ContextChunkingPolicy;
+    using Policy = ContextChunkingPolicy;
 
     ~ContextChunkingTest()
     {

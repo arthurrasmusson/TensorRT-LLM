@@ -48,8 +48,8 @@ void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::Buff
 void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, LlmRequest& llmReq);
 
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmRequest, SizeType32 maxInputLen,
-    OptionalRef<kv_cache_manager::KVCacheManager> kvCacheManager = std::nullopt,
-    OptionalRef<kv_cache_manager::KVCacheManager> crossKvCacheManager = std::nullopt,
+    OptionalRef<kv_cache_manager::BaseKVCacheManager> kvCacheManager = std::nullopt,
+    OptionalRef<kv_cache_manager::BaseKVCacheManager> crossKvCacheManager = std::nullopt,
     OptionalRef<BasePeftCacheManager> peftCacheManager = std::nullopt, bool pause = false);
 
 class CudaGraphExecutor

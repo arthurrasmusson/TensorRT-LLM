@@ -249,6 +249,41 @@ void DecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, bool
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void DecoderBuffers::bcast(std::shared_ptr<mpi::MpiComm> const& commSession, bool const returnLogProbs,
+    SizeType32 const maxBeamWidth, bool const useMedusa, int const root)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("start bcast outputs of DecoderBuffers from rank %d", root);
+
+    auto request1 = commSession->bcastAsync(*newOutputTokensHost, root);
+    auto request2 = commSession->bcastAsync(*finished, root);
+    auto request3 = commSession->bcastAsync(*sequenceLengthsHost, root);
+    auto request4 = returnLogProbs ? commSession->bcastAsync(*cumLogProbsHost, root) : nullptr;
+    auto request5 = returnLogProbs ? commSession->bcastAsync(*logProbsHost, root) : nullptr;
+    auto request6 = maxBeamWidth > 1 ? commSession->bcastAsync(*cacheIndirectionOutput, root) : nullptr;
+    auto request7 = useMedusa ? commSession->bcastAsync(*draftBuffers.acceptedLengthsCumSumDevice, root) : nullptr;
+    auto request8 = useMedusa ? commSession->bcastAsync(*draftBuffers.acceptedPackedPathsDevice, root) : nullptr;
+    auto request9 = commSession->bcastAsync(*finishReasonsHost, root);
+
+    request1->wait();
+    request2->wait();
+    request3->wait();
+    if (request4)
+        request4->wait();
+    if (request5)
+        request5->wait();
+    if (request6)
+        request6->wait();
+    if (request7)
+        request7->wait();
+    if (request8)
+        request8->wait();
+    request9->wait();
+
+    TLLM_LOG_DEBUG("end bcast outputs of DecoderBuffers from rank %d", root);
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 std::unique_ptr<DecoderSlotAsyncSend> SlotDecoderBuffers::asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
     TensorPtr const& outputIdsView, TensorPtr const& sequenceLengthView, TensorPtr const& cumLogProbsView,
     TensorPtr const& logProbsView, bool const returnLogProbs, int const peer)

@@ -93,8 +93,8 @@ private:
     static runtime::WorldConfig getWorldConfig(
         runtime::GptJsonConfig const& json, std::optional<std::vector<SizeType32>> const& deviceIds)
     {
-        return runtime::WorldConfig::mpi(
-            json.getGpusPerNode(), json.getTensorParallelism(), json.getPipelineParallelism(), deviceIds);
+        return runtime::WorldConfig::mpi(json.getGpusPerNode(), json.getTensorParallelism(),
+            json.getPipelineParallelism(), json.getContextParallelism(), deviceIds);
     }
 };
 

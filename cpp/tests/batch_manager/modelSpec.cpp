@@ -245,6 +245,8 @@ std::string ModelSpec::getResultsFileInternal(OutputContentType outputContentTyp
 
     ret.emplace_back("pp" + std::to_string(mPPSize));
 
+    ret.emplace_back("cp" + std::to_string(mCPSize));
+
     if (mEnableContextFMHAFp32Acc)
     {
         ret.emplace_back("fmhafp32acc");
