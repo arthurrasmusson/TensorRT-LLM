@@ -75,5 +75,8 @@ void tensorrt_llm::batch_manager::AllocateKvCache::operator()(BaseKVCacheManager
             kvCacheManager.addToken(requestId);
         }
     }
+
+    kvCacheManager.refreshBlocks();
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }

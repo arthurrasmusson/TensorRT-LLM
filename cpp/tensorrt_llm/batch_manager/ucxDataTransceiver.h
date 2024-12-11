@@ -91,6 +91,11 @@ private:
 class UcxComm : public executor::kv_cache::Communicator
 {
 public:
+    [[nodiscard]] bool isThreadSafe() const noexcept override
+    {
+        return true;
+    }
+
     void sendBuffer(runtime::IBuffer const& buf, executor::kv_cache::DataContext const& context,
         executor::kv_cache::ProcessInfo const& processInfo) const override
     {
@@ -178,19 +183,19 @@ public:
         auto peerTargetRanks
             = tensorrt_llm::executor::kv_cache::targetIRanks(info.getTransState().getCacheState().value(),
                 mSelfState.getCacheState().value(), getCommState().getSelfIdx());
-        if (mRequestRemainSendCount.find(info.getRequestId()) == mRequestRemainSendCount.end()
-            || (mRequestRemainSendCount[info.getRequestId()] == 0))
+        auto const requestId = info.getRequestId();
+        if (mRequestToComms.find(requestId) == mRequestToComms.end())
         {
-            mRequestRemainSendCount[info.getRequestId()] = peerTargetRanks.size();
-            mRequestToComms.emplace(info.getRequestId(), std::vector<std::unique_ptr<UcxEndpoint>>());
-            mRequestToComms[info.getRequestId()].resize(mRequestRemainSendCount[info.getRequestId()]);
+            auto recvExpectCount = peerTargetRanks.size();
+            mRequestToComms.emplace(requestId, std::vector<std::unique_ptr<UcxEndpoint>>());
+            mRequestToComms[requestId].resize(recvExpectCount);
         }
         int peerIdx = std::distance(peerTargetRanks.begin(),
             std::find(
                 peerTargetRanks.begin(), peerTargetRanks.end(), info.getTransState().getCommState()->getSelfIdx()));
         TLLM_CHECK_WITH_INFO((peerIdx >= 0) && (peerIdx < static_cast<int>(peerTargetRanks.size())),
             "Peer idx should be found in peerTargetRanks");
-        mRequestToComms[info.getRequestId()].at(peerIdx) = std::move(comm);
+        mRequestToComms[requestId].at(peerIdx) = std::move(comm);
         return info;
     }
 
@@ -199,22 +204,6 @@ public:
         std::vector<executor::kv_cache::ProcessInfo> comms;
         {
             std::unique_lock<std::mutex> lk(mMtxForMap);
-            if (mRequestRemainSendCount.find(llmRequest.mRequestId) != mRequestRemainSendCount.end())
-            {
-                TLLM_CHECK_WITH_INFO(mRequestRemainSendCount[llmRequest.mRequestId] > 0,
-                    "sendSync KV cache with request id %ld count should > 0 but get %d ", llmRequest.mRequestId,
-                    mRequestRemainSendCount[llmRequest.mRequestId]);
-                mRequestRemainSendCount[llmRequest.mRequestId]--;
-            }
-            else
-            {
-                TLLM_THROW("Sender does not receive the requstInfo message before sending the data");
-            }
-            if (mRequestRemainSendCount[llmRequest.mRequestId] > 0)
-            {
-                return; // Wait until  the requests from all rank of the gen instance have been received.
-            }
-
             auto it = mRequestToComms.find(llmRequest.mRequestId);
             TLLM_CHECK_WITH_INFO(
                 (it != mRequestToComms.end()), "sendSync() must be called with request returned by recvRequestInfo().");
@@ -251,21 +240,16 @@ public:
         mSelfState.setCommState(std::move(commState));
     }
 
-    [[nodiscard]] bool availableRelease(LlmRequest const& llmRequest)
+    [[nodiscard]] size_t getCounterpartsCount(LlmRequest::RequestIdType requestId) const override
+    {
+        TLLM_CHECK(mRequestToComms.find(requestId) != mRequestToComms.end());
+        return mRequestToComms.at(requestId).size();
+    }
+
+    void release(LlmRequest::RequestIdType requestId) override
     {
         std::unique_lock<std::mutex> lk(mMtxForMap);
-
-        if (mRequestRemainSendCount.find(llmRequest.mRequestId) == mRequestRemainSendCount.end())
-        {
-            return true;
-        }
-        if (mRequestRemainSendCount[llmRequest.mRequestId] == 0)
-        {
-            mRequestRemainSendCount.erase(llmRequest.mRequestId);
-            mRequestToComms.erase(llmRequest.mRequestId);
-            return true;
-        }
-        return false;
+        mRequestToComms.erase(requestId);
     }
 
 private:
@@ -417,7 +401,6 @@ private:
     std::condition_variable mRequestCv;
     std::deque<std::unique_ptr<UcxEndpoint>> mIncomingRequests;
     std::map<LlmRequest::RequestIdType, std::vector<std::unique_ptr<UcxEndpoint>>> mRequestToComms;
-    std::unordered_map<LlmRequest::RequestIdType, int> mRequestRemainSendCount;
     std::mutex mMtxForMap;
 
     executor::DataTransceiverState mSelfState;

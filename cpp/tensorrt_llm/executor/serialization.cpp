@@ -40,9 +40,9 @@ void Serialization::serialize(RequestPerfMetrics::TimePoint const& tp, std::ostr
     su::serialize(std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count(), os);
 }
 
-size_t Serialization::serializedSize(RequestPerfMetrics::TimePoint const&)
+size_t Serialization::serializedSize(RequestPerfMetrics::TimePoint const& /*unused*/)
 {
-    return sizeof(uint64_t);
+    return sizeof(RequestPerfMetrics::TimePoint);
 }
 
 // RequestPerfMetrics
@@ -69,7 +69,7 @@ RequestPerfMetrics Serialization::deserializeRequestPerfMetrics(std::istream& is
         arrivalTime, firstScheduledTime, firstTokenTime, lastTokenTime, kvCacheTransferStart, kvCacheTransferEnd};
     RequestPerfMetrics::KvCacheMetrics kvCacheMetrics{
         numTotalAllocatedBlocks, numNewAllocatedBlocks, numReusedBlocks, numMissedBlocks, kvCacheHitRate};
-    return RequestPerfMetrics{std::move(timingMetrics), std::move(kvCacheMetrics), firstIter, lastIter, iter};
+    return RequestPerfMetrics{timingMetrics, kvCacheMetrics, firstIter, lastIter, iter};
 }
 
 void Serialization::serialize(RequestPerfMetrics const& metrics, std::ostream& os)
@@ -345,22 +345,23 @@ size_t Serialization::serializedSize(kv_cache::SocketState const& state)
 // CommState
 kv_cache::CommState Serialization::deserializeCommState(std::istream& is)
 {
-    using namespace kv_cache;
     auto selfIdx = su::deserialize<decltype(kv_cache::CommState::mSelfIdx)>(is);
     auto variantIdx = su::deserialize<std::size_t>(is);
-    constexpr std::size_t mpiIdx{1}, socketIdx{2};
-    static_assert(std::is_same_v<MpiState, std::variant_alternative_t<mpiIdx, decltype(CommState::mState)>>);
+    constexpr std::size_t mpiIdx{1};
+    constexpr std::size_t socketIdx{2};
     static_assert(
-        std::is_same_v<std::vector<SocketState>, std::variant_alternative_t<socketIdx, decltype(CommState::mState)>>);
+        std::is_same_v<kv_cache::MpiState, std::variant_alternative_t<mpiIdx, decltype(kv_cache::CommState::mState)>>);
+    static_assert(std::is_same_v<std::vector<kv_cache::SocketState>,
+        std::variant_alternative_t<socketIdx, decltype(kv_cache::CommState::mState)>>);
     if (variantIdx == mpiIdx)
     {
-        auto ranks = su::deserialize<decltype(MpiState::mRanks)>(is);
-        return CommState{std::move(ranks), selfIdx};
+        auto ranks = su::deserialize<decltype(kv_cache::MpiState::mRanks)>(is);
+        return kv_cache::CommState{std::move(ranks), selfIdx};
     }
-    else if (variantIdx == socketIdx)
+    if (variantIdx == socketIdx)
     {
-        auto state = su::deserialize<std::vector<SocketState>>(is);
-        return CommState{std::move(state), selfIdx};
+        auto state = su::deserialize<std::vector<kv_cache::SocketState>>(is);
+        return kv_cache::CommState{std::move(state), selfIdx};
     }
     return {};
 }
@@ -543,15 +544,19 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
     auto skipCrossAttnBlocks = su::deserialize<std::optional<Tensor>>(is);
     auto guidedDecodingParams = su::deserialize<std::optional<GuidedDecodingParams>>(is);
+    auto allottedTimeInt = su::deserialize<std::optional<std::chrono::milliseconds::rep>>(is);
+    auto allottedTimeMs = allottedTimeInt
+        ? std::optional<std::chrono::milliseconds>(std::chrono::milliseconds(*allottedTimeInt))
+        : std::nullopt;
 
     return Request(std::move(inputTokenIds), maxNewTokens, streaming, samplingConfig, outputConfig, endId, padId,
         std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
-        std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
+        lookaheadConfig, std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
         std::move(crossAttentionMask), numReturnSequences, std::move(eagleConfig), std::move(skipCrossAttnBlocks),
-        std::move(guidedDecodingParams));
+        std::move(guidedDecodingParams), allottedTimeMs);
 }
 
 void Serialization::serialize(Request const& request, std::ostream& os)
@@ -568,11 +573,11 @@ size_t Serialization::serializedSize(Request const& request)
 Tensor Serialization::deserializeTensor(std::istream& is)
 {
     // DataType
-    DataType dataType;
+    DataType dataType{};
     is.read(reinterpret_cast<char*>(&dataType), sizeof(dataType));
 
     // Shape
-    size_t shapeSize;
+    size_t shapeSize{0};
     is.read(reinterpret_cast<char*>(&shapeSize), sizeof(size_t));
     static constexpr int32_t MAX_DIMS{8};
     TLLM_CHECK(shapeSize < MAX_DIMS);
@@ -582,11 +587,11 @@ Tensor Serialization::deserializeTensor(std::istream& is)
     Shape shape(&dims[0], shapeSize);
 
     // Memory Type
-    MemoryType memoryType;
+    MemoryType memoryType{};
     is.read(reinterpret_cast<char*>(&memoryType), sizeof(memoryType));
 
     // Size in bytes
-    size_t sizeInBytes;
+    size_t sizeInBytes{0};
     is.read(reinterpret_cast<char*>(&sizeInBytes), sizeof(size_t));
 
     Tensor tensor;
@@ -716,26 +721,22 @@ size_t Serialization::serializedSize(SpeculativeDecodingFastLogitsInfo const& in
 // Result
 Result Serialization::deserializeResult(std::istream& is)
 {
-
-    auto isFinal = su::deserialize<bool>(is);
-    auto outputTokenIds = su::deserialize<BeamTokens>(is);
-    auto cumLogProbs = su::deserialize<std::optional<VecLogProbs>>(is);
-    auto logProbs = su::deserialize<std::optional<std::vector<VecLogProbs>>>(is);
-    auto contextLogits = su::deserialize<std::optional<Tensor>>(is);
-    auto generationLogits = su::deserialize<std::optional<Tensor>>(is);
-    auto specDecFastLogitsInfo = su::deserialize<std::optional<SpeculativeDecodingFastLogitsInfo>>(is);
-    auto encoderOutput = su::deserialize<std::optional<Tensor>>(is);
-    auto finishReasons = su::deserialize<std::vector<FinishReason>>(is);
-    auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
-    auto decodingIter = su::deserialize<SizeType32>(is);
-    auto sequenceIndex = su::deserialize<SizeType32>(is);
-    auto isSequenceFinal = su::deserialize<bool>(is);
-    auto requestPerfMetrics = su::deserialize<std::optional<RequestPerfMetrics>>(is);
-
-    return Result{isFinal, std::move(outputTokenIds), std::move(cumLogProbs), std::move(logProbs),
-        std::move(contextLogits), std::move(generationLogits), std::move(specDecFastLogitsInfo),
-        std::move(encoderOutput), std::move(finishReasons), std::move(contextPhaseParams), decodingIter, sequenceIndex,
-        isSequenceFinal, requestPerfMetrics};
+    Result result{};
+    result.isFinal = su::deserialize<bool>(is);
+    result.outputTokenIds = su::deserialize<BeamTokens>(is);
+    result.cumLogProbs = su::deserialize<std::optional<VecLogProbs>>(is);
+    result.logProbs = su::deserialize<std::optional<std::vector<VecLogProbs>>>(is);
+    result.contextLogits = su::deserialize<std::optional<Tensor>>(is);
+    result.generationLogits = su::deserialize<std::optional<Tensor>>(is);
+    result.specDecFastLogitsInfo = su::deserialize<std::optional<SpeculativeDecodingFastLogitsInfo>>(is);
+    result.encoderOutput = su::deserialize<std::optional<Tensor>>(is);
+    result.finishReasons = su::deserialize<std::vector<FinishReason>>(is);
+    result.contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
+    result.decodingIter = su::deserialize<SizeType32>(is);
+    result.sequenceIndex = su::deserialize<SizeType32>(is);
+    result.isSequenceFinal = su::deserialize<bool>(is);
+    result.requestPerfMetrics = su::deserialize<std::optional<RequestPerfMetrics>>(is);
+    return result;
 }
 
 void Serialization::serialize(Result const& result, std::ostream& os)
@@ -806,10 +807,10 @@ std::vector<Response> Serialization::deserializeResponses(std::vector<char>& buf
     std::vector<Response> responses;
     su::VectorWrapBuf<char> strbuf(buffer);
     std::istream is(&strbuf);
-    std::size_t numResponses = su::deserialize<std::size_t>(is);
+    auto numResponses = su::deserialize<std::size_t>(is);
     for (std::size_t resp = 0; resp < numResponses; ++resp)
     {
-        responses.emplace_back(std::move(Serialization::deserializeResponse(is)));
+        responses.emplace_back(Serialization::deserializeResponse(is));
     }
     return responses;
 }
@@ -826,7 +827,7 @@ std::vector<char> Serialization::serialize(std::vector<Response> const& response
 
     std::vector<char> buffer(totalSize);
     std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
-    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
     std::ostream os(&strbuf);
 
     su::serialize(responses.size(), os);
@@ -1568,15 +1569,15 @@ void Serialization::serialize(InflightBatchingStats const& inflightBatchingStats
     su::serialize(inflightBatchingStats.microBatchId, os);
 }
 
-size_t Serialization::serializedSize(InflightBatchingStats const& staticBatchingStats)
+size_t Serialization::serializedSize(InflightBatchingStats const& inflightBatchingStats)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(staticBatchingStats.numScheduledRequests);
-    totalSize += su::serializedSize(staticBatchingStats.numContextRequests);
-    totalSize += su::serializedSize(staticBatchingStats.numGenRequests);
-    totalSize += su::serializedSize(staticBatchingStats.numPausedRequests);
-    totalSize += su::serializedSize(staticBatchingStats.numCtxTokens);
-    totalSize += su::serializedSize(staticBatchingStats.microBatchId);
+    totalSize += su::serializedSize(inflightBatchingStats.numScheduledRequests);
+    totalSize += su::serializedSize(inflightBatchingStats.numContextRequests);
+    totalSize += su::serializedSize(inflightBatchingStats.numGenRequests);
+    totalSize += su::serializedSize(inflightBatchingStats.numPausedRequests);
+    totalSize += su::serializedSize(inflightBatchingStats.numCtxTokens);
+    totalSize += su::serializedSize(inflightBatchingStats.microBatchId);
     return totalSize;
 }
 
@@ -1686,7 +1687,7 @@ std::vector<char> Serialization::serialize(IterationStats const& iterStats)
     std::vector<char> buffer(totalSize);
 
     std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
-    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
     std::ostream os(&strbuf);
 
     Serialization::serialize(iterStats, os);
@@ -1717,7 +1718,7 @@ std::vector<char> Serialization::serialize(std::vector<IterationStats> const& it
     }
     std::vector<char> buffer(totalSize);
     std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
-    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
     std::ostream os(&strbuf);
     su::serialize(iterStatsVec.size(), os);
     for (auto const& iterStats : iterStatsVec)
@@ -1731,7 +1732,7 @@ std::vector<char> Serialization::serialize(std::vector<IterationStats> const& it
 
 DisServingRequestStats Serialization::deserializeDisServingRequestStats(std::istream& is)
 {
-    double kvCacheTransferMs = su::deserialize<double>(is);
+    auto kvCacheTransferMs = su::deserialize<double>(is);
     return DisServingRequestStats{kvCacheTransferMs};
 }
 
@@ -1755,15 +1756,15 @@ RequestStage Serialization::deserializeRequestStage(std::istream& is)
     return RequestStage{stage};
 }
 
-void Serialization::serialize(RequestStage const& stats, std::ostream& os)
+void Serialization::serialize(RequestStage const& requestStage, std::ostream& os)
 {
-    su::serialize(static_cast<int>(stats), os);
+    su::serialize(static_cast<int>(requestStage), os);
 }
 
-size_t Serialization::serializedSize(RequestStage const& stage)
+size_t Serialization::serializedSize(RequestStage const& requestStage)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(static_cast<int>(stage));
+    totalSize += su::serializedSize(static_cast<int>(requestStage));
     return totalSize;
 }
 
@@ -1855,7 +1856,7 @@ std::vector<char> Serialization::serialize(RequestStatsPerIteration const& state
     std::vector<char> buffer(totalSize);
 
     std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
-    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
     std::ostream os(&strbuf);
 
     Serialization::serialize(state, os);
@@ -1881,7 +1882,7 @@ std::vector<char> Serialization::serialize(std::vector<RequestStatsPerIteration>
     }
     std::vector<char> buffer(totalSize);
     std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
-    strbuf.pubsetbuf(&buffer[0], buffer.size());
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
     std::ostream os(&strbuf);
     su::serialize(requestStatsVec.size(), os);
     for (auto const& requestStat : requestStatsVec)

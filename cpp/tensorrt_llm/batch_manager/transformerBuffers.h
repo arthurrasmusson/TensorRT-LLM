@@ -40,33 +40,21 @@ public:
     using TensorMap = runtime::StringPtrMap<runtime::ITensor>;
     using KvCacheType = batch_manager::kv_cache_manager::CacheType;
 
-    static constexpr std::string_view kInputIdsTensorName = "input_ids";
-    static constexpr std::string_view kAttentionMaskTensorName = "attention_mask";
-    static constexpr std::string_view kCrossAttentionMaskTensorName = "cross_attention_mask";
-    static constexpr std::string_view kCrossAttentionPackedMaskTensorName = "cross_attention_packed_mask";
-    static constexpr std::string_view kPositionIdsTensorName = "position_ids";
-    static constexpr std::string_view kContextLengthsTensorName = "context_lengths";
-    static constexpr std::string_view kHostContextLengthsTensorName = "host_context_lengths";
-    static constexpr std::string_view kSequenceLengthsTensorName = "sequence_length";
-    static constexpr std::string_view kHiddenStatesInputTensorName = "hidden_states_input";
-    static constexpr std::string_view kHiddenStatesOutputTensorName = "hidden_states_output";
-    static constexpr std::string_view kLogitsTensorName = "logits";
-    static constexpr std::string_view kLastTokenIdsTensorName = "last_token_ids";
-    static constexpr std::string_view kCacheIndirectionsTensorName = "cache_indirection";
-    static constexpr std::string_view kHostPastKeyValueLengthsTensorName = "host_past_key_value_lengths";
-    static constexpr std::string_view kHostRequestTypesTensorName = "host_request_types";
-    static constexpr std::string_view kHostSinkTokenLengthTensorName = "host_sink_token_length";
-    static constexpr std::string_view kHostMaxAttentionWindowSizesTensorName = "host_max_attention_window_sizes";
-    static constexpr std::string_view kHostContextProgressTensorName = "host_context_progress";
-    static constexpr std::string_view kKvCacheBlockOffsetsTensorName = "kv_cache_block_offsets";
-    static constexpr std::string_view kHostKvCacheBlockOffsetsTensorName = "host_kv_cache_block_offsets";
-    static constexpr std::string_view kHostKvCachePoolPointersTensorName = "host_kv_cache_pool_pointers";
-    static constexpr std::string_view kHostKvCachePoolMappingTensorName = "host_kv_cache_pool_mapping";
-    static constexpr std::string_view kCrossKvCacheBlockOffsetsTensorName = "cross_kv_cache_block_offsets";
-    static constexpr std::string_view kHostCrossKvCacheBlockOffsetsTensorName = "host_cross_kv_cache_block_offsets";
-    static constexpr std::string_view kHostCrossKvCachePoolPointersTensorName = "host_cross_kv_cache_pool_pointers";
-    static constexpr std::string_view kHostCrossKvCachePoolMappingTensorName = "host_cross_kv_cache_pool_mapping";
-    static constexpr std::string_view kSkipCrossAttentionBlocksTensorName = "skip_cross_attn_blocks";
+    static constexpr auto kCrossAttentionMaskTensorName = "cross_attention_mask";
+    static constexpr auto kCrossAttentionPackedMaskTensorName = "cross_attention_packed_mask";
+    static constexpr auto kPositionIdsTensorName = "position_ids";
+    static constexpr auto kCacheIndirectionsTensorName = "cache_indirection";
+    static constexpr auto kHostPastKeyValueLengthsTensorName = "host_past_key_value_lengths";
+    static constexpr auto kHostSinkTokenLengthTensorName = "host_sink_token_length";
+    static constexpr auto kHostMaxAttentionWindowSizesTensorName = "host_max_attention_window_sizes";
+    static constexpr auto kHostContextProgressTensorName = "host_context_progress";
+    static constexpr auto kKvCacheBlockOffsetsTensorName = "kv_cache_block_offsets";
+    static constexpr auto kHostKvCacheBlockOffsetsTensorName = "host_kv_cache_block_offsets";
+    static constexpr auto kCrossKvCacheBlockOffsetsTensorName = "cross_kv_cache_block_offsets";
+    static constexpr auto kHostCrossKvCacheBlockOffsetsTensorName = "host_cross_kv_cache_block_offsets";
+    static constexpr auto kHostCrossKvCachePoolPointersTensorName = "host_cross_kv_cache_pool_pointers";
+    static constexpr auto kHostCrossKvCachePoolMappingTensorName = "host_cross_kv_cache_pool_mapping";
+    static constexpr auto kSkipCrossAttentionBlocksTensorName = "skip_cross_attn_blocks";
 
     TensorPtr pastKeyValueLengths; // Host tensor
     TensorPtr positionIds;

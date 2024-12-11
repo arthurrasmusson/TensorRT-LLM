@@ -31,14 +31,15 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     float priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
     std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
     std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
-    std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams)
+    std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
+    std::optional<MillisecondsType> allottedTimeMs)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         std::move(lookaheadConfig), std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
-        numReturnSequences, eagleConfig, skipCrossAttnBlocks, std::move(guidedDecodingParams)))
+        numReturnSequences, eagleConfig, skipCrossAttnBlocks, std::move(guidedDecodingParams), allottedTimeMs))
 {
 }
 
@@ -171,6 +172,11 @@ std::optional<IdType> Request::getClientId() const
 PriorityType Request::getPriority() const
 {
     return mImpl->getPriority();
+}
+
+std::optional<MillisecondsType> Request::getAllottedTimeMs() const
+{
+    return mImpl->getAllottedTimeMs();
 }
 
 bool Request::getReturnAllGeneratedTokens() const
@@ -372,6 +378,11 @@ void Request::setSkipCrossAttnBlocks(Tensor skipCrossAttnBlocks)
 void Request::setGuidedDecodingParams(GuidedDecodingParams const& guidedDecodingParams)
 {
     mImpl->setGuidedDecodingParams(guidedDecodingParams);
+}
+
+void Request::setAllottedTimeMs(MillisecondsType allottedTimeMs)
+{
+    return mImpl->setAllottedTimeMs(allottedTimeMs);
 }
 
 } // namespace tensorrt_llm::executor

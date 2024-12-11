@@ -164,37 +164,34 @@ void CacheTransceiver::setContextState(LlmRequest* llmRequest)
 void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
 {
     TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
+    llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS;
     if (mResponderFutures.find(llmRequest) != mResponderFutures.end())
     {
+        if (llmRequest->getContextProgress() == nullptr)
+        {
+            TLLM_LOG_WARNING("Request %ld is already responding", llmRequest->mRequestId);
+        }
         return;
     }
     setContextState(llmRequest);
-    llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS;
     auto future = mDataResponder->respondAndSendAsync(*llmRequest);
     mResponderFutures.insert({llmRequest, std::move(future)});
 }
 
-// RequestVector are passed by value (move construct) to avoid dangling reference
-void CacheTransceiver::respondAndSendLayerWise(RequestVector requests, std::unique_ptr<ContextProgress> progress)
+void CacheTransceiver::respondAndSendLayerWise(
+    RequestVector const& requests, std::shared_ptr<ContextProgress> const& progress)
 {
-    // TODO: send layer-wise request early in gen instances, and check future here
-
-    int const numLayers = progress->getNumLayers();
-    TLLM_LOG_DEBUG("CacheTransceiver::respondAndSendLayerWise - expect %d layers", numLayers);
-    for (int i = 0; i < numLayers; i++)
+    for (auto& llmRequest : requests)
     {
-        TLLM_LOG_TRACE("CacheTransceiver::respondAndSendLayerWise - waiting kv cache for layer %d", i);
-        progress->wait(i);
-        // TODO: actually send the cache per request
-        for (auto& llmRequest : requests)
-        {
-            TLLM_CHECK(llmRequest);
-            TLLM_LOG_INFO("CacheTransceiver::respondAndSendLayerWise - sending kv cache for layer %d of request %zu", i,
-                llmRequest->mRequestId);
-            // TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
+        TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
+        TLLM_CHECK(mResponderFutures.find(llmRequest.get()) == mResponderFutures.end());
+        llmRequest->setContextProgress(progress);
+        TLLM_LOG_DEBUG("Request %ld is sending layer-wise", llmRequest->mRequestId);
 
-            // TODO: actually send the cache per request
-        }
+        llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_INIT_AND_TRANS;
+        setContextState(llmRequest.get());
+        auto future = mDataResponder->respondAndSendAsync(*llmRequest);
+        mResponderFutures.emplace(llmRequest.get(), std::move(future));
     }
 }
 

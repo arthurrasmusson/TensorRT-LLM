@@ -64,10 +64,8 @@ public:
         {
             return std::get<Result>(mErrOrResult);
         }
-        else
-        {
-            TLLM_THROW("Cannot get the result for a response with an error");
-        }
+
+        TLLM_THROW("Cannot get the result for a response with an error");
     }
 
     [[nodiscard]] std::string const& getErrorMsg() const
@@ -76,10 +74,8 @@ public:
         {
             return std::get<std::string>(mErrOrResult);
         }
-        else
-        {
-            TLLM_THROW("Cannot get the error message for a response without error");
-        }
+
+        TLLM_THROW("Cannot get the error message for a response without error");
     }
 
 private:

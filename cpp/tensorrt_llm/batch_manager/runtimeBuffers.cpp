@@ -30,7 +30,6 @@
 #include <algorithm>
 #include <iterator>
 #include <numeric>
-#include <utility>
 #include <vector>
 
 using namespace tensorrt_llm::runtime;
@@ -200,7 +199,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     if (worldConfig.isLastPipelineParallelRank())
     {
-        auto logitsType = engine.getTensorDataType("logits");
+        auto const logitsType = engine.getTensorDataType(batch_manager::RuntimeBuffers::kLogitsTensorName);
         logits = manager.emptyTensor(MemoryType::kGPU, logitsType);
     }
 
@@ -252,7 +251,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         && worldConfig.isLastPipelineParallelRank())
     {
         auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
-        auto const logitsType = engine.getTensorDataType("logits");
+        auto const logitsType = engine.getTensorDataType(batch_manager::RuntimeBuffers::kLogitsTensorName);
 
         cacheTransposedGenerationLogits = manager.gpu(
             ITensor::makeShape({maxBatchSize, maxBeamWidth, GENERATION_LOGITS_BUFFER_LENGTH, vocabSizePadded}),
@@ -482,7 +481,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             TLLM_CHECK_WITH_INFO(optMropeRotarySinCos->getShape().d[0] == mropeRotarySinCosSize,
                 "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
                 int(mropeRotarySinCosSize));
-            float* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
+            auto* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
             auto mropePositionDeltas = llmReq->getMropePositionDeltas().value();
             mropeRotarySinCosHost.insert(
                 mropeRotarySinCosHost.end(), mropeRotarySinCos, mropeRotarySinCos + mropeRotarySinCosSize);
@@ -899,29 +898,29 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     if (worldConfig.isLastPipelineParallelRank())
     {
         // feed a view to TensorRT runtime so reshaping does not change logits buffer
-        outputMap.insert_or_assign("logits", ITensor::view(logits));
+        outputMap.insert_or_assign(kLogitsTensorName, ITensor::view(logits));
     }
     else
     {
-        outputMap.insert_or_assign("hidden_states_output", hiddenStates);
+        outputMap.insert_or_assign(kHiddenStatesOutputTensorName, hiddenStates);
     }
 
     if (worldConfig.isFirstPipelineParallelRank())
     {
-        inputMap.insert_or_assign("input_ids", inputsIds);
+        inputMap.insert_or_assign(kInputIdsTensorName, inputsIds);
     }
     else
     {
-        inputMap.insert_or_assign("hidden_states_input", hiddenStates);
+        inputMap.insert_or_assign(kHiddenStatesInputTensorName, hiddenStates);
     }
 
-    inputMap.insert_or_assign("last_token_ids", lastTokenIdsDevice);
+    inputMap.insert_or_assign(kLastTokenIdsTensorName, lastTokenIdsDevice);
 
-    inputMap.insert_or_assign("host_request_types", requestTypes);
+    inputMap.insert_or_assign(kHostRequestTypesTensorName, requestTypes);
     // In the generation phase, we still pass context lengths.
-    inputMap.insert_or_assign("context_lengths", contextLengthsDevice);
-    inputMap.insert_or_assign("host_context_lengths", contextLengthsHost);
-    inputMap.insert_or_assign("sequence_length", sequenceLengthsDevice);
+    inputMap.insert_or_assign(kContextLengthsTensorName, contextLengthsDevice);
+    inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
+    inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
 
     if (modelConfig.useCrossAttention())
     {
@@ -931,15 +930,15 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     if (modelConfig.usePromptTuning())
     {
         auto const& promptTuningParams = promptTuningBuffers.mPromptTuningParams;
-        inputMap.insert_or_assign("prompt_embedding_table", promptTuningParams.embeddingTable);
-        inputMap.insert_or_assign("tasks", promptTuningParams.tasks);
-        inputMap.insert_or_assign("prompt_vocab_size", promptTuningParams.vocabSize);
+        inputMap.insert_or_assign(kPromptEmbeddingTableTensorName, promptTuningParams.embeddingTable);
+        inputMap.insert_or_assign(kTasksTensorName, promptTuningParams.tasks);
+        inputMap.insert_or_assign(kPromptVocabSizeTensorName, promptTuningParams.vocabSize);
     }
     if (modelConfig.useMrope())
     {
 
-        inputMap.insert_or_assign("mrope_rotary_sin_cos", mropeRotarySinCos);
-        inputMap.insert_or_assign("mrope_position_deltas", mropePositionDeltas);
+        inputMap.insert_or_assign(kMRopeRotarySinCosTensorName, mropeRotarySinCos);
+        inputMap.insert_or_assign(kMRopePositionDeltasTensorName, mropePositionDeltas);
     }
 
     if (modelConfig.useLoraPlugin())

@@ -58,4 +58,7 @@ runtime::ITensor::TensorMap storeIOTensors(executor::DebugConfig const& debugCon
     runtime::ITensor::SharedPtr const& requestIds, runtime::ITensor::TensorMap const& inputMap,
     runtime::ITensor::TensorMap const& outputMap, runtime::BufferManager const& manager);
 
+template <typename T>
+void writeBinArray(std::string const& filename, T const* tensor, const int64_t size, cudaStream_t stream);
+
 } // namespace tensorrt_llm::batch_manager::utils

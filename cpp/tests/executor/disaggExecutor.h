@@ -14,16 +14,9 @@
 #ifndef TOP_LEVEL_DIR
 #error "Define TOP_LEVEL_DIR"
 #endif
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <unordered_map>
 
-#include "modelSpec.h"
-#include "tensorrt_llm/batch_manager/trtGptModel.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
@@ -31,14 +24,6 @@
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestWithId.h"
 #include "tensorrt_llm/executor/types.h"
-#include "tensorrt_llm/executor/version.h"
-#include "tensorrt_llm/plugins/api/tllmPlugin.h"
-#include "tensorrt_llm/runtime/gptJsonConfig.h"
-#include "tensorrt_llm/runtime/iBuffer.h"
-#include "tensorrt_llm/runtime/iTensor.h"
-#include "tensorrt_llm/runtime/tllmLogger.h"
-#include "tensorrt_llm/runtime/utils/numpyUtils.h"
-#include "tests/utils/common.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -47,17 +32,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <functional>
-#include <numeric>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
-namespace tr = tensorrt_llm::runtime;
-namespace tb = tensorrt_llm::batch_manager;
-namespace tc = tensorrt_llm::common;
-
-using namespace tensorrt_llm::testing;
 using namespace tensorrt_llm::executor;
 using namespace tensorrt_llm::executor::disagg_executor;
 
@@ -173,6 +156,7 @@ public:
         , mWorldRanksInstances(participatIds)
         , mDeviceIdsThisInstance(participantDeviceIdsThisInstance)
         , mWorldRank(worldRank)
+        , mIsLeaderInstance(false)
         , mShutdown(false)
         , mWorldComm(tensorrt_llm::mpi::MpiComm::world())
 
@@ -182,13 +166,12 @@ public:
 
         auto world_size = mWorldComm.getSize();
         mRolesPerRank.resize(world_size);
-        mIsLeaderInstance = false;
+
         if (!mWorldRanksInstances.empty())
         {
             mIsLeaderInstance = mWorldRank == mWorldRanksInstances.front();
         };
 
-        // bool needExecutor = (!mIsController) || (mIsController && mIsLeaderInstance);
         bool needExecutor = (std::find(mWorldRanksInstances.begin(), mWorldRanksInstances.end(), worldRank)
             != mWorldRanksInstances.end());
         if (needExecutor)
@@ -205,7 +188,6 @@ public:
             executorConfigC.setParallelConfig(parallelConfig);
 
             mExecutor = std::make_unique<Executor>(modelPath, modelType, executorConfigC);
-            // mIsLeaderInstance = (COMM_SESSION.getRank() == 0);
         }
 
         mIsController = false;
@@ -256,11 +238,13 @@ public:
 
     {
         if (!mIsController)
+        {
             return {};
+        }
 
         std::vector<RequestWithId> requestWithIds;
         std::vector<IdType> reqIds;
-        for (auto req : llmRequests)
+        for (auto const& req : llmRequests)
         {
             IdType id = generatedControlId();
             reqIds.push_back(id);
@@ -319,12 +303,12 @@ public:
         return {};
     }
 
-    bool isContextRank()
+    bool isContextRank() const
     {
         return mIsContext;
     }
 
-    bool isGenerationRank()
+    bool isGenerationRank() const
     {
         return !mIsContext;
     }
@@ -371,8 +355,9 @@ public:
     {
 
         if (mIsController)
-
+        {
             shutDown();
+        }
 
         if (mIsLeaderInstance)
         {
@@ -453,7 +438,7 @@ private:
     std::vector<int> mDeviceIdsThisInstance;
     std::once_flag mHasSendTerminFlag;
 
-    void appendNewResponses(std::vector<ResponseWithId>&& newResponses)
+    void appendNewResponses(std::vector<ResponseWithId>& newResponses)
     {
         {
             std::scoped_lock<std::mutex> lck(mResponsesMtx);
@@ -462,7 +447,7 @@ private:
                 // global id to Result
                 responseWithId.response = Response(responseWithId.gid, responseWithId.response.getResult());
 
-                mResponses[responseWithId.gid].emplace_back(std::move(responseWithId.response));
+                mResponses[responseWithId.gid].emplace_back(responseWithId.response);
             }
         }
         mResponsesCv.notify_all();
@@ -537,7 +522,7 @@ private:
                 TLLM_LOG_DEBUG("controller get terminiation message in sendQueue");
                 break;
             }
-            else if (message.id == MessageID::PENDING_CONTEXT_REQUEST)
+            if (message.id == MessageID::PENDING_CONTEXT_REQUEST)
             {
 
                 auto& reqWithIds = std::get<RequestsData>(message.data);
@@ -583,13 +568,13 @@ private:
         while (!mShutdown)
         {
 
-            MPI_Message msg;
+            MPI_Message msg = nullptr;
             MPI_Status status;
 
             mWorldComm.mprobe(MPI_ANY_SOURCE, kM_INSTANCE_ID_TAG, &msg, &status);
 
             auto sourceRank{status.MPI_SOURCE};
-            int32_t count;
+            int32_t count = 0;
             MPICHECK(MPI_Get_count(&status, MPI_UINT64_T, &count));
             TLLM_CHECK(count == 1);
 
@@ -601,7 +586,7 @@ private:
                 TLLM_LOG_DEBUG("controller received termination message***************\n");
                 break;
             }
-            else if (messageId == MessageID::CONTEXT_RESPONSE)
+            if (messageId == MessageID::CONTEXT_RESPONSE)
             {
                 mWorldComm.mprobe(sourceRank, kM_INSTANCE_DATA_TAG, &msg, &status);
                 MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
@@ -632,7 +617,7 @@ private:
                 MPICHECK(MPI_Mrecv(buffer.data(), count, MPI_CHAR, &msg, &status));
 
                 auto responseWithIds = deserializeResponseWithIds(buffer);
-                appendNewResponses(std::move(responseWithIds));
+                appendNewResponses(responseWithIds);
             }
             else
             {
@@ -715,8 +700,7 @@ private:
                 shutDown();
                 break;
             }
-            else if (messageId == MessageID::PENDING_CONTEXT_REQUEST
-                || messageId == MessageID::PENDING_GENERATION_REQUEST)
+            if (messageId == MessageID::PENDING_CONTEXT_REQUEST || messageId == MessageID::PENDING_GENERATION_REQUEST)
             {
                 mWorldComm.mprobe(sourceRank, kM_CONTROLLER_DATA_TAG, &msg, &status);
                 MPICHECK(MPI_Get_count(&status, MPI_CHAR, &count));
@@ -744,7 +728,6 @@ private:
                     }
                 }
             }
-
             else
             {
                 TLLM_THROW("rank:%d, size:%d InstanceLeaderRecvThread send Invalid message id:%ld",

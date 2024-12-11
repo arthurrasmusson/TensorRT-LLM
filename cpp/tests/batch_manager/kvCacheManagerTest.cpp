@@ -16,10 +16,13 @@
 
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/kvCacheTransferManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/memoryUtils.h"
+#include "tensorrt_llm/kernels/kvCacheIndex.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 
 #include <algorithm>
@@ -2276,6 +2279,43 @@ TEST_F(KVCacheManagerTest, KVCacheManagerEventStreamBlocking)
     EXPECT_EQ(events.size(), 1);
 
     EXPECT_TRUE(std::holds_alternative<tle::KVCacheStoredData>(events.front().data));
+}
+
+TEST_F(KVCacheManagerTest, KVCacheTransferManagerConcurrencyTest)
+{
+    auto const blockSize = 16384;
+
+    auto bufferManager = tensorrt_llm::runtime::BufferManager(std::make_shared<tr::CudaStream>());
+    auto transferManager = KVCacheTransferManager(bufferManager);
+
+    auto pool = KVCacheBlockPool(0, 0, 0);
+
+    pool.primaryPtr = bufferManager.gpu(tr::ITensor::makeShape({1, blockSize}), nvinfer1::DataType::kFLOAT);
+    bufferManager.setZero(*pool.primaryPtr);
+
+    pool.secondaryPtr = tr::BufferManager::pinned(tr::ITensor::makeShape({1, blockSize}), nvinfer1::DataType::kFLOAT);
+
+    // Write some specific data into the cpu blocks.
+    for (int i = 0; i < blockSize; i++)
+    {
+        tr::bufferCast<float>(*pool.secondaryPtr)[i] = 1;
+    }
+
+    auto primaryBlock = std::make_shared<KVCacheBlock>(0, tensorrt_llm::kernels::KVCacheIndex(0, false));
+    auto secondaryBlock = std::make_shared<KVCacheBlock>(1, tensorrt_llm::kernels::KVCacheIndex(0, true));
+
+    transferManager.offload(primaryBlock, secondaryBlock, {pool});
+    primaryBlock->swapMemoryPoolBlockOffset(secondaryBlock);
+    transferManager.onboard(primaryBlock, secondaryBlock, {pool});
+    transferManager.syncTransfers();
+
+    transferManager.offload(primaryBlock, secondaryBlock, {pool});
+    bufferManager.getStream().synchronize();
+
+    for (int i = 0; i < blockSize; i++)
+    {
+        EXPECT_EQ(tr::bufferCast<float>(*pool.secondaryPtr)[i], 0);
+    }
 }
 
 TEST_P(KVCacheManagerTest, KVCacheManagerSinkTokenLengthTest)

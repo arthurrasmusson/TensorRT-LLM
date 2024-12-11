@@ -14,6 +14,7 @@
 
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/evictionPolicy.h"
+#include "tensorrt_llm/batch_manager/kvCacheTransferManager.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/logger.h"
@@ -289,6 +290,7 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
     , mCachedBlocksRoot{std::make_shared<KVCacheBlock>(-1, tk::KVCacheIndex{0})}
     , mCacheType{cacheType}
     , mEventManager(std::move(eventManager))
+    , mTransferManager{std::make_shared<KVCacheTransferManager>(mBufferManager)}
     , mAllocTotalBlocks{0}
     , mAllocNewBlocks{0}
     , mReusedBlocks{0}
@@ -426,7 +428,7 @@ BlockPtr BlockManager::getFreeBlock(
         mEvictionPolicy->claimBlock(block);
         // Offload block in primary memory before repurposing
         auto offloadBlock = std::get<0>(mEvictionPolicy->getFreeBlock(kSecondaryLevel));
-        copyBlock(block, offloadBlock);
+        mTransferManager->offload(block, offloadBlock, mPools);
         // swap linear block offsets (i.e. make block the offload block)
         block->swapMemoryPoolBlockOffset(offloadBlock);
 
@@ -478,36 +480,12 @@ void KVCacheManager::setOffsets(tk::KVCacheIndex* offsetsPtr, nvinfer1::Dims con
     }
 }
 
-ITensor::SharedPtr BlockManager::computeBlockPointer(std::shared_ptr<KVCacheBlock> block, SizeType32 poolIdx) const
-{
-    TLLM_CHECK_WITH_INFO(poolIdx < getNumPools(), "Pool index %d is out of bounds", poolIdx);
-    auto const& pool = mPools.at(poolIdx);
-    auto ptr = block->isPrimary() ? pool.primaryPtr : pool.secondaryPtr;
-    auto const blockOffset = block->getMemoryPoolBlockIndex();
-    ITensor::SharedPtr blockTensor{ITensor::slice(ptr, blockOffset, 1)};
-    return blockTensor;
-}
-
-//! \brief Copy content of src block to dst.
-void BlockManager::copyBlock(BlockPtr src, BlockPtr dst)
-{
-    // TODO: Replace computeBlockPointer with getKOrVBlockPointer calls
-    // block spans multiple pool - copy in each pool
-    auto const numPools = getNumPools();
-    for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
-    {
-        auto const srcPtr = computeBlockPointer(src, poolIdx);
-        auto dstPtr = computeBlockPointer(dst, poolIdx);
-        mBufferManager.copy(*srcPtr, *dstPtr);
-    }
-}
-
 void BlockManager::onboardBlock(BlockPtr offloadBlock)
 {
     if (mOnboardBlocks && !offloadBlock->isPrimary())
     {
         auto block = getFreeBlock();
-        copyBlock(offloadBlock, block);
+        mTransferManager->onboard(offloadBlock, block, mPools);
         // swap linear block offsets (i.e. make block the offload block and vice versa)
         offloadBlock->swapMemoryPoolBlockOffset(block);
 
@@ -643,6 +621,7 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
 void BlockManager::refreshBlocks()
 {
     mEvictionPolicy->refresh();
+    mTransferManager->syncTransfers();
 }
 
 void BlockManager::addSequence(

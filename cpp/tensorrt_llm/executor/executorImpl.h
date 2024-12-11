@@ -242,6 +242,12 @@ private:
     void requestWithIdLeaderThread();
     void cancelledRequestsLeaderThread();
 
+    /// @brief mark requests that have timed out before ever being executed as finished.
+    ///        uses cancellation based on communication mode.
+    ///
+    /// @param activeRequests [in] List of active requests to check for timeouts
+    void finishTimedOutRequests(RequestList const& activeRequests);
+
     // The model to execute
     std::shared_ptr<Model> mModel = nullptr;
     std::shared_ptr<Model> mEncoderModel = nullptr;

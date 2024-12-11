@@ -60,10 +60,10 @@ using namespace tensorrt_llm::testing;
 using namespace tensorrt_llm::executor;
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
-using tensorrt_llm::testing::ModelSpec;
 using tensorrt_llm::testing::KVCacheType;
-using tensorrt_llm::testing::QuantMethod;
+using tensorrt_llm::testing::ModelSpec;
 using tensorrt_llm::testing::OutputContentType;
+using tensorrt_llm::testing::QuantMethod;
 
 namespace
 {
@@ -71,7 +71,6 @@ namespace
 auto const TEST_RESOURCE_PATH = std::filesystem::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
 auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
 auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
-auto const GPT_XGRAMMAR_TOKENIZER_INFO_PATH = TEST_RESOURCE_PATH / "data" / "gpt2" / "xgrammar_tokenizer_info.json";
 auto const LLAMA_MODEL_PATH = ENGINE_PATH / "llama-7b-hf";
 auto const MEDUSA_MODEL_PATH = ENGINE_PATH / "vicuna-7b-medusa";
 auto const CHATGLM_MODEL_PATH = ENGINE_PATH / "chatglm-6b";
@@ -80,7 +79,9 @@ auto const CHATGLM3_MODEL_PATH = ENGINE_PATH / "chatglm3-6b";
 auto const GLM_MODEL_PATH = ENGINE_PATH / "glm-10b";
 auto const DATA_PATH = TEST_RESOURCE_PATH / "data";
 auto const GPT_DATA_PATH = DATA_PATH / "gpt2";
+auto const GPT_XGRAMMAR_TOKENIZER_INFO_PATH = GPT_DATA_PATH / "xgrammar_tokenizer_info.json";
 auto const LLAMA_DATA_PATH = DATA_PATH / "llama-7b-hf";
+auto const LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH = LLAMA_DATA_PATH / "xgrammar_tokenizer_info.json";
 auto const MEDUSA_DATA_PATH = DATA_PATH / "vicuna-7b-medusa";
 auto const CHATGLM_DATA_PATH = DATA_PATH / "chatglm-6b";
 auto const CHATGLM2_DATA_PATH = DATA_PATH / "chatglm2-6b";
@@ -741,10 +742,11 @@ using ParamStatsType = std::tuple<int, bool>;
 using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool, bool, int>;
 using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32>;
 using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
+using GuidedDecodingParamsType = std::tuple<std::string>;
 using DisaggParamsType = std::tuple<int, std::vector<std::string>, std::vector<std::vector<int>>,
     std::vector<std::vector<int>>, std::vector<int>, int>;
 
-// requestSize, beam_width
+using TimeoutTestParamsType = std ::tuple<std::string, bool>;
 
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
 {
@@ -820,6 +822,33 @@ std::string generateTestNameLogitsProc(testing::TestParamInfo<LogitsProcParamsTy
     if (replicated)
     {
         name.append("_Replicated");
+    }
+    return name;
+}
+
+std::string generateTestNameGuidedDecoding(testing::TestParamInfo<GuidedDecodingParamsType> const& info)
+{
+    auto const modelName = std::get<0>(info.param);
+    std::string name = "ExecutorTest";
+    name.append("_" + modelName);
+    return name;
+}
+
+std::string generateTestNameTimeoutTest(testing::TestParamInfo<TimeoutTestParamsType> const& info)
+{
+    auto const modelName = std::get<0>(info.param);
+    auto const& useOrchestratorMode = std::get<1>(info.param);
+
+    std::string name = "ExecutorTest";
+    name.append("_" + modelName);
+
+    if (useOrchestratorMode)
+    {
+        name.append("_OrchMode");
+    }
+    else
+    {
+        name.append("_LeaderMode");
     }
     return name;
 }
@@ -1017,6 +1046,14 @@ class EncDecParamsTest : public GptExecutorTest, public ::testing::WithParamInte
 };
 
 class LogitsProcParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<LogitsProcParamsType>
+{
+};
+
+class GuidedDecodingParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<GuidedDecodingParamsType>
+{
+};
+
+class TimeoutTest : public GptExecutorTest, public ::testing::WithParamInterface<TimeoutTestParamsType>
 {
 };
 
@@ -1649,7 +1686,6 @@ TEST_F(GptExecutorTest, GetLatestDebugTensors)
     EXPECT_LT(iter, mMaxWaitMs);
 
     auto stream = std::make_shared<tr::CudaStream>();
-    ;
 
     // Expect 5 non-empty iterations
     auto debugTensors = executor.getLatestDebugTensors();
@@ -1706,7 +1742,7 @@ TEST_P(ParamTest, SingleRequestDemo)
         = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
 
     // Enqueue the request
-    auto requestId = executor.enqueueRequest(std::move(request));
+    auto requestId = executor.enqueueRequest(request);
 
     // Get the new tokens
     VecTokens tokens;
@@ -1727,26 +1763,23 @@ TEST_P(ParamTest, SingleRequestDemo)
                     = "Request id " + std::to_string(requestId) + " failed with err " + response.getErrorMsg();
                 FAIL();
             }
+
+            auto result = response.getResult();
+            done = result.isFinal;
+            auto& newTokens = result.outputTokenIds.at(beamWidth - 1);
+            auto const expectedSize = streaming ? (beamWidth > 1 ? numResponses : 1)
+                                                : (maxNewTokens + (excludeInputFromOutput ? 0 : inputTokens.size()));
+            EXPECT_EQ(newTokens.size(), expectedSize);
+
+            if (streaming && beamWidth > 1)
+            {
+                // replace tokens
+                tokens = newTokens;
+            }
             else
             {
-                auto result = response.getResult();
-                done = result.isFinal;
-                auto& newTokens = result.outputTokenIds.at(beamWidth - 1);
-                auto const expectedSize = streaming
-                    ? (beamWidth > 1 ? numResponses : 1)
-                    : (maxNewTokens + (excludeInputFromOutput ? 0 : inputTokens.size()));
-                EXPECT_EQ(newTokens.size(), expectedSize);
-
-                if (streaming && beamWidth > 1)
-                {
-                    // replace tokens
-                    tokens = newTokens;
-                }
-                else
-                {
-                    // Append tokens
-                    tokens.insert(tokens.end(), newTokens.begin(), newTokens.end());
-                }
+                // Append tokens
+                tokens.insert(tokens.end(), newTokens.begin(), newTokens.end());
             }
         }
         ++iter;
@@ -2378,10 +2411,11 @@ void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool 
             }
             SizeType32 sliceOffset = returnAllGeneratedTokens ? 0 : numPredTokens - 1;
 
-            auto const& expectedGenerationLogitsSlice = std::shared_ptr(ITensor::slice(
-                expectedGenerationLogits, sliceOffset, numGeneratedToken)); // [numGeneratedToken, vocabSizePadded]
+            auto const& expectedGenerationLogitsSlice
+                = std::shared_ptr(ITensor::slice(expectedGenerationLogits, sliceOffset,
+                    numGeneratedToken)); // [numGeneratedToken, vocabSizePadded]
 
-            cudaDeviceSynchronize();                                        // Make sure the logits copy is complete.
+            cudaDeviceSynchronize();     // Make sure the logits copy is complete.
             EXPECT_TRUE(compareLogits(*expectedGenerationLogitsSlice, *outputGenerationLogits));
         }
         else
@@ -3566,28 +3600,26 @@ TEST_P(AllParamsTest, TokenComparison)
         // For llama model, only run for multiple GPUs
         // This is detected by setting an env variable when running the test
         char const* val = getenv("RUN_LLAMA_MULTI_GPU");
-        if (val == NULL)
+        if (val == nullptr)
         {
             GTEST_SKIP() << "Skipping Llama test";
         }
-        else
-        {
-            if (outConfig.returnLogProbs || outConfig.returnContextLogits || outConfig.returnGenerationLogits)
-            {
-                GTEST_SKIP() << "Skipping logits and log probs tests for mpi runs";
-            }
 
-            // Check that it was launched with right number of MPI ranks
-            if (!useOrchestratorMode && COMM_SESSION.getSize() != 4)
-            {
-                // No orchestrator, need worldSize to match TP*PP
-                FAIL() << "Leader mode and world size is not equal to 4";
-            }
-            else if (useOrchestratorMode && COMM_SESSION.getSize() != 1)
-            {
-                // No orchestrator, need worldSize to match TP*PP
-                FAIL() << "Orchestrator mode and World size is not equal to 1";
-            }
+        if (outConfig.returnLogProbs || outConfig.returnContextLogits || outConfig.returnGenerationLogits)
+        {
+            GTEST_SKIP() << "Skipping logits and log probs tests for mpi runs";
+        }
+
+        // Check that it was launched with right number of MPI ranks
+        if (!useOrchestratorMode && COMM_SESSION.getSize() != 4)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Leader mode and world size is not equal to 4";
+        }
+        if (useOrchestratorMode && COMM_SESSION.getSize() != 1)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Orchestrator mode and World size is not equal to 1";
         }
     }
 
@@ -3619,8 +3651,8 @@ TEST_P(AllParamsTest, TokenComparison)
     }
     auto executorConfig
         = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode, std::nullopt, std::move(participantIds));
-    runTest(modelPath, std::move(executorConfig), inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded,
-        beamResult, outConfig, isSpeculativeDecoding, mMaxWaitMs, returnAllGeneratedTokens, numReturnSequences, false);
+    runTest(modelPath, executorConfig, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
+        outConfig, isSpeculativeDecoding, mMaxWaitMs, returnAllGeneratedTokens, numReturnSequences, false);
 }
 
 TEST_F(GptExecutorTest, ChangeBwError)
@@ -3801,6 +3833,9 @@ TEST_F(GptExecutorTest, MaxSeqIdleMicrosecondsError)
     EXPECT_LT(iter, mMaxWaitMs);
 }
 
+void logitsProcessorMixedReqsTest(
+    std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs, bool replicated);
+
 TEST_P(LogitsProcParamsTest, All)
 {
     auto const modelName = std::get<0>(GetParam());
@@ -3846,12 +3881,10 @@ TEST_P(LogitsProcParamsTest, All)
         {
             GTEST_SKIP() << "Skipping multi-gpu logits post processor test";
         }
-        else
+
+        if (worldSize != 4)
         {
-            if (worldSize != 4)
-            {
-                FAIL() << "Leader mode and world size is not equal to 4";
-            }
+            FAIL() << "Leader mode and world size is not equal to 4";
         }
     }
     else
@@ -4071,6 +4104,80 @@ TEST_P(LogitsProcParamsTest, All)
             collectResponses(batchedExecutor);
             checkOutput();
         }
+    }
+
+    if (!batched)
+    {
+        logitsProcessorMixedReqsTest(modelDir, worldRank, mMaxWaitMs, replicated);
+    }
+}
+
+// Test for mixing requests with and without logits processor.
+void logitsProcessorMixedReqsTest(
+    std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs, bool replicated)
+{
+    std::string const logitsProcessorName = "dummy";
+    auto logitsPostProcessorFn = [&](IdType reqId, Tensor& logits, BeamTokens const& tokens, StreamPtr const& streamPtr,
+                                     std::optional<IdType> clientId)
+    {
+        // Dummy callback that does not modify logits
+        assert(!clientId.has_value());
+    };
+
+    LogitsPostProcessorConfig logitsProcConfig{
+        std::unordered_map<std::string, tensorrt_llm::executor::LogitsPostProcessor>{
+            {logitsProcessorName, logitsPostProcessorFn}},
+        std::nullopt, replicated};
+
+    // Create executor
+    SizeType32 beamWidth = 1;
+    auto executorConfig = ExecutorConfig(beamWidth);
+    executorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
+    std::filesystem::path modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / modelDir;
+    auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
+
+    if (worldRank == 0)
+    {
+        SizeType32 numRequests = 2;
+        SizeType32 promptLen = 5;
+
+        // First request with no LP and many output tokens
+        auto request1 = Request(VecTokens(promptLen, 1), 25);
+        // Second request with LP and few output tokens
+        auto request2 = Request(VecTokens(promptLen, 1), 5);
+        request2.setLogitsPostProcessorName(logitsProcessorName);
+
+        // Enqueue requests
+        auto reqId1 = executor.enqueueRequest(request1);
+        auto reqId2 = executor.enqueueRequest(request2);
+
+        // Wait for responses
+        int32_t numFinished = 0;
+        int iter = 0;
+        SizeType32 numResponses = 0;
+        while (numFinished < numRequests && iter < maxWaitMs)
+        {
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(waitTime);
+            for (auto& response : responses)
+            {
+                numResponses++;
+                if (!response.hasError())
+                {
+                    auto result = response.getResult();
+                    numFinished += result.isFinal;
+                }
+                else
+                {
+                    // Allow response with error only if awaitResponse processed a terminated request id
+                    std::string err = "ReqId " + std::to_string(response.getRequestId())
+                        + " has already been processed and was terminated.";
+                    EXPECT_EQ(response.getErrorMsg(), err);
+                }
+            }
+            ++iter;
+        }
+        EXPECT_LT(iter, maxWaitMs);
     }
 }
 
@@ -4942,6 +5049,10 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
 
                 for (auto const& llmReq : requestList)
                 {
+                    if (llmReq->mState == tb::LlmRequestState::kGENERATION_COMPLETE)
+                    {
+                        continue;
+                    }
                     // Don't add any tokens to simulate no output tokens
                     llmReq->addNewTokens({1});
                     llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
@@ -4998,6 +5109,13 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
             {
                 auto result = response.getResult();
                 done = result.isFinal;
+                if (done)
+                {
+                    for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+                    {
+                        EXPECT_EQ(result.finishReasons[beamIdx], FinishReason::kCANCELLED);
+                    }
+                }
             }
         }
         ++iter;
@@ -5040,6 +5158,10 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
             {
                 auto result = response.getResult();
                 done = result.isFinal;
+                if (done)
+                {
+                    EXPECT_EQ(result.finishReasons[0], FinishReason::kCANCELLED);
+                }
             }
         }
         ++iter;
@@ -5372,14 +5494,73 @@ TEST_F(GptExecutorTest, SingleRequestLora)
     EXPECT_EQ(tokens.size(), maxNewTokens);
 }
 
-TEST_F(GptExecutorTest, GuidedDecoding)
+TEST_P(GuidedDecodingParamsTest, All)
 {
+    auto const modelName = std::get<0>(GetParam());
+    std::filesystem::path enginePath;
+    std::filesystem::path tokenizerInfoPath;
+    int tp_size = 1, pp_size = 1, cp_size = 1;
+    if (modelName == "gpt")
+    {
+        enginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        tokenizerInfoPath = GPT_XGRAMMAR_TOKENIZER_INFO_PATH;
+    }
+    else if (modelName == "llama_tp1_pp1_cp1")
+    {
+        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
+    }
+    else if (modelName == "llama_tp4_pp1_cp1")
+    {
+        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+        tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
+        tp_size = 4;
+    }
+    else if (modelName == "llama_tp1_pp4_cp1")
+    {
+        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+        tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
+        pp_size = 4;
+    }
+    else if (modelName == "llama_tp2_pp2_cp1")
+    {
+        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+        tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
+        tp_size = 2;
+        pp_size = 2;
+    }
+    else
+    {
+        TLLM_THROW("Unrecognized modelName");
+    }
+
+    auto& comm = tensorrt_llm::mpi::MpiComm::world();
+    auto const worldRank = comm.getRank();
+    auto const worldSize = comm.getSize();
+
+    if (tp_size * pp_size * cp_size > 1)
+    {
+        // Run multi GPU test only when env variable is set
+        char const* val = getenv("RUN_LLAMA_MULTI_GPU");
+        if (val == NULL)
+        {
+            GTEST_SKIP() << "Skipping multi-gpu guided decoding test";
+        }
+        else
+        {
+            if (worldSize != 4)
+            {
+                FAIL() << "Leader mode and world size is not equal to 4";
+            }
+        }
+    }
+
     bool streaming = false;
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
 
-    auto const tokenizerInfo = nlohmann::json::parse(std::ifstream{GPT_XGRAMMAR_TOKENIZER_INFO_PATH});
+    auto const tokenizerInfo = nlohmann::json::parse(std::ifstream{tokenizerInfoPath});
     auto const encodedVocab = tokenizerInfo["encoded_vocab"].template get<std::vector<std::string>>();
     auto const tokenizerStr = tokenizerInfo["tokenizer_str"].template get<std::string>();
     auto const stopTokenIds = tokenizerInfo["stop_token_ids"].template get<std::vector<TokenIdType>>();
@@ -5387,78 +5568,101 @@ TEST_F(GptExecutorTest, GuidedDecoding)
         GuidedDecodingConfig::GuidedDecodingBackend::kXGRAMMAR, encodedVocab, tokenizerStr, stopTokenIds);
     executorConfig.setGuidedDecodingConfig(guidedDecodingConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-    auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
+    auto executor = Executor(enginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
+    VecTokens inputTokens;
+    if (modelName == "gpt")
+    {
+        inputTokens = {2061, 318, 352, 10, 16, 30, 23998, 39559, 287, 257, 8633, 287, 33918, 5794, 25, 220};
+    }
+    else // llama
+    {
+        inputTokens = {
+            1, 1724, 338, 29871, 29896, 29974, 29896, 29973, 673, 20917, 297, 263, 9657, 297, 4390, 3402, 29901, 29871};
+    }
     SizeType32 maxNewTokens = 10;
     texec::SamplingConfig samplingConfig{};
     texec::OutputConfig outputConfig{false, false, false, true};
-    VecTokens inputTokens{2061, 318, 352, 10, 16, 30, 23998, 39559, 287, 257, 8633, 287, 33918, 5794, 25, 220};
 
     std::vector<Request> requests;
-    std::vector<VecTokens> expectedOutputTokens;
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
-    expectedOutputTokens.push_back({1849, 7, 16, 10, 16, 8, 198, 16, 10, 16});
 
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
     requests.back().setGuidedDecodingParams(GuidedDecodingParams(GuidedDecodingParams::GuideType::kJSON));
-    expectedOutputTokens.push_back({90, 366, 3672, 1298, 366, 7554, 31780, 1600, 366, 12888});
 
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
     std::string jsonSchema{
         R"({"properties": {"answer": {"title": "Answer", "type": "integer"}}, "required": ["answer"], "title": "Answer", "type": "object"})"};
     requests.back().setGuidedDecodingParams(
         GuidedDecodingParams(GuidedDecodingParams::GuideType::kJSON_SCHEMA, jsonSchema));
-    expectedOutputTokens.push_back({90, 1, 64, 77, 2032, 68, 81, 1298, 352, 92});
 
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
     std::string regex{R"(\d+)"};
     requests.back().setGuidedDecodingParams(GuidedDecodingParams(GuidedDecodingParams::GuideType::kREGEX, regex));
-    expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
 
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
     std::string ebnfGrammar{R"(root ::= [0-9]+)"};
     requests.back().setGuidedDecodingParams(
         GuidedDecodingParams(GuidedDecodingParams::GuideType::kEBNF_GRAMMAR, ebnfGrammar));
-    expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
 
-    // Enqueue the requests
-    auto reqIds = executor.enqueueRequests(std::move(requests));
-
-    // Get the responses
-    int numFinished = 0;
-    int iter = 0;
-    while (numFinished < 5 && iter < mMaxWaitMs)
+    std::vector<VecTokens> expectedOutputTokens;
+    if (modelName == "gpt")
     {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(waitTime);
-        for (auto& response : responses)
-        {
-            auto reqId = response.getRequestId();
-            if (response.hasError())
-            {
-                // This request failed for some reason, get error msg
-                std::string errStr
-                    = "Request id " + std::to_string(reqId) + " failed with err " + response.getErrorMsg();
-                FAIL();
-            }
-            else
-            {
-                auto result = response.getResult();
-                auto& newTokens = result.outputTokenIds.at(0);
-
-                int reqIdx = std::find(reqIds.begin(), reqIds.end(), reqId) - reqIds.begin();
-                for (int i = 0; i < maxNewTokens; i++)
-                {
-                    EXPECT_EQ(newTokens[i], expectedOutputTokens[reqIdx][i]);
-                }
-            }
-            numFinished++;
-        }
+        expectedOutputTokens.push_back({1849, 7, 16, 10, 16, 8, 198, 16, 10, 16});
+        expectedOutputTokens.push_back({90, 366, 3672, 1298, 366, 7554, 31780, 1600, 366, 12888});
+        expectedOutputTokens.push_back({90, 1, 64, 77, 2032, 68, 81, 1298, 352, 92});
+        expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
+        expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
     }
-    EXPECT_LT(iter, mMaxWaitMs);
-    EXPECT_EQ(numFinished, 5);
+    else // llama
+    {
+        expectedOutputTokens.push_back({29896, 29974, 29896, 29922, 29906, 13, 5618, 338, 29871, 29896});
+        expectedOutputTokens.push_back({6377, 29896, 1115, 376, 29896, 613, 376, 29896, 29974, 29896});
+        expectedOutputTokens.push_back({6377, 29874, 1983, 29893, 29872, 29878, 1115, 29871, 29896, 29913});
+        expectedOutputTokens.push_back({29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896});
+        expectedOutputTokens.push_back({29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896, 29896});
+    }
+
+    if (executor.canEnqueueRequests())
+    {
+        // Enqueue the requests
+        auto reqIds = executor.enqueueRequests(std::move(requests));
+
+        // Get the responses
+        int numFinished = 0;
+        int iter = 0;
+        while (numFinished < 5 && iter < mMaxWaitMs)
+        {
+            std::chrono::milliseconds waitTime(1);
+            auto responses = executor.awaitResponses(waitTime);
+            for (auto& response : responses)
+            {
+                auto reqId = response.getRequestId();
+                if (response.hasError())
+                {
+                    // This request failed for some reason, get error msg
+                    std::string errStr
+                        = "Request id " + std::to_string(reqId) + " failed with err " + response.getErrorMsg();
+                    FAIL();
+                }
+                else
+                {
+                    auto result = response.getResult();
+                    auto& newTokens = result.outputTokenIds.at(0);
+
+                    int reqIdx = std::find(reqIds.begin(), reqIds.end(), reqId) - reqIds.begin();
+                    for (int i = 0; i < maxNewTokens; i++)
+                    {
+                        EXPECT_EQ(newTokens[i], expectedOutputTokens[reqIdx][i]);
+                    }
+                }
+                numFinished++;
+            }
+        }
+        EXPECT_LT(iter, mMaxWaitMs);
+        EXPECT_EQ(numFinished, 5);
+    }
 }
 
 TEST_F(GptExecutorTest, GuidedDecodingFailure)
@@ -5555,6 +5759,14 @@ TEST_P(ParamTest, SingleRequestCancelRequest)
                 done = result.isFinal;
                 // Append tokens
                 auto& newTokens = result.outputTokenIds.at(beamWidth - 1);
+                if (done)
+                {
+                    for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
+                    {
+                        EXPECT_EQ(result.finishReasons[beamIdx], FinishReason::kCANCELLED);
+                    }
+                }
+
                 if (streaming && beamWidth > 1)
                 {
                     tokens = newTokens;
@@ -5940,6 +6152,359 @@ TEST_F(GptExecutorTest, validateParallelConfig)
     }
 }
 
+TEST_P(TimeoutTest, TimeoutStreamingTest)
+{
+    auto const modelName = std::get<0>(GetParam());
+    auto const useOrchestratorMode = std::get<1>(GetParam());
+    SizeType32 constexpr beamWidth = 2;
+
+    auto executorConfig = ExecutorConfig(beamWidth);
+    std::filesystem::path modelPath;
+    bool isMultiGpu{false};
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1")
+    {
+        isMultiGpu = true;
+        if (modelName == "llama_tp4_pp1_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+        }
+        else if (modelName == "llama_tp1_pp4_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+        }
+        else if (modelName == "llama_tp2_pp2_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+        }
+    }
+    if (modelName == "llama_tp1_pp1_cp1")
+    {
+        modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    }
+    // For llama model, only run for multiple GPUs
+    // This is detected by setting an env variable when running the test
+    char const* val = getenv("RUN_LLAMA_MULTI_GPU");
+    if (val == NULL && isMultiGpu)
+    {
+        GTEST_SKIP() << "Skipping MultiGpu tests";
+    }
+    else
+    {
+        if (!isMultiGpu && !useOrchestratorMode)
+        {
+            GTEST_SKIP() << "Leader mode on single GPU crashes";
+        }
+        // Check that it was launched with right number of MPI ranks
+        if (!useOrchestratorMode && COMM_SESSION.getSize() != 4)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Leader mode and world size is not equal to 4";
+        }
+        else if (useOrchestratorMode && COMM_SESSION.getSize() != 1)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Orchestrator mode and World size is not equal to 1";
+        }
+    }
+
+    if (useOrchestratorMode)
+    {
+        auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
+            useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt,
+            std::nullopt, orchestratorConfig);
+        executorConfig.setParallelConfig(parallelConfig);
+    }
+    auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
+
+    SizeType32 constexpr maxNewTokens = 50;
+    // create 1 request that times out immediately
+    // momentarily we don't cancel requests before forwardAsync so it will get scheduled for at least 1 forward
+    VecTokens immediateCancelTokens{1, 2, 3, 4};
+    auto immediateCancelRequest
+        = Request(immediateCancelTokens, maxNewTokens, true, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    immediateCancelRequest.setReturnAllGeneratedTokens(true);
+    immediateCancelRequest.setAllottedTimeMs(std::chrono::milliseconds(0));
+    SizeType32 constexpr immediateCancelMinLength = 0;
+    SizeType32 constexpr immediateCancelMaxLength = 1;
+
+    // create 1 request that times out during the first forward
+    VecTokens oneForwardTokens{11, 12, 13, 14};
+    auto oneForwardRequest
+        = Request(oneForwardTokens, maxNewTokens, true, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    oneForwardRequest.setReturnAllGeneratedTokens(true);
+    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(3));
+    SizeType32 constexpr oneForwardlMinLength = 0;
+    SizeType32 constexpr oneForwardlMaxLength = 1;
+
+    // Create the request that finishes by the number of tokens
+    VecTokens finishedTokens{101, 102, 103, 104};
+    auto finishedRequest
+        = Request(finishedTokens, maxNewTokens, true, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    finishedRequest.setReturnAllGeneratedTokens(true);
+    finishedRequest.setAllottedTimeMs(std::chrono::milliseconds(5000));
+    SizeType32 constexpr finishedMinLength = 30;
+    SizeType32 constexpr finishedMaxLength = maxNewTokens + 1;
+
+    std::vector<FinishReason> referenceFinishReasons
+        = {FinishReason::kTIMED_OUT, FinishReason::kTIMED_OUT, FinishReason::kLENGTH};
+    std::vector<SizeType32> minLengths = {immediateCancelMinLength, oneForwardlMinLength, finishedMinLength};
+    std::vector<SizeType32> maxLengths = {immediateCancelMaxLength, oneForwardlMaxLength, finishedMaxLength};
+    // workaround because the last response will be empty, but we want to have at least *some* responses surpass the
+    // minLength
+    std::vector<SizeType32> achievedLength = {0, 0, 0};
+    SizeType32 itNr{0};
+
+    if (executor.canEnqueueRequests())
+    {
+
+        std::vector<Request> requests = {immediateCancelRequest, oneForwardRequest, finishedRequest};
+        auto requestIds = executor.enqueueRequests(requests);
+
+        auto numFinished = 0;
+
+        while (numFinished < static_cast<SizeType32>(requests.size()))
+        {
+            itNr++;
+            std::chrono::milliseconds waitTime(mMaxWaitMs);
+            auto responses = executor.awaitResponses(requestIds, waitTime);
+            for (auto const& response : responses)
+            {
+                for (auto const& responseIt : response)
+                {
+                    auto const reqId = responseIt.getRequestId();
+                    if (responseIt.hasError())
+                    {
+                        // Allow response with error only if awaitResponse processed a terminated request id
+                        std::string err
+                            = "ReqId " + std::to_string(reqId) + " has already been processed and was terminated.";
+                        if (responseIt.getErrorMsg() != err)
+                        {
+                            TLLM_THROW("Request id %lu encountered error: %s", reqId, responseIt.getErrorMsg().c_str());
+                        }
+                        continue;
+                    }
+
+                    auto const& result = responseIt.getResult();
+                    if (result.isFinal)
+                    {
+                        numFinished++;
+                    }
+
+                    auto const finishReason = result.finishReasons;
+                    auto const actualResponse = result.outputTokenIds;
+                    TLLM_LOG_DEBUG("reqId %d finished %d", reqId, result.isFinal);
+                    TLLM_LOG_DEBUG("actual response:");
+
+                    for (auto const& beam : actualResponse)
+                    {
+                        std::string tokenStr;
+                        for (auto tok : beam)
+                        {
+                            tokenStr += std::to_string(tok) + " ";
+                        }
+                        TLLM_LOG_DEBUG("%s", tokenStr.c_str());
+                    }
+
+                    TLLM_LOG_DEBUG("beams' length must be bigger than %d and smaller than %d", minLengths[reqId - 1],
+                        maxLengths[reqId - 1]);
+
+                    if (result.isFinal)
+                    {
+                        TLLM_LOG_DEBUG("finishReason");
+                        std::string reasonStr;
+                        for (auto const reason : finishReason)
+                        {
+                            // cast for easier visibility during debugging
+                            EXPECT_EQ(static_cast<int>(reason), static_cast<int>(referenceFinishReasons[reqId - 1]));
+                            reasonStr += std::to_string(static_cast<int>(reason)) + " ";
+                        }
+                        TLLM_LOG_DEBUG("%s", reasonStr.c_str());
+                    }
+
+                    EXPECT_EQ(beamWidth, actualResponse.size());
+                    for (int beam = 0; beam < beamWidth; beam++)
+                    {
+                        EXPECT_LT(actualResponse.at(beam).size(), maxLengths[reqId - 1]) << "for request " << reqId;
+                        achievedLength[reqId - 1] = std::max(
+                            achievedLength[reqId - 1], static_cast<SizeType32>(actualResponse.at(beam).size()));
+                    }
+                }
+            }
+        }
+
+        for (int reqIt = 0; reqIt < achievedLength.size(); ++reqIt)
+        {
+            EXPECT_GE(achievedLength[reqIt], minLengths[reqIt])
+                << "request " << reqIt + 1 << " has not achieved min lengths";
+        }
+    }
+}
+
+TEST_P(TimeoutTest, TimeoutNonstreamingTest)
+{
+    auto const modelName = std::get<0>(GetParam());
+    auto const useOrchestratorMode = std::get<1>(GetParam());
+    SizeType32 constexpr beamWidth = 2;
+
+    auto executorConfig = ExecutorConfig(beamWidth);
+    std::filesystem::path modelPath;
+    bool isMultiGpu{false};
+    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1")
+    {
+        isMultiGpu = true;
+        if (modelName == "llama_tp4_pp1_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+        }
+        else if (modelName == "llama_tp1_pp4_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+        }
+        else if (modelName == "llama_tp2_pp2_cp1")
+        {
+            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+        }
+    }
+    if (modelName == "llama_tp1_pp1_cp1")
+    {
+        modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    }
+    // For llama model, only run for multiple GPUs
+    // This is detected by setting an env variable when running the test
+    char const* val = getenv("RUN_LLAMA_MULTI_GPU");
+    if (val == NULL && isMultiGpu)
+    {
+        GTEST_SKIP() << "Skipping MultiGpu tests";
+    }
+    else
+    {
+        if (!isMultiGpu && !useOrchestratorMode)
+        {
+            GTEST_SKIP() << "Leader mode on single GPU crashes";
+        }
+        // Check that it was launched with right number of MPI ranks
+        if (!useOrchestratorMode && COMM_SESSION.getSize() != 4)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Leader mode and world size is not equal to 4";
+        }
+        else if (useOrchestratorMode && COMM_SESSION.getSize() != 1)
+        {
+            // No orchestrator, need worldSize to match TP*PP
+            FAIL() << "Orchestrator mode and World size is not equal to 1";
+        }
+    }
+
+    if (useOrchestratorMode)
+    {
+        auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
+            useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt,
+            std::nullopt, orchestratorConfig);
+        executorConfig.setParallelConfig(parallelConfig);
+    }
+    auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
+
+    SizeType32 constexpr maxNewTokens = 5;
+    // create 1 request that times out immediately
+    // momentarily we don't cancel requests before forwardAsync so it will get scheduled for at least 1 forward
+    VecTokens immediateCancelTokens{1, 2, 3, 4};
+    auto immediateCancelRequest
+        = Request(immediateCancelTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    immediateCancelRequest.setAllottedTimeMs(std::chrono::milliseconds(0));
+    std::vector<std::vector<int>> immediateCancelResponse = {immediateCancelTokens, immediateCancelTokens};
+
+    // create 1 request that times out during the first forward
+    VecTokens oneForwardTokens{11, 12, 13, 14};
+    auto oneForwardRequest
+        = Request(oneForwardTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(3));
+    std::vector<std::vector<int>> oneForwardResponse = {oneForwardTokens, oneForwardTokens};
+
+    // Create the request that finishes by the number of tokens
+    VecTokens finishedTokens{101, 102, 103, 104};
+    auto finishedRequest
+        = Request(finishedTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
+    finishedRequest.setAllottedTimeMs(std::chrono::milliseconds(5000));
+    std::vector<std::vector<int>> finishedReponse
+        = {{101, 102, 103, 104, 29889, 13, 13, 20001, 29901}, {101, 102, 103, 104, 29889, 13, 13, 2277, 29937}};
+
+    // assume responses will come in FIFO order
+    std::vector<BeamTokens> refResponses = {immediateCancelResponse, oneForwardResponse, finishedReponse};
+    std::vector<FinishReason> referenceFinishReasons
+        = {FinishReason::kTIMED_OUT, FinishReason::kTIMED_OUT, FinishReason::kLENGTH};
+    if (executor.canEnqueueRequests())
+    {
+
+        std::vector<Request> requests = {immediateCancelRequest, oneForwardRequest, finishedRequest};
+        auto requestIds = executor.enqueueRequests(requests);
+
+        std::chrono::milliseconds waitTime(mMaxWaitMs);
+        auto responses = executor.awaitResponses(requestIds, waitTime);
+        for (auto const& response : responses)
+        {
+            for (auto const& responseIt : response)
+            {
+                auto const reqId = responseIt.getRequestId();
+                if (responseIt.hasError())
+                {
+                    TLLM_THROW("Request id %lu encountered error: %s", reqId, responseIt.getErrorMsg().c_str());
+                }
+
+                auto const& result = responseIt.getResult();
+
+                auto const finishReason = result.finishReasons;
+                auto const actualResponse = result.outputTokenIds;
+                TLLM_LOG_DEBUG("reqId %d finished %d", reqId, result.isFinal);
+                TLLM_LOG_DEBUG("actual response:");
+
+                for (auto const& beam : actualResponse)
+                {
+                    std::string tokenStr;
+                    for (auto tok : beam)
+                    {
+                        tokenStr += std::to_string(tok) + " ";
+                    }
+                    TLLM_LOG_DEBUG("%s", tokenStr.c_str());
+                }
+
+                TLLM_LOG_DEBUG("reference:");
+                auto referenceResponse = refResponses[reqId - 1];
+                for (auto const& beam : referenceResponse)
+                {
+                    std::string tokenStr;
+                    for (auto tok : beam)
+                    {
+                        tokenStr += std::to_string(tok) + " ";
+                    }
+                    TLLM_LOG_DEBUG("%s", tokenStr.c_str());
+                }
+
+                if (result.isFinal)
+                {
+                    TLLM_LOG_DEBUG("finishReason");
+                    std::string reasonStr;
+                    for (auto const reason : finishReason)
+                    {
+                        // cast for easier visibility during debugging
+                        EXPECT_EQ(static_cast<int>(reason), static_cast<int>(referenceFinishReasons[reqId - 1]));
+                        reasonStr += std::to_string(static_cast<int>(reason)) + " ";
+                    }
+                    TLLM_LOG_DEBUG("%s", reasonStr.c_str());
+                }
+
+                EXPECT_EQ(beamWidth, actualResponse.size());
+                for (int beam = 0; beam < beamWidth; beam++)
+                {
+                    EXPECT_EQ(referenceResponse.at(beam).size(), actualResponse.at(beam).size());
+                    EXPECT_THAT(actualResponse.at(beam), testing::ElementsAreArray(referenceResponse.at(beam)));
+                }
+            }
+        }
+    }
+}
+
 TEST_P(EncDecParamsTest, validEncDecCtor)
 {
     auto const modelName = std::get<0>(GetParam());
@@ -6179,6 +6744,11 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, ParamCancelReqTest,
         testing::Values(1, 2), testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1")),
     generateTestNameCancelReq);
 
+INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, TimeoutTest,
+    testing::Combine(
+        testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp1_pp1_cp1"), testing::Values(false, true)),
+    generateTestNameTimeoutTest);
+
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LeaderApiUsageTest,
     testing::Combine(
         testing::Values(false, true), testing::Values("llama_tp1_pp4_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1")),
@@ -6281,6 +6851,14 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LogitsProcParamsTest,
         testing::Values("llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1", "llama_tp1_pp4_cp1"),
         testing::Values(false, true), testing::Values(false, true)),
     generateTestNameLogitsProc);
+
+INSTANTIATE_TEST_SUITE_P(GptExecutorGuidedDecodingTest, GuidedDecodingParamsTest,
+    testing::Combine(testing::Values("gpt")), generateTestNameGuidedDecoding);
+
+INSTANTIATE_TEST_SUITE_P(LlamaExecutorGuidedDecodingTest, GuidedDecodingParamsTest,
+    testing::Combine(
+        testing::Values("llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1", "llama_tp1_pp4_cp1")),
+    generateTestNameGuidedDecoding);
 
 INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest, DisaggParamsTest,
     testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),

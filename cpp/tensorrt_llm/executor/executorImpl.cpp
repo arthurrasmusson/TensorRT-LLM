@@ -16,6 +16,7 @@
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
+#include "tensorrt_llm/batch_manager/trtGptModelOptionalParams.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaProfilerUtils.h"
 #include "tensorrt_llm/common/logger.h"
@@ -40,6 +41,29 @@
 #include <iterator>
 #include <optional>
 #include <utility>
+
+namespace
+{
+
+using namespace tensorrt_llm::batch_manager;
+using namespace tensorrt_llm::runtime;
+
+void checkOptionalParams(TrtGptModelOptionalParams& optionalParams, ModelConfig const& modelConfig)
+{
+    // Disable chunked context when not supported
+    if (optionalParams.enableChunkedContext)
+    {
+        if (modelConfig.isRnnBased() || !modelConfig.isKVCacheEnabled() || !modelConfig.getPagedContextFMHA())
+        {
+            optionalParams.enableChunkedContext = false;
+            TLLM_LOG_WARNING(
+                "Chunked context is not supported for this configuration and will be disabled. "
+                "Related configs: RNNBased: %d, KVCacheEnabled: %d, PagedContextFMHA: %d",
+                modelConfig.isRnnBased(), modelConfig.isKVCacheEnabled(), modelConfig.getPagedContextFMHA());
+        }
+    }
+}
+} // namespace
 
 namespace tensorrt_llm::executor
 {
@@ -405,9 +429,9 @@ void Executor::Impl::initialize(ExecutorConfig const& executorConfig)
             if (worldConfig.isPipelineParallel())
             {
                 mRequestWithIdWaitThread = std::make_unique<tensorrt_llm::mpi::MpiWaitThread>(
-                    std::make_unique<std::thread>(&Executor::Impl::requestWithIdWaitThread, this));
+                    "requestWithIdWaitThread", [this]() { mRequestWithIdAsyncSndHdl.reset(nullptr); });
                 mCancelledRequestsWaitThread = std::make_unique<tensorrt_llm::mpi::MpiWaitThread>(
-                    std::make_unique<std::thread>(&Executor::Impl::cancelledRequestsWaitThread, this));
+                    "cancelledRequestsWaitThread", [this]() { mCancelledRequestsAsyncSndHdl.reset(nullptr); });
                 if (mIsLeader)
                 {
                     mRequestWithIdLeaderThread
@@ -461,6 +485,7 @@ std::shared_ptr<Model> Executor::Impl::createModel(runtime::RawEngine const& raw
 
     bool const isLeaderInOrchMode = (mCommMode == CommunicationMode::kORCHESTRATOR) && mIsLeader;
     auto optionalParams = batch_manager::TrtGptModelOptionalParams(executorConfig, isLeaderInOrchMode);
+    ::checkOptionalParams(optionalParams, modelConfig);
     return batch_manager::TrtGptModelFactory::create(rawEngine, modelConfig, worldConfig, gptModelType, optionalParams);
 }
 
@@ -1177,26 +1202,6 @@ std::optional<std::shared_ptr<KVCacheEventManager>> Executor::Impl::getKVCacheEv
     return cacheEventManager ? std::optional(std::make_shared<KVCacheEventManager>(cacheEventManager)) : std::nullopt;
 }
 
-void Executor::Impl::requestWithIdWaitThread()
-{
-    while (!mRequestWithIdWaitThread->shouldExit())
-    {
-        mRequestWithIdWaitThread->notifyStop();
-        mRequestWithIdWaitThread->waitStart();
-        mRequestWithIdAsyncSndHdl.reset(nullptr);
-    }
-}
-
-void Executor::Impl::cancelledRequestsWaitThread()
-{
-    while (!mCancelledRequestsWaitThread->shouldExit())
-    {
-        mCancelledRequestsWaitThread->notifyStop();
-        mCancelledRequestsWaitThread->waitStart();
-        mCancelledRequestsAsyncSndHdl.reset(nullptr);
-    }
-}
-
 void Executor::Impl::requestWithIdLeaderThread()
 {
     static_assert(kMpiTagOffset >= RequestWithIdAsyncSend::kMpiTagUpperBound);
@@ -1600,6 +1605,29 @@ void Executor::Impl::prepRequestsForEncoderSkip(RequestList& activeRequests)
             TLLM_LOG_INFO("Changing state of request and setting encoder output to skip encoder run");
             req->mState = batch_manager::LlmRequestState::kCONTEXT_INIT;
             req->setEncoderOutput(req->getEncoderInputFeatures());
+        }
+    }
+}
+
+void Executor::Impl::finishTimedOutRequests(RequestList const& activeRequests)
+{
+    if (mIsLeader)
+    {
+        for (auto const& request : activeRequests)
+        {
+            if (request->isTimedOut())
+            {
+                // workaround to cancelRequest since it throws an error if
+                // mCommMode == CommunicationMode::kORCHESTRATOR && !mIsOrchestrator
+                {
+                    std::scoped_lock<std::mutex> lck(mCancelReqMtx);
+                    auto& selCancelledReqIds = mUsePipelineParallel ? mPipelineCancelledReqIds : mCancelledReqIds;
+                    selCancelledReqIds.insert(request->mRequestId);
+                }
+                request->finishByReason(FinishReason::kTIMED_OUT);
+                request->clearGeneratedTokens();
+                mModel->terminateRequest(request);
+            }
         }
     }
 }
@@ -2024,6 +2052,8 @@ void Executor::Impl::terminateCancelledRequests(RequestList& activeRequests)
             {
                 req->mState = batch_manager::LlmRequestState::kGENERATION_COMPLETE;
                 mModel->terminateRequest(req);
+                req->finishByReason(FinishReason::kCANCELLED);
+                req->clearGeneratedTokens();
                 // Parent and child requests share the same request id.
                 // Mark it terminated first and remove from the set later.
                 terminatedReqIds.insert(reqId);
@@ -2136,6 +2166,7 @@ void Executor::Impl::executionLoop()
         {
             hasUpdateStatsForEmptyActiveRequests = false;
             forwardSync(activeRequests);
+            finishTimedOutRequests(activeRequests);
             terminateCancelledRequests(activeRequests);
             finishedRequests = populateNewResponses(activeRequests, inTransmissionRequests);
             iterEnd = std::chrono::steady_clock::now();
@@ -2228,12 +2259,10 @@ void Executor::Impl::executionLoop()
 
     if (mCancelledRequestsWaitThread)
     {
-        mCancelledRequestsWaitThread->exit();
         mCancelledRequestsWaitThread.reset(nullptr);
     }
     if (mRequestWithIdWaitThread)
     {
-        mRequestWithIdWaitThread->exit();
         mRequestWithIdWaitThread.reset(nullptr);
     }
     auto const& worldConfig = mModel->getWorldConfig();

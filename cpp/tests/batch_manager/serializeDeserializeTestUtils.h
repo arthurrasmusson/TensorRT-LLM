@@ -49,7 +49,7 @@ struct SerializeDeserializeTestUtils
         }
     }
 
-    static NamedTensor CreateTensor(std::string name, std::vector<int64_t> shape, nvinfer1::DataType dt)
+    static NamedTensor CreateTensor(std::string const& name, std::vector<int64_t> const& shape, nvinfer1::DataType dt)
     {
         auto const nelems1 = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
         std::vector<T> raw_data(nelems1);
@@ -60,7 +60,7 @@ struct SerializeDeserializeTestUtils
         return NamedTensor{dt, shape, name, raw_data.data()};
     }
 
-    static void TestTensors(std::string name, std::vector<int64_t> shape, nvinfer1::DataType dt)
+    static void TestTensors(std::string const& name, std::vector<int64_t> const& shape, nvinfer1::DataType dt)
     {
         // create original tensor
         auto t1 = SerializeDeserializeTestUtils<T>::CreateTensor(name, shape, dt);
@@ -74,7 +74,7 @@ struct SerializeDeserializeTestUtils
 
     static void CompareInferenceRequests(InferenceRequest& ir1, InferenceRequest& ir2, std::list<std::string>& names)
     {
-        for (auto name : names)
+        for (auto const& name : names)
         {
             SerializeDeserializeTestUtils<T>::CompareTensors(
                 NamedTensor{ir1.getInputTensor(name), name}, NamedTensor{ir2.getInputTensor(name), name});

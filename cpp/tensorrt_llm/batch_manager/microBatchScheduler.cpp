@@ -231,29 +231,17 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
             else
             {
                 llmReq->setContextChunkSize(llmReq->getContextRemainingLength());
-                reqNumTokens = llmReq->getContextChunkSize();
+                auto const draftTokens
+                    = (llmReq->isLastContextChunk() && llmReq->hasDraftTokens()) ? llmReq->getNumDraftTokens() : 0;
+                reqNumTokens = llmReq->getContextChunkSize() + draftTokens;
 
                 if (mMaxContextLength)
                 {
                     if (mMaxContextLength.value() < reqNumTokens)
                     {
-                        // The context exceeds the length limit, we need to try chunking later. Draft tokens are not
-                        // taken into account here because we don't want to introduce chunking only due to draft tokens.
+                        // The context exceeds the length limit, we need to try chunking later.
                         reqNumTokens = mMaxContextLength.value();
                         allContextRequestsFit = false;
-                    }
-                    else if (llmReq->isLastContextChunk() && llmReq->hasDraftTokens())
-                    {
-                        SizeType32 reqNumTokensIncludingDraft = reqNumTokens + llmReq->getNumDraftTokens();
-                        if (mMaxContextLength.value() < reqNumTokensIncludingDraft)
-                        {
-                            // We are not chunking, but the draft tokens would cause the length limit to be exceeded.
-                            // Discard some tokens.
-                            SizeType32 draftTokensToDiscard = reqNumTokensIncludingDraft - mMaxContextLength.value();
-                            TLLM_LOG_DEBUG("Discarding %d draft tokens", draftTokensToDiscard);
-                            llmReq->discardDraftTokens(draftTokensToDiscard);
-                            reqNumTokens += llmReq->getNumDraftTokens();
-                        }
                     }
                 }
                 contextsToBeChunked.emplace_back(llmReq);

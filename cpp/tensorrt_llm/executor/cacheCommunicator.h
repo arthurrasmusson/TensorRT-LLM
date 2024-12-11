@@ -81,6 +81,8 @@ private:
 class Communicator
 {
 public:
+    [[nodiscard]] virtual bool isThreadSafe() const noexcept = 0;
+
     virtual void sendBuffer(runtime::IBuffer const& buf, DataContext const& context,
         executor::kv_cache::ProcessInfo const& processInfo) const
         = 0;

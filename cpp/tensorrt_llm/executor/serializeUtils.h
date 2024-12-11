@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/serialization.h"
 #include "tensorrt_llm/executor/types.h"
@@ -299,19 +300,19 @@ T deserialize(std::istream& is)
         return static_cast<T>(value);
     }
     // deserialize from serialization class
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestPerfMetrics::TimePoint>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::RequestPerfMetrics::TimePoint>)
     {
         return Serialization::deserializeTimePoint(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestPerfMetrics>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::RequestPerfMetrics>)
     {
         return Serialization::deserializeRequestPerfMetrics(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::SamplingConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::SamplingConfig>)
     {
         return Serialization::deserializeSamplingConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::OutputConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::OutputConfig>)
     {
         return Serialization::deserializeOutputConfig(is);
     }
@@ -319,167 +320,166 @@ T deserialize(std::istream& is)
     {
         return Serialization::deserializeExternalDraftTokensConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::PromptTuningConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::PromptTuningConfig>)
     {
         return Serialization::deserializePromptTuningConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::MropeConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::MropeConfig>)
     {
         return Serialization::deserializeMropeConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::LoraConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::LoraConfig>)
     {
         return Serialization::deserializeLoraConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::CommState>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::kv_cache::CommState>)
     {
         return Serialization::deserializeCommState(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::SocketState>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::kv_cache::SocketState>)
     {
         return Serialization::deserializeSocketState(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::kv_cache::CacheState>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::kv_cache::CacheState>)
     {
         return Serialization::deserializeCacheState(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DataTransceiverState>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DataTransceiverState>)
     {
         return Serialization::deserializeDataTransceiverState(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::ContextPhaseParams>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::ContextPhaseParams>)
     {
         return Serialization::deserializeContextPhaseParams(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::Request>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::Request>)
     {
         return Serialization::deserializeRequest(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::Tensor>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::Tensor>)
     {
         return Serialization::deserializeTensor(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::SpeculativeDecodingFastLogitsInfo>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::SpeculativeDecodingFastLogitsInfo>)
     {
         return Serialization::deserializeSpecDecFastLogitsInfo(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::Result>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::Result>)
     {
         return Serialization::deserializeResult(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::Response>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::Response>)
     {
         return Serialization::deserializeResponse(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::KvCacheConfig>)
     {
         return Serialization::deserializeKvCacheConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DynamicBatchConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DynamicBatchConfig>)
     {
         return Serialization::deserializeDynamicBatchConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::SchedulerConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::SchedulerConfig>)
     {
         return Serialization::deserializeSchedulerConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::ExtendedRuntimePerfKnobConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::ExtendedRuntimePerfKnobConfig>)
     {
         return Serialization::deserializeExtendedRuntimePerfKnobConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::ParallelConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::ParallelConfig>)
     {
         return Serialization::deserializeParallelConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::PeftCacheConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::PeftCacheConfig>)
     {
         return Serialization::deserializePeftCacheConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::OrchestratorConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::OrchestratorConfig>)
     {
         return Serialization::deserializeOrchestratorConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DecodingMode>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DecodingMode>)
     {
         return Serialization::deserializeDecodingMode(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::LookaheadDecodingConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::LookaheadDecodingConfig>)
     {
         return Serialization::deserializeLookaheadDecodingConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::EagleConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::EagleConfig>)
     {
         return Serialization::deserializeEagleConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::SpeculativeDecodingConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::SpeculativeDecodingConfig>)
     {
         return Serialization::deserializeSpeculativeDecodingConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::GuidedDecodingConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::GuidedDecodingConfig>)
     {
         return Serialization::deserializeGuidedDecodingConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::GuidedDecodingParams>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::GuidedDecodingParams>)
     {
         return Serialization::deserializeGuidedDecodingParams(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheRetentionConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::KvCacheRetentionConfig>)
     {
         return Serialization::deserializeKvCacheRetentionConfig(is);
     }
-    else if constexpr (std::is_same<T,
-                           tensorrt_llm::executor::KvCacheRetentionConfig::TokenRangeRetentionConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::KvCacheRetentionConfig::TokenRangeRetentionConfig>)
     {
         return Serialization::deserializeTokenRangeRetentionConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DecodingConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DecodingConfig>)
     {
         return Serialization::deserializeDecodingConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DebugConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DebugConfig>)
     {
         return Serialization::deserializeDebugConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::KvCacheStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::KvCacheStats>)
     {
         return Serialization::deserializeKvCacheStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::StaticBatchingStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::StaticBatchingStats>)
     {
         return Serialization::deserializeStaticBatchingStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::InflightBatchingStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::InflightBatchingStats>)
     {
         return Serialization::deserializeInflightBatchingStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::IterationStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::IterationStats>)
     {
         return Serialization::deserializeIterationStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::ExecutorConfig>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::ExecutorConfig>)
     {
         return Serialization::deserializeExecutorConfig(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::DisServingRequestStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::DisServingRequestStats>)
     {
         return Serialization::deserializeDisServingRequestStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStage>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::RequestStage>)
     {
         return Serialization::deserializeRequestStage(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStats>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::RequestStats>)
     {
         return Serialization::deserializeRequestStats(is);
     }
-    else if constexpr (std::is_same<T, tensorrt_llm::executor::RequestStatsPerIteration>::value)
+    else if constexpr (std::is_same_v<T, tensorrt_llm::executor::RequestStatsPerIteration>)
     {
         return Serialization::deserializeRequestStatsPerIteration(is);
     }
     // Optional
     else if constexpr (std::is_same_v<T, std::optional<typename ValueType<T>::type>>)
     {
-        bool hasValue;
+        bool hasValue = false;
         is.read(reinterpret_cast<char*>(&hasValue), sizeof(hasValue));
 
         if (hasValue)
@@ -487,16 +487,14 @@ T deserialize(std::istream& is)
             auto value = deserialize<typename ValueType<T>::type>(is);
             return std::optional<typename ValueType<T>::type>(std::move(value));
         }
-        else
-        {
-            return std::nullopt;
-        }
+
+        return std::nullopt;
     }
     // Vectors, lists and strings
     else if constexpr (std::is_same_v<T, std::vector<typename ValueType<T>::type>>
         || std::is_same_v<T, std::list<typename ValueType<T>::type>> || std::is_same_v<T, std::string>)
     {
-        size_t size;
+        size_t size = 0;
         is.read(reinterpret_cast<char*>(&size), sizeof(size));
 
         T container;
@@ -511,7 +509,7 @@ T deserialize(std::istream& is)
     else if constexpr (is_variant_v<T>)
     {
         // Get the index of the active type
-        std::size_t index;
+        std::size_t index = 0;
         is.read(reinterpret_cast<char*>(&index), sizeof(index));
 
         // TODO: Is there a better way to implement this?

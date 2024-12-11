@@ -12,6 +12,7 @@
 
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
 #include "tensorrt_llm/batch_manager/utils/staticThreadPool.h"
+#include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/utils.h"
 #include <map>
@@ -116,7 +117,22 @@ private:
         std::promise<void> mPromise;
     };
 
-    void response()
+    void sendAndRemoveResponse(RequestIdType id, Response resp) noexcept
+    {
+        try
+        {
+            TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
+            mSender->sendSync(*resp.mRequest);
+            mSender->release(id);
+            resp.mPromise.set_value();
+        }
+        catch (...)
+        {
+            resp.mPromise.set_exception(std::current_exception());
+        }
+    }
+
+    void response() noexcept
     {
         try
         {
@@ -135,15 +151,34 @@ private:
                 }
                 if (!isSending() && !mReadyResponses.empty())
                 {
-                    mCurrentRequest = mSender->recvRequestInfo().getRequestId();
+                    auto const& requestInfo = mSender->recvRequestInfo();
+                    auto reqId = requestInfo.getRequestId();
+                    mCurrentRequest = reqId;
+                    if (mRemainSendCount.find(reqId) == mRemainSendCount.end())
+                    {
+                        mRemainSendCount[reqId] = mSender->getCounterpartsCount(reqId);
+                    }
                 }
                 auto it = getCurrentResponse();
                 if (it != mReadyResponses.end())
                 {
-                    mSender->sendSync(*it->second.mRequest);
-                    if (mSender->availableRelease(*it->second.mRequest))
+                    auto reqId = mCurrentRequest.value();
+                    auto count = --mRemainSendCount[reqId];
+                    TLLM_CHECK(count >= 0);
+                    if (count == 0)
                     {
-                        it->second.mPromise.set_value();
+                        mRemainSendCount.erase(reqId);
+                        if (common::getEnvParallelCacheSend())
+                        {
+                            // TODO: Use a thread pool and check for thread safety.
+                            std::thread(
+                                &DataResponder::Impl::sendAndRemoveResponse, this, it->first, std::move(it->second))
+                                .detach();
+                        }
+                        else
+                        {
+                            DataResponder::Impl::sendAndRemoveResponse(it->first, std::move(it->second));
+                        }
                         removeResponse(it);
                     }
                     mCurrentRequest = std::nullopt;
@@ -162,7 +197,7 @@ private:
                 }
             }
         }
-        catch (std::exception const&)
+        catch (...)
         {
             for (auto& it : mReadyResponses)
             {
@@ -219,6 +254,7 @@ private:
     std::condition_variable mResponderCv;
     std::future<void> mResponseFuture;
     std::unique_ptr<DataSender> mSender;
+    std::unordered_map<LlmRequest::RequestIdType, int> mRemainSendCount;
     int mDeviceId{-1};
 };
 

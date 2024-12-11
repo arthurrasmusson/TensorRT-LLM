@@ -69,14 +69,18 @@ public:
                 mMaxAttentionWindowVec.push_back(std::min(maxAttenWin, mMaxSequenceLen));
                 mMaxAttentionWindow = std::max(mMaxAttentionWindow, mMaxAttentionWindowVec.back());
                 if (maxAttenWin > mMaxSequenceLen)
+                {
                     warning = true;
+                }
                 TLLM_CHECK_WITH_INFO(mMaxAttentionWindowVec.back() > 0,
                     "Attention window sizes (elements in maxAttentionWindowVec) must be > 0");
             }
             if (warning)
+            {
                 TLLM_LOG_WARNING(
                     "The value of maxAttentionWindow cannot exceed mMaxSequenceLen. "
                     "Therefore, it has been adjusted to match the value of mMaxSequenceLen.");
+            }
         }
         else
         {

@@ -51,6 +51,11 @@ public:
         TLLM_CHECK(mComm);
     }
 
+    [[nodiscard]] bool isThreadSafe() const noexcept override
+    {
+        return true;
+    }
+
     void recvBuffer(runtime::IBuffer& buf, executor::kv_cache::DataContext const& context,
         executor::kv_cache::ProcessInfo const& processInfo) const override
     {
@@ -107,14 +112,27 @@ public:
         mSelfState.setCommState(std::move(commState));
     }
 
-    bool availableRelease(LlmRequest const& llmRequest) override;
+    [[nodiscard]] size_t getCounterpartsCount(LlmRequest::RequestIdType requestId) const override
+    {
+        auto it = mRequestToComms.find(requestId);
+        TLLM_CHECK(it != mRequestToComms.end());
+        return mRequestToComms.at(requestId).size();
+    }
+
+    void release(LlmRequest::RequestIdType requestId) override
+    {
+        auto it = mRequestToComms.find(requestId);
+        TLLM_CHECK(it != mRequestToComms.end());
+        std::unique_lock<std::mutex> lk(mMtxForMap);
+        mRequestToComms.erase(it);
+    }
 
 private:
     MpiComm mComm;
     std::map<LlmRequest::RequestIdType, RequestMapInfo> mRequestToComms;
     std::vector<TFormatter> mFormatters;
     executor::DataTransceiverState mSelfState;
-    std::unordered_map<LlmRequest::RequestIdType, int> mRequestRemainSendCount;
+    std::mutex mMtxForMap;
 };
 
 class MpiDataReceiver : public DataReceiver

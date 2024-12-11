@@ -43,7 +43,7 @@ public:
 
     void respondAndSendAsync(LlmRequest* llmRequest);
 
-    void respondAndSendLayerWise(RequestVector requests, std::unique_ptr<ContextProgress> progress);
+    void respondAndSendLayerWise(RequestVector const& requests, std::shared_ptr<ContextProgress> const& progress);
 
     void requestAndReceiveSync(LlmRequest* llmRequest);
 

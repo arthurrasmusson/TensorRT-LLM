@@ -138,14 +138,15 @@ public:
                 texec::DataTransceiverState{
                     texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
                     texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
-        ON_CALL(*this, availableRelease).WillByDefault(Return(true));
+        ON_CALL(*this, getCounterpartsCount).WillByDefault(Return(1));
     }
 
     MOCK_METHOD(RequestInfo, recvRequestInfo, (), (override));
     MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
     MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const));
     MOCK_METHOD(void, setCommState, (texec::kv_cache::CommState), (override));
-    MOCK_METHOD(bool, availableRelease, (LlmRequest const&), (override));
+    MOCK_METHOD(size_t, getCounterpartsCount, (LlmRequest::RequestIdType), (const override));
+    MOCK_METHOD(void, release, (LlmRequest::RequestIdType), (override));
 
 private:
     static texec::kv_cache::CommState mState;
@@ -190,7 +191,7 @@ TEST_F(MockTransceiverTest, MpiResponderBasic)
             texec::DataTransceiverState{texec::kv_cache::CacheState{10, 12, 128, 128, 8, 8, nvinfer1::DataType::kFLOAT},
                 texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
     EXPECT_CALL(*sender, sendSync).WillOnce(Return());
-    EXPECT_CALL(*sender, availableRelease).WillOnce(Return(true));
+    EXPECT_CALL(*sender, getCounterpartsCount).WillOnce(Return(1));
 
     DataResponder responder{std::move(sender)};
     auto request = makeLlmRequest(0);
@@ -226,7 +227,16 @@ class MpiSymmetricalCacheTest : public ::testing::Test // NOLINT(cppcoreguidelin
 protected:
     void SetUp() override {}
 
-    void TearDown() override {}
+    void TearDown() override
+    {
+        for (auto& future : mFutures)
+        {
+            if (future.valid())
+            {
+                future.get();
+            }
+        }
+    }
 
     SizeType32 setUpCommunicator()
     {
@@ -315,8 +325,7 @@ protected:
             {
                 TLLM_CUDA_CHECK(cudaMemset(it->data(), llmRequest->mRequestId, it->getSizeInBytes()));
             }
-            auto future = mResponder->respondAndSendAsync(*llmRequest);
-            future.get();
+            mFutures.emplace_back(mResponder->respondAndSendAsync(*llmRequest));
         }
         else
         {
@@ -342,6 +351,7 @@ protected:
     std::unique_ptr<DataResponder> mResponder;
     std::unique_ptr<DataRequester> mRequester;
     std::unique_ptr<texec::kv_cache::CacheState> mCacheState;
+    std::vector<std::future<void>> mFutures;
 };
 
 TEST_F(MpiSymmetricalCacheTest, SimpleTest)
@@ -353,9 +363,16 @@ TEST_F(MpiSymmetricalCacheTest, SimpleTest)
     }
     setUpCacheManager();
     setUpCacheTransceiver();
+    std::vector<std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest>> requests;
+
     for (auto len : {10, 20, 30})
     {
-        addRequestAndTransportCache(makeLlmRequest(len));
+        requests.emplace_back(makeLlmRequest(len));
+        addRequestAndTransportCache(requests.back());
+    }
+    for (auto& future : mFutures)
+    {
+        future.get();
     }
 }
 
@@ -629,7 +646,6 @@ protected:
         }
         mManager->getBlockManager().getBufferManager().getStream().synchronize();
         auto future = mResponder->respondAndSendAsync(*llmRequest);
-        // future.get();
         return future;
     }
 

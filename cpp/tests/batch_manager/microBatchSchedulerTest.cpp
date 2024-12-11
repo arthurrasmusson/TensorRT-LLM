@@ -654,6 +654,139 @@ TEST_F(MicroBatchSchedulerTest, GenDraftTokensMaxNumTokens)
     }
 }
 
+TEST_F(MicroBatchSchedulerTest, ChunkedContextDraftTokensMaxNumTokens)
+{
+    // This test checks that draft tokens will not cause maxNumTokens to be exceeded.
+    constexpr SizeType32 maxNumTokens = 8192;
+    constexpr SizeType32 maxBatchSize = 64;
+    constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+
+    mNumContexts = 1;
+    mContextRequests.resize(mNumContexts);
+
+    auto ctxChunkConfig = batch_scheduler::ContextChunkingConfig{ContextChunkingPolicy::kFIRST_COME_FIRST_SERVED, 64};
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(ctxChunkConfig);
+
+    constexpr int32_t maxNewTokens = 9;
+    constexpr int32_t promptLen = 2041;
+    constexpr int32_t draftLen = 8;
+
+    RequestVector activeRequests;
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 3, 1, draftLen));
+
+    for (int it = 0; it < 10; ++it)
+    {
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
+        if (it < 9)
+        {
+            // Some draft tokens are discarded so that all requests can fit.
+            EXPECT_EQ(newRequests.size(), 4);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+            EXPECT_NE(newRequests.find(3), newRequests.end());
+            EXPECT_EQ(newRequests.find(0)->second->getNumDraftTokens(), 7);
+            EXPECT_EQ(newRequests.find(1)->second->getNumDraftTokens(), 7);
+            EXPECT_EQ(newRequests.find(2)->second->getNumDraftTokens(), 7);
+            EXPECT_EQ(newRequests.find(3)->second->getNumDraftTokens(), 7);
+        }
+        else if (it == 9)
+        {
+            EXPECT_EQ(newRequests.size(), 0);
+        }
+    }
+}
+
+TEST_F(MicroBatchSchedulerTest, ChunkedContextDraftTokensMaxContextLength)
+{
+    // This test checks that draft tokens will not cause maxContextLength to be exceeded.
+    constexpr SizeType32 maxContextLength = 10;
+    constexpr SizeType32 maxBatchSize = 64;
+    constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+    constexpr SizeType32 maxNumTokens = 8192;
+
+    mNumContexts = 1;
+    mContextRequests.resize(mNumContexts);
+
+    auto ctxChunkConfig = batch_scheduler::ContextChunkingConfig{ContextChunkingPolicy::kFIRST_COME_FIRST_SERVED, 64};
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(ctxChunkConfig, maxContextLength);
+
+    constexpr int32_t maxNewTokens = 6;
+    constexpr int32_t promptLen = 6;
+    constexpr int32_t draftLen = 5;
+
+    RequestVector activeRequests;
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 1, draftLen));
+
+    for (int it = 0; it < 7; ++it)
+    {
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
+        if (it < 6)
+        {
+            // Some draft tokens are discarded so that all requests can fit.
+            EXPECT_EQ(newRequests.size(), 2);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_EQ(newRequests.find(0)->second->getNumDraftTokens(), 4);
+            EXPECT_EQ(newRequests.find(1)->second->getNumDraftTokens(), 4);
+        }
+        else if (it == 6)
+        {
+            EXPECT_EQ(newRequests.size(), 0);
+        }
+    }
+}
+
+TEST_F(MicroBatchSchedulerTest, DraftTokensGreaterThanChunkSize)
+{
+    // This test checks that draft tokens are dropped to fit the request within
+    // a chunk unit.
+    // TODO(tmorris): This behavior may not be desired and might be changed soon.
+    constexpr SizeType32 maxNumTokens = 40;
+    constexpr SizeType32 maxBatchSize = 64;
+    constexpr SizeType32 chunkUnitSize = 16;
+    constexpr uint64_t maxSeqIdleMicroseconds = 60 * 1000 * 1000;
+
+    mNumContexts = 1;
+    mContextRequests.resize(mNumContexts);
+
+    auto ctxChunkConfig
+        = batch_scheduler::ContextChunkingConfig{ContextChunkingPolicy::kFIRST_COME_FIRST_SERVED, chunkUnitSize};
+    mMicroBatchScheduler = std::make_shared<MicroBatchScheduler>(ctxChunkConfig, maxBatchSize);
+
+    constexpr int32_t maxNewTokens = 21;
+    constexpr int32_t promptLen = 3;
+    constexpr int32_t draftLen = 17;
+
+    RequestVector activeRequests;
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, 1, draftLen));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 2, 1, draftLen));
+
+    for (int it = 0; it < 22; ++it)
+    {
+        RequestTable newRequests = forward(activeRequests, maxBatchSize, maxNumTokens);
+        if (it < 21)
+        {
+            EXPECT_EQ(newRequests.size(), 3);
+            EXPECT_NE(newRequests.find(0), newRequests.end());
+            EXPECT_NE(newRequests.find(1), newRequests.end());
+            EXPECT_NE(newRequests.find(2), newRequests.end());
+            EXPECT_EQ(newRequests.find(0)->second->getNumDraftTokens(), 13);
+            EXPECT_EQ(newRequests.find(1)->second->getNumDraftTokens(), 13);
+            EXPECT_EQ(newRequests.find(2)->second->getNumDraftTokens(), 5);
+        }
+        else if (it == 21)
+        {
+            EXPECT_EQ(newRequests.size(), 0);
+        }
+    }
+}
+
 class ContextChunkingTest : public MicroBatchSchedulerTest
 {
 protected:
@@ -666,7 +799,7 @@ protected:
             auto reqs = initContextLengths(mLengths, mDraftLengths);
             auto const& statesMap = mExpectedStates.at(ctxChunkPolicy);
             EXPECT_GT(statesMap.size(), 0);
-            const SizeType32 endIter = statesMap.rbegin()->first + 1;
+            SizeType32 const endIter = statesMap.rbegin()->first + 1;
             for (SizeType32 i = 0; i < endIter; ++i)
             {
                 forward(ctxChunkPolicy, reqs, i, statesMap);

@@ -45,12 +45,28 @@ enum CacheBufferSize
 namespace kv_cache_manager
 {
 class BaseKVCacheManager;
-}
+} // namespace kv_cache_manager
+
 class LlmRequest;
 
 class RuntimeBuffers
 {
 public:
+    static constexpr auto kLogitsTensorName = "logits";
+    static constexpr auto kHiddenStatesOutputTensorName = "hidden_states_output";
+    static constexpr auto kHiddenStatesInputTensorName = "hidden_states_input";
+    static constexpr auto kInputIdsTensorName = "input_ids";
+    static constexpr auto kLastTokenIdsTensorName = "last_token_ids";
+    static constexpr auto kHostRequestTypesTensorName = "host_request_types";
+    static constexpr auto kContextLengthsTensorName = "context_lengths";
+    static constexpr auto kHostContextLengthsTensorName = "host_context_lengths";
+    static constexpr auto kSequenceLengthsTensorName = "sequence_length";
+    static constexpr auto kPromptEmbeddingTableTensorName = "prompt_embedding_table";
+    static constexpr auto kTasksTensorName = "tasks";
+    static constexpr auto kPromptVocabSizeTensorName = "prompt_vocab_size";
+    static constexpr auto kMRopeRotarySinCosTensorName = "mrope_rotary_sin_cos";
+    static constexpr auto kMRopePositionDeltasTensorName = "mrope_position_deltas";
+
     using SizeType32 = runtime::SizeType32;
     using TensorPtr = runtime::ITensor::SharedPtr;
     using TensorMap = runtime::ITensor::TensorMap;

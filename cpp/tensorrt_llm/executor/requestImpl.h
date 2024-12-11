@@ -40,7 +40,8 @@ public:
         std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
         std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
         SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
-        std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams)
+        std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
+        std::optional<MillisecondsType> allottedTimeMs)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -72,6 +73,7 @@ public:
         , mEagleConfig(eagleConfig)
         , mSkipCrossAttnBlocks(skipCrossAttnBlocks)
         , mGuidedDecodingParams(std::move(guidedDecodingParams))
+        , mAllottedTimeMs(allottedTimeMs)
     {
         validate();
     }
@@ -193,6 +195,11 @@ public:
     PriorityType getPriority() const
     {
         return mPriority;
+    }
+
+    [[nodiscard]] std::optional<MillisecondsType> getAllottedTimeMs() const
+    {
+        return mAllottedTimeMs;
     }
 
     [[nodiscard]] bool getReturnAllGeneratedTokens() const
@@ -397,6 +404,11 @@ public:
         mGuidedDecodingParams = guidedDecodingParams;
     }
 
+    void setAllottedTimeMs(MillisecondsType allottedTimeMs)
+    {
+        mAllottedTimeMs = allottedTimeMs;
+    }
+
 private:
     void validate()
     {
@@ -462,6 +474,7 @@ private:
         lambda(mEagleConfig);
         lambda(mSkipCrossAttnBlocks);
         lambda(mGuidedDecodingParams);
+        lambda(mAllottedTimeMs ? std::make_optional(mAllottedTimeMs->count()) : std::nullopt);
     }
 
     VecTokens mInputTokenIds;
@@ -495,6 +508,7 @@ private:
     std::optional<EagleConfig> mEagleConfig;
     std::optional<Tensor> mSkipCrossAttnBlocks;
     std::optional<GuidedDecodingParams> mGuidedDecodingParams;
+    std::optional<MillisecondsType> mAllottedTimeMs;
 };
 
 } // namespace tensorrt_llm::executor

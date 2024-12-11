@@ -242,29 +242,29 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(transformerBuffersGetBuffers);
 
-    inputBuffers.insert_or_assign(kPositionIdsTensorName.data(), positionIds);
-    inputBuffers.insert_or_assign(kHostPastKeyValueLengthsTensorName.data(), pastKeyValueLengths);
-    inputBuffers.insert_or_assign(kCacheIndirectionsTensorName.data(), cacheIndirection);
-    inputBuffers.insert_or_assign(kHostSinkTokenLengthTensorName.data(), sinkTokenLengths);
+    inputBuffers.insert_or_assign(kPositionIdsTensorName, positionIds);
+    inputBuffers.insert_or_assign(kHostPastKeyValueLengthsTensorName, pastKeyValueLengths);
+    inputBuffers.insert_or_assign(kCacheIndirectionsTensorName, cacheIndirection);
+    inputBuffers.insert_or_assign(kHostSinkTokenLengthTensorName, sinkTokenLengths);
 
-    inputBuffers.insert_or_assign(kHostMaxAttentionWindowSizesTensorName.data(), maxAttentionWindows);
-    inputBuffers.insert_or_assign(kKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsDevice);
-    inputBuffers.insert_or_assign(kHostKvCacheBlockOffsetsTensorName.data(), kvCacheBlockOffsetsHost);
-    inputBuffers.insert_or_assign(kHostContextProgressTensorName.data(), contextProgressHost);
+    inputBuffers.insert_or_assign(kHostMaxAttentionWindowSizesTensorName, maxAttentionWindows);
+    inputBuffers.insert_or_assign(kKvCacheBlockOffsetsTensorName, kvCacheBlockOffsetsDevice);
+    inputBuffers.insert_or_assign(kHostKvCacheBlockOffsetsTensorName, kvCacheBlockOffsetsHost);
+    inputBuffers.insert_or_assign(kHostContextProgressTensorName, contextProgressHost);
 
     if (crossKvCacheBlockOffsetsHost)
     {
-        inputBuffers.insert_or_assign(kCrossKvCacheBlockOffsetsTensorName.data(), crossKvCacheBlockOffsetsDevice);
-        inputBuffers.insert_or_assign(kHostCrossKvCacheBlockOffsetsTensorName.data(), crossKvCacheBlockOffsetsHost);
-        inputBuffers.insert_or_assign(kHostCrossKvCachePoolPointersTensorName.data(), crossKvCacheBlockPoolPointers);
-        inputBuffers.insert_or_assign(kHostCrossKvCachePoolMappingTensorName.data(), crossKvCacheBlockPoolMapping);
-        inputBuffers.insert_or_assign(kCrossAttentionMaskTensorName.data(), crossAttentionMaskDevice);
-        inputBuffers.insert_or_assign(kCrossAttentionPackedMaskTensorName.data(), crossAttentionPackedMaskDevice);
+        inputBuffers.insert_or_assign(kCrossKvCacheBlockOffsetsTensorName, crossKvCacheBlockOffsetsDevice);
+        inputBuffers.insert_or_assign(kHostCrossKvCacheBlockOffsetsTensorName, crossKvCacheBlockOffsetsHost);
+        inputBuffers.insert_or_assign(kHostCrossKvCachePoolPointersTensorName, crossKvCacheBlockPoolPointers);
+        inputBuffers.insert_or_assign(kHostCrossKvCachePoolMappingTensorName, crossKvCacheBlockPoolMapping);
+        inputBuffers.insert_or_assign(kCrossAttentionMaskTensorName, crossAttentionMaskDevice);
+        inputBuffers.insert_or_assign(kCrossAttentionPackedMaskTensorName, crossAttentionPackedMaskDevice);
     }
 
     if (skipCrossAttnBlocks)
     {
-        inputBuffers.insert_or_assign(kSkipCrossAttentionBlocksTensorName.data(), skipCrossAttnBlocks);
+        inputBuffers.insert_or_assign(kSkipCrossAttentionBlocksTensorName, skipCrossAttnBlocks);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

@@ -1140,7 +1140,7 @@ INSTANTIATE_TEST_SUITE_P(GptCudaGraphTests, ParamTest,
         testing::Values(std::nullopt),             // maxTokensInPagedKvCache
         testing::Values(std::nullopt),             // freeGpuMemoryFraction
         testing::Values(false),                    // enableTrtOverlap
-        testing::Values(false),                    // enableChunkedContext
+        testing::Values(false, true),              // enableChunkedContext
         testing::Values(false),                    // enableStreamingMode
         testing::Values(true)                      // enableCudaGraphMode
         ),
@@ -1165,7 +1165,7 @@ INSTANTIATE_TEST_SUITE_P(GptSwitchBwTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(false)         // enableCudaGraphMode
         ),
@@ -1188,7 +1188,7 @@ INSTANTIATE_TEST_SUITE_P(GptNProfilesTests, ParamTest,
         testing::Values(std::nullopt, 1280),       // maxTokensInPagedKvCache
         testing::Values(std::nullopt, 0.8),        // freeGpuMemoryFraction
         testing::Values(false, true),              // enableTrtOverlap
-        testing::Values(false),                    // enableChunkedContext
+        testing::Values(false, true),              // enableChunkedContext
         testing::Values(false),                    // enableStreamingMode
         testing::Values(false)                     // enableCudaGraphMode
         ),
@@ -1340,7 +1340,7 @@ INSTANTIATE_TEST_SUITE_P(GptReturnAcceptedTokenLogitsTests, ParamTest,
         testing::Values(std::nullopt),       // maxTokensInPagedKvCache
         testing::Values(std::nullopt),       // freeGpuMemoryFraction
         testing::Values(false),              // enableTrtOverlap
-        testing::Values(false),              // enableChunkedContext
+        testing::Values(false, true),        // enableChunkedContext
         testing::Values(false),              // enableStreamingMode
         testing::Values(false)               // enableCudaGraphMode
         ),
@@ -1366,7 +1366,7 @@ INSTANTIATE_TEST_SUITE_P(GptLogitsTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false, true),  // enableStreamingMode
         testing::Values(false)         // enableCudaGraphMode
         ),
@@ -1390,7 +1390,7 @@ INSTANTIATE_TEST_SUITE_P(GptLogProbsTests, ParamTest,
         testing::Values(std::nullopt),                           // maxTokensInPagedKvCache
         testing::Values(std::nullopt),                           // freeGpuMemoryFraction
         testing::Values(false),                                  // enableTrtOverlap
-        testing::Values(false),                                  // enableChunkedContext
+        testing::Values(false, true),                            // enableChunkedContext
         testing::Values(false),                                  // enableStreamingMode
         testing::Values(false)                                   // enableCudaGraphMode
         ),
@@ -1532,7 +1532,7 @@ INSTANTIATE_TEST_SUITE_P(ChatGlmTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(false)         // enableCudaGraphMode
         ),
@@ -1577,7 +1577,7 @@ INSTANTIATE_TEST_SUITE_P(MedusaTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(true, false)   // enableCudaGraphMode
         ),
@@ -1598,7 +1598,7 @@ INSTANTIATE_TEST_SUITE_P(EagleTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(true, false)   // enableCudaGraphMode
         ),
@@ -1644,7 +1644,7 @@ INSTANTIATE_TEST_SUITE_P(ExplicitDraftTokensDecodingTests, ParamTest,
         testing::Values(std::nullopt),       // maxTokensInPagedKvCache
         testing::Values(std::nullopt),       // freeGpuMemoryFraction
         testing::Values(false),              // enableTrtOverlap
-        testing::Values(false),              // enableChunkedContext
+        testing::Values(false, true),        // enableChunkedContext
         testing::Values(false),              // enableStreamingMode
         testing::Values(false)               // enableCudaGraphMode
         ),
@@ -1673,7 +1673,7 @@ INSTANTIATE_TEST_SUITE_P(GptjFP8Tests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false),        // enableChunkedContext
+        testing::Values(false, true),  // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(false)         // enableCudaGraphMode
 

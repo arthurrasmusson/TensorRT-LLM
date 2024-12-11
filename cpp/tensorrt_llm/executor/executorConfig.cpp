@@ -17,19 +17,19 @@
 namespace tensorrt_llm::executor
 {
 
-ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig const& schedulerConfig,
-    KvCacheConfig const& kvCacheConfig, bool enableChunkedContext, bool normalizeLogProbs,
-    SizeType32 iterStatsMaxIterations, SizeType32 requestStatsMaxIterations, BatchingType batchingType,
-    std::optional<SizeType32> maxBatchSize, std::optional<SizeType32> maxNumTokens,
-    std::optional<ParallelConfig> parallelConfig, std::optional<PeftCacheConfig> const& peftCacheConfig,
+ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig schedulerConfig, KvCacheConfig kvCacheConfig,
+    bool enableChunkedContext, bool normalizeLogProbs, SizeType32 iterStatsMaxIterations,
+    SizeType32 requestStatsMaxIterations, BatchingType batchingType, std::optional<SizeType32> maxBatchSize,
+    std::optional<SizeType32> maxNumTokens, std::optional<ParallelConfig> parallelConfig,
+    std::optional<PeftCacheConfig> const& peftCacheConfig,
     std::optional<LogitsPostProcessorConfig> logitsPostProcessorConfig, std::optional<DecodingConfig> decodingConfig,
     float gpuWeightPercent, std::optional<SizeType32> maxQueueSize,
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig,
     SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds,
     std::optional<SpeculativeDecodingConfig> specDecConfig, std::optional<GuidedDecodingConfig> guidedDecodingConfig)
     : mMaxBeamWidth(maxBeamWidth)
-    , mSchedulerConfig(schedulerConfig)
-    , mKvCacheConfig(kvCacheConfig)
+    , mSchedulerConfig(std::move(schedulerConfig))
+    , mKvCacheConfig(std::move(kvCacheConfig))
     , mEnableChunkedContext(enableChunkedContext)
     , mNormalizeLogProbs(normalizeLogProbs)
     , mIterStatsMaxIterations(iterStatsMaxIterations)

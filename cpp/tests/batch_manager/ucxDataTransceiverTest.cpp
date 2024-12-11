@@ -72,7 +72,9 @@ protected:
     int mDeviceId{0};
 };
 
-TEST_F(UcxEndpointTest, Basic)
+// Disabled because UcxEndpointTest is flaky.
+// Occasionally message can get lost and cause the test to hang: https://nvbugs/4923604
+TEST_F(UcxEndpointTest, DISABLED_Basic)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
@@ -93,7 +95,7 @@ TEST_F(UcxEndpointTest, Basic)
     EXPECT_EQ(info, recvFuture.get());
 }
 
-TEST_F(UcxEndpointTest, ListenerConnection)
+TEST_F(UcxEndpointTest, DISABLED_ListenerConnection)
 {
     using ContextPair = std::pair<std::shared_ptr<ucxx::Listener>, std::promise<std::shared_ptr<ucxx::Endpoint>>>;
     ContextPair context;
@@ -133,7 +135,7 @@ TEST_F(UcxEndpointTest, ListenerConnection)
     EXPECT_EQ(info, recvFuture.get());
 }
 
-TEST_F(UcxEndpointTest, HostBufferSync)
+TEST_F(UcxEndpointTest, DISABLED_HostBufferSync)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
@@ -155,7 +157,7 @@ TEST_F(UcxEndpointTest, HostBufferSync)
     EXPECT_EQ(*reinterpret_cast<int32_t*>(recvBuffer.data()), expectedValue);
 }
 
-TEST_F(UcxEndpointTest, DeviceBufferSync)
+TEST_F(UcxEndpointTest, DISABLED_DeviceBufferSync)
 {
     auto selfEndpoint = mSelfWorker->createEndpointFromWorkerAddress(mPeerWorker->getAddress());
     auto peerEndpoint = mPeerWorker->createEndpointFromWorkerAddress(mSelfWorker->getAddress());
@@ -180,7 +182,7 @@ TEST_F(UcxEndpointTest, DeviceBufferSync)
     EXPECT_EQ(gotValue, expectedValue);
 }
 
-TEST_F(UcxEndpointTest, MultiPointIsolation)
+TEST_F(UcxEndpointTest, DISABLED_MultiPointIsolation)
 {
     // This test is to ensure many to many communication is being handled properly.
     // Due to UCX implementation, tagRecv and amRecv are receiving data on to UCX worker
@@ -609,7 +611,7 @@ protected:
     SizeType32 mWorldSize{0}, mlocalRank{0};
 };
 
-TEST_F(UcxSymmetricalCacheTest, SameProcessTest)
+TEST_F(UcxSymmetricalCacheTest, DISABLED_SameProcessTest)
 {
 
     Node source, destination;

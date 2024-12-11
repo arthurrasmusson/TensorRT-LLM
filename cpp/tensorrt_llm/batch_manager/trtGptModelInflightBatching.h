@@ -119,7 +119,7 @@ public:
 
     ~TrtGptModelInflightBatching() override;
 
-    void terminateRequest(LlmRequestPtr const& llmRequest, bool pause = false);
+    void terminateRequest(LlmRequestPtr const& llmRequest, bool pause = false) override;
 
     /// @brief Function that waits for the decoding of requests in flight.
     ///        When the requests have finished or using speculative decoding, the state of requests
@@ -261,6 +261,11 @@ private:
     DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr const& decoderFinishEvent);
+
+    void updateDecoderBuffers(bool returnLogProbs);
+    std::vector<std::unique_ptr<DecoderStepAsyncSend>> communicateDecoderBuffers(bool returnLogProbs);
+    void updateRequests(ScheduledRequests const& scheduledRequests);
+
     /// @brief It gathers the logits if they need to be returned, calls getDecoderSlotHostOutputs,
     /// and overwrites the llmRequest tokens buffer.
     /// Called either on request finishing, or at every step when doing beam search and streaming.
@@ -303,7 +308,7 @@ private:
     void asyncSendWaitThread();
 
     void draftModelSendLogitsThread();
-    static std::optional<TensorPtr> targetModelReceiveLogits(
+    std::optional<TensorPtr> targetModelReceiveLogits(
         executor::SpeculativeDecodingFastLogitsInfo const& fastLogitsInfo);
 
     [[nodiscard]] bool hasSpeculativeDecodingFastLogits() const noexcept override

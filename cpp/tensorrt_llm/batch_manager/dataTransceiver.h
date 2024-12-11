@@ -127,7 +127,9 @@ public:
     /// @param commState The communicator status.
     virtual void setCommState(executor::kv_cache::CommState commState) = 0;
 
-    [[nodiscard]] virtual bool availableRelease(LlmRequest const& llmRequest) = 0;
+    [[nodiscard]] virtual size_t getCounterpartsCount(LlmRequest::RequestIdType requestId) const = 0;
+
+    virtual void release(LlmRequest::RequestIdType requestId) = 0;
 
     /// @brief Destructor.
     virtual ~DataSender() = default;

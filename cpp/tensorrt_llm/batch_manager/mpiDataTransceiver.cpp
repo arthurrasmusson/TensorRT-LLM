@@ -65,19 +65,23 @@ void MpiComm::sendRequestInfo(RequestInfo const& info, executor::kv_cache::Proce
         "Disagg server does not currently support these cacheState.");
     auto peerRelativeRanks = executor::kv_cache::targetIRanks(info.getTransState().getCacheState().value(),
         mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx());
-    if (mRequestRemainSendCount.find(requestId) == mRequestRemainSendCount.end()
-        || (mRequestRemainSendCount[requestId] == 0))
-    {
-        int recvExpectCount = peerRelativeRanks.size();
-        mRequestRemainSendCount[requestId] = recvExpectCount;
-        mRequestToComms.emplace(requestId, RequestMapInfo{});
-        mRequestToComms[requestId].resize(recvExpectCount);
-    }
     int peerIdx = std::distance(peerRelativeRanks.begin(),
         std::find(
             peerRelativeRanks.begin(), peerRelativeRanks.end(), info.getTransState().getCommState()->getSelfIdx()));
-    auto requesterRank = info.getTransState().getCommState()->getMpiState().mRanks[peerRelativeRanks[peerIdx]];
-    mRequestToComms[requestId].at(peerIdx) = {requesterRank, info.getTransState()};
+    auto requesterRank = info.getTransState().getCommState()->getMpiState().mRanks[peerRelativeRanks.at(peerIdx)];
+    {
+        std::unique_lock<std::mutex> lk(mMtxForMap);
+        auto it = mRequestToComms.find(requestId);
+        if (it == mRequestToComms.end())
+        {
+            int recvExpectCount = peerRelativeRanks.size();
+            {
+                it = mRequestToComms.emplace(requestId, RequestMapInfo{}).first;
+                it->second.resize(recvExpectCount);
+            }
+        }
+        it->second[peerIdx] = {requesterRank, info.getTransState()};
+    }
     return info;
 #else
     TLLM_THROW("Multi device support is disabled.");
@@ -86,46 +90,16 @@ void MpiComm::sendRequestInfo(RequestInfo const& info, executor::kv_cache::Proce
 
 void MpiDataSender::sendSync(LlmRequest const& llmRequest)
 {
-    // TODO: A reqeustId of context instance can only be requested by one instance of gen.
-    if (mRequestRemainSendCount.find(llmRequest.mRequestId) != mRequestRemainSendCount.end())
-    {
-        TLLM_CHECK_WITH_INFO(mRequestRemainSendCount[llmRequest.mRequestId] > 0,
-            "sendSync kvcache  with request id %ld count should >0 but get %d ", llmRequest.mRequestId,
-            mRequestRemainSendCount[llmRequest.mRequestId]);
-        mRequestRemainSendCount[llmRequest.mRequestId]--;
-    }
-    else
-    {
-        TLLM_THROW("Sender does not receive the requstInfo message before sending the data");
-    }
-    if (mRequestRemainSendCount[llmRequest.mRequestId] > 0)
-    {
-        return; // Wait until  the requests from all rank of the gen instance have been received.
-    }
     auto const& formatter = mFormatters.front();
     std::vector<executor::kv_cache::ProcessInfo> processInfos;
-    for (auto&& [rank, dataTransceiverState] : mRequestToComms[llmRequest.mRequestId])
+    auto const& reqToComm = mRequestToComms.at(llmRequest.mRequestId);
+    for (auto&& [rank, dataTransceiverState] : reqToComm)
     {
         processInfos.emplace_back(executor::kv_cache::ProcessInfo{rank});
     }
-    auto&& dataTransceiverState = mRequestToComms[llmRequest.mRequestId].at(0).second;
+    auto&& dataTransceiverState = reqToComm.at(0).second;
     formatter->formatOutput(mComm, llmRequest, std::move(processInfos), mSelfState.getCacheState().value(),
         mSelfState.getCommState().value().getSelfIdx(), dataTransceiverState.getCacheState().value());
-}
-
-bool MpiDataSender::availableRelease(LlmRequest const& llmRequest)
-{
-    if (mRequestRemainSendCount.find(llmRequest.mRequestId) == mRequestRemainSendCount.end())
-    {
-        return true;
-    }
-    if (mRequestRemainSendCount[llmRequest.mRequestId] == 0)
-    {
-        mRequestRemainSendCount.erase(llmRequest.mRequestId);
-        mRequestToComms.erase(llmRequest.mRequestId);
-        return true;
-    }
-    return false;
 }
 
 void MpiDataReceiver::sendRequestInfo(LlmRequest const& llmRequest)

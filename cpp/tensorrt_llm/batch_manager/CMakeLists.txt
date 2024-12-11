@@ -30,6 +30,7 @@ set(SRCS
     inferenceRequest.cpp
     kvCacheManager.cpp
     kvCacheEventManager.cpp
+    kvCacheTransferManager.cpp
     kvCacheUtils.cpp
     loraBuffers.cpp
     medusaBuffers.cpp
@@ -59,7 +60,10 @@ list(APPEND SRCS ${XGRAMMAR_SRCS})
 
 if(NOT WIN32)
   # additional warnings
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
+  #
+  # Ignore overloaded-virtual warning. We intentionally change parameters of
+  # some methods in derived class.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-overloaded-virtual")
   if(WARNING_IS_ERROR)
     message(STATUS "Treating warnings as errors in GCC compilation")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")

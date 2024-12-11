@@ -160,4 +160,31 @@ TensorMap storeIOTensors(executor::DebugConfig const& debugConfig, TensorPtr con
     return tensors;
 }
 
+template <typename T>
+void writeBinArray(std::string const& filename, T const* tensor, const int64_t size, cudaStream_t stream)
+{
+    // write the tensor into a binary file. Can load from python by using
+    // np.fromfile(filename, dtype=np_type), where np_type is np.float16 when T is half, and so on.
+    TLLM_LOG_ERROR("%s start, size: %ld", __PRETTY_FUNCTION__, size);
+    std::ofstream outfile(filename, std::ios::binary);
+    TLLM_CHECK_WITH_INFO(
+        outfile, tensorrt_llm::common::fmtstr("Failed to open file for writing: %s", filename.c_str()));
+
+    std::vector<char> hostTensor(size * sizeof(T));
+    tensorrt_llm::common::check_cuda_error(
+        cudaMemcpyAsync(hostTensor.data(), tensor, size * sizeof(T), cudaMemcpyDeviceToHost, stream));
+    tensorrt_llm::common::check_cuda_error(cudaStreamSynchronize(stream));
+    // Write the tensor data
+    outfile.write(reinterpret_cast<char const*>(hostTensor.data()), size * sizeof(T));
+
+    outfile.close();
+}
+
+template void writeBinArray(std::string const& filename, half const* tensor, const int64_t size, cudaStream_t stream);
+template void writeBinArray(std::string const& filename, float const* tensor, const int64_t size, cudaStream_t stream);
+#ifdef ENABLE_BF16
+template void writeBinArray(
+    std::string const& filename, __nv_bfloat16 const* tensor, const int64_t size, cudaStream_t stream);
+#endif
+
 } // namespace tensorrt_llm::batch_manager::utils

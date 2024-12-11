@@ -12,6 +12,7 @@
 
 #include "cacheFormatter.h"
 
+#include "tensorrt_llm/batch_manager/contextProgress.h"
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include <cstdint>
@@ -34,6 +35,7 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
     bool layerWise = common::getEnvDisaggLayerwise() && numPools == 1;
     if (layerWise)
     {
+        auto& progress = llmRequest.getContextProgress();
         SizeType32 const numLayers = mCacheManager->getBlockManager().getNumLayers();
         runtime::ITensor::Shape offset = runtime::ITensor::makeShape({0, 0});
         std::vector<SizeType32> layersInPool(numPools, 0);
@@ -42,6 +44,10 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
             auto const poolIdx = mCacheManager->getBlockManager().getLayerPoolIdx(layerIdx);
             auto const layerIdxInPool = layersInPool[poolIdx]++;
             offset.d[1] = layerIdxInPool;
+            if (progress != nullptr)
+            {
+                progress->wait(layerIdx);
+            }
             auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
             for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
             {
