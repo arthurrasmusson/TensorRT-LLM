@@ -46,8 +46,15 @@ public:
     void respondAndSendLayerWise(RequestVector const& requests, std::shared_ptr<ContextProgress> const& progress);
 
     void requestAndReceiveSync(LlmRequest* llmRequest);
+    void requestAndReceiveAsync(LlmRequest* llmRequest);
 
     void checkTranferStatus(bool blocking = false);
+    void checkContextTransferStatus(bool blocking = false);
+
+    void checkGenTransferStatus(int atLeastRequestNum = 0);
+
+    void checkGenTranferStatus(bool blocking = false, int atLeastBlockNum = 0);
+    [[nodiscard]] bool checkGenTransferComplete() const;
 
 private:
     void initializeCommState();
@@ -58,6 +65,7 @@ private:
     std::unique_ptr<DataResponder> mDataResponder;
     std::unique_ptr<DataRequester> mDataRequester;
     std::map<LlmRequest*, std::future<void>> mResponderFutures;
+    std::vector<std::pair<LlmRequest*, std::future<void>>> mRequesterFutures;
     mpi::MpiComm const *mMpiGroupComm{}, *mMpiWorldComm{};
     std::shared_ptr<mpi::MpiComm> mMpiGroupTensorParaComm, mMpiGroupPipeParaComm;
     executor::kv_cache::CommState const* mCommState;

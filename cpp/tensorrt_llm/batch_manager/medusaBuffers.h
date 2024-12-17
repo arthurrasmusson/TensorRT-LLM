@@ -56,9 +56,11 @@ public:
     TensorPtr medusaTreeIdsHost;             // [maxBatchSize, maxDraftTokens + 1], on pinned
 
     TensorPtr medusaPathsDevice;             // [maxBatchSize, maxDraftTokens + 1, maxAcceptedDraftTokens + 1], on gpu
-    TensorPtr medusaPathsHost;      // [maxBatchSize, maxDraftTokens + 1, maxAcceptedDraftTokens + 1], on pinned
+    TensorPtr medusaPathsHost;       // [maxBatchSize, maxDraftTokens + 1, maxAcceptedDraftTokens + 1], on pinned
 
-    std::vector<SizeType32> mTopKs; // [maxAcceptedDraftTokens]
+    TensorPtr medusaUseSpecDecoding; // [1], on cpu
+
+    std::vector<SizeType32> mTopKs;  // [maxAcceptedDraftTokens]
 };
 
 } // namespace tensorrt_llm::batch_manager

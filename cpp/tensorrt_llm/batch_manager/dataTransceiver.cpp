@@ -11,11 +11,20 @@
  */
 
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
+#include "tensorrt_llm/batch_manager/common.h"
+#include "tensorrt_llm/batch_manager/runtimeBuffers.h"
 #include "tensorrt_llm/batch_manager/utils/staticThreadPool.h"
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/utils.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/cudaEvent.h"
+#include "tensorrt_llm/runtime/cudaStream.h"
+#include <future>
 #include <map>
+#include <memory>
+#include <unordered_map>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -197,8 +206,9 @@ private:
                 }
             }
         }
-        catch (...)
+        catch (std::exception const& err)
         {
+            TLLM_LOG_ERROR("Exception in DataResponder response: %s", err.what());
             for (auto& it : mReadyResponses)
             {
                 it.second.mPromise.set_exception(std::current_exception());
@@ -268,22 +278,167 @@ public:
         TLLM_CUDA_CHECK(cudaGetDevice(&mDeviceId));
     }
 
-    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest)
+    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest& llmRequest)
     {
         // TODO: Modify the implementation here to avoid frequent thread creation.
-        return std::async(std::launch::async, &DataRequester::Impl::requestSync, this, std::cref(llmRequest));
+        return std::async(std::launch::async, &DataRequester::Impl::requestSync, this, std::ref(llmRequest));
+    }
+
+    [[nodiscard]] std::future<void> requestAndReceiveAsyncMultiThreads(LlmRequest& llmRequest)
+    {
+        auto promise = std::make_unique<std::promise<void>>();
+        auto future = promise->get_future();
+        TLLM_CHECK(llmRequest.getDataTransceiverState().getCommState().has_value());
+        std::string processInfo = llmRequest.getDataTransceiverState().getCommState()->toString();
+        if (common::getEnvRequestKVCacheSerial())
+        {
+            processInfo = "default";
+        }
+        if (mInstanceToAsyncResource.find(processInfo) == mInstanceToAsyncResource.end())
+        {
+            mInstanceToAsyncResource.emplace(processInfo, std::make_unique<AsyncResource>());
+            auto requestFuture = std::async(std::launch::async, &DataRequester::Impl::request, this,
+                std::ref(*mInstanceToAsyncResource.at(processInfo)));
+            mRequestFutures.emplace_back(std::move(requestFuture));
+        }
+        auto& asyncResource = mInstanceToAsyncResource.at(processInfo);
+        {
+            std::unique_lock<std::mutex> lck(asyncResource->mMtxForQueue);
+            asyncResource->mRequestsQueue.emplace_back(std::addressof(llmRequest), std::move(promise));
+        }
+        asyncResource->mCVforQueue.notify_all();
+        return future;
+    }
+
+    ~Impl()
+    {
+        for (auto&& [processInfo, asyncResource] : mInstanceToAsyncResource)
+        {
+            asyncResource->mTerminate = true;
+            asyncResource->mCVforQueue.notify_all();
+        }
+        for (auto&& future : mRequestFutures)
+        {
+            future.get();
+        }
     }
 
 private:
-    void requestSync(LlmRequest const& llmRequest)
+    void requestSync(LlmRequest& llmRequest)
     {
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "Start Call requestSync  for request id:%ld , context request id:%ld", llmRequest.mRequestId,
+            llmRequest.getContextPhaseParams().value().getReqId());
+        llmRequest.setKvCacheTransferStart(std::chrono::steady_clock::now());
         TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
         mReceiver->sendRequestInfo(llmRequest);
         mReceiver->receiveSync(llmRequest);
+        llmRequest.setKvCacheTransferEnd(std::chrono::steady_clock::now());
+
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "End Call requestSync  for request id:%ld , context request id:%ld", llmRequest.mRequestId,
+            llmRequest.getContextPhaseParams().value().getReqId());
+    }
+
+    struct RequestAndPromise
+    {
+        LlmRequest* mRequest;
+        std::unique_ptr<std::promise<void>> mPromise;
+
+        RequestAndPromise()
+            : mRequest(nullptr)
+            , mPromise(nullptr)
+        {
+        }
+
+        RequestAndPromise(LlmRequest* request, std::unique_ptr<std::promise<void>>&& promise)
+            : mRequest(request)
+            , mPromise(std::move(promise))
+        {
+        }
+
+        RequestAndPromise(RequestAndPromise const&) = delete;
+
+        RequestAndPromise(RequestAndPromise&& other) noexcept
+            : mRequest(other.mRequest)
+            , mPromise(std::move(other.mPromise))
+        {
+            other.mRequest = nullptr;
+        }
+
+        RequestAndPromise& operator=(RequestAndPromise&& other) noexcept
+        {
+            if (this != &other)
+            {
+                mRequest = nullptr;
+                if (mPromise)
+                {
+                    mPromise.reset();
+                }
+
+                mRequest = other.mRequest;
+                mPromise = std::move(other.mPromise);
+
+                other.mRequest = nullptr;
+            }
+            return *this;
+        }
+    };
+
+    struct AsyncResource
+    {
+        std::deque<RequestAndPromise> mRequestsQueue;
+        std::mutex mMtxForQueue;
+        std::condition_variable mCVforQueue;
+        std::atomic<bool> mTerminate{false};
+    };
+
+    void request(AsyncResource& resource)
+    {
+
+        tensorrt_llm::common::setThreadName("dataTransRequest");
+        TLLM_CUDA_CHECK(cudaSetDevice(mDeviceId));
+        try
+        {
+            while (!resource.mTerminate)
+            {
+                RequestAndPromise requestAndPromise;
+                {
+                    std::unique_lock lck(resource.mMtxForQueue);
+
+                    resource.mCVforQueue.wait(
+                        lck, [&resource] { return !resource.mRequestsQueue.empty() || resource.mTerminate; });
+                    if (resource.mTerminate)
+                    {
+                        break;
+                    }
+                    requestAndPromise = std::move(resource.mRequestsQueue.front());
+                    resource.mRequestsQueue.pop_front();
+                }
+                {
+                    TLLM_CHECK_WITH_INFO(requestAndPromise.mRequest != nullptr, "requestAndPromise.mRequest is null");
+                    requestSync(*requestAndPromise.mRequest);
+                    requestAndPromise.mPromise->set_value();
+                }
+            }
+        }
+        catch (std::exception const& err)
+
+        {
+            TLLM_LOG_ERROR("Exception in DataRequester request(): %s", err.what());
+
+            for (auto& requsetAndPromise : resource.mRequestsQueue)
+            {
+                requsetAndPromise.mPromise->set_exception(std::current_exception());
+            }
+        }
     }
 
     std::unique_ptr<DataReceiver> mReceiver;
     int mDeviceId{-1};
+
+    std::vector<std::future<void>> mRequestFutures;
+    std::unordered_map<std::string, std::unique_ptr<AsyncResource>> mInstanceToAsyncResource;
 };
 
 DataResponder::DataResponder(std::unique_ptr<DataSender> sender)
@@ -313,9 +468,9 @@ DataRequester::DataRequester(std::unique_ptr<DataReceiver> receiver)
 {
 }
 
-std::future<void> DataRequester::requestAndReceiveAsync(LlmRequest const& llmRequest) const
+std::future<void> DataRequester::requestAndReceiveAsync(LlmRequest& llmRequest) const
 {
-    return mImpl->requestAndReceiveAsync(llmRequest);
+    return mImpl->requestAndReceiveAsyncMultiThreads(llmRequest);
 }
 
 DataRequester::~DataRequester() = default;

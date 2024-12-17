@@ -1613,7 +1613,8 @@ INSTANTIATE_TEST_SUITE_P(LlamaLookaheadDecodingTests, ParamTest,
                 .usePackedInput()
                 .setKVCacheType(KVCacheType::kPAGED)
                 .useRandomEndId()
-                .useLookaheadDecoding()),
+                .useLookaheadDecoding()
+                .setBatchSizes({1, 16})),
         testing::Values(TrtGptModelType::InflightFusedBatching),
         testing::Values(
             TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),

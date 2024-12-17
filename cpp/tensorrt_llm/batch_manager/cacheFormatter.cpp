@@ -13,9 +13,13 @@
 #include "cacheFormatter.h"
 
 #include "tensorrt_llm/batch_manager/contextProgress.h"
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/runtime/cudaEvent.h"
+#include <cstddef>
 #include <cstdint>
+#include <future>
 
 namespace tensorrt_llm::batch_manager::kv_cache_manager
 {
@@ -25,9 +29,10 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
     CacheState const& destConfig)
 {
     NVTX3_SCOPED_RANGE(formatOutput);
-    TLLM_LOG_DEBUG("Start sending kvCache for request id:%ld ", llmRequest.mRequestId);
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "Start sending kvCache for request id:%ld ", llmRequest.mRequestId);
 
     TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
+    TLLM_CHECK(!processInfos.empty());
     constexpr SizeType32 beam{0};
     auto const numPools = mCacheManager->getBlockManager().getNumPools();
     // TODO(oargov): are we sure the other side has the same number of pools? this might not hold for pp_size>1...
@@ -68,19 +73,56 @@ void CacheFormatter::formatOutput(executor::kv_cache::Communicator const& comm, 
     }
     else
     {
-        for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
+
+        auto sendBufferFun = [&](int deviceId, executor::kv_cache::ProcessInfo const& processInfo)
         {
-            auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
-            for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
+            NVTX3_SCOPED_RANGE(sendBufferFun);
+
+            TLLM_CUDA_CHECK(cudaSetDevice(deviceId));
+            for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
             {
-                for (auto const& processInfo : processInfos)
+                auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
+                for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
                 {
+
                     comm.sendBuffer(*it, executor::kv_cache::DataContext{llmRequest.mRequestId}, processInfo);
                 }
             }
+            TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "End sending kvCache for request id:%ld requestRank :%d ",
+                llmRequest.mRequestId, processInfo.getRank());
+        };
+
+        int deviceId = mCacheManager->getBlockManager().getBufferManager().getStream().getDevice();
+        if (processInfos.size() > 1)
+        {
+            if (common::getEnvDisableReceiveKVCacheParallel())
+            {
+                TLLM_LOG_INFO("Disable receiving kvCache in parallel");
+                for (auto const& processInfo : processInfos)
+                {
+                    sendBufferFun(deviceId, processInfo);
+                }
+            }
+            else
+            {
+                std::vector<std::future<void>> futures;
+                futures.reserve(processInfos.size());
+                for (auto const& processInfo : processInfos)
+                {
+                    futures.push_back(std::async(std::launch::async, sendBufferFun, deviceId, std::cref(processInfo)));
+                }
+                for (auto& future : futures)
+                {
+                    future.get();
+                }
+            }
+        }
+        else
+        {
+            sendBufferFun(deviceId, processInfos[0]);
         }
     }
-    TLLM_LOG_DEBUG("End sending kvCache for request id:%ld ", llmRequest.mRequestId);
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "End sending kvCache for request id:%ld ", llmRequest.mRequestId);
 }
 
 void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
@@ -89,8 +131,11 @@ void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, L
 {
     NVTX3_SCOPED_RANGE(formatInput);
     TLLM_CHECK_WITH_INFO(llmRequest.mSamplingConfig.beamWidth == 1, "Currently only supports beam width 1.");
-    TLLM_LOG_DEBUG("Start receiving kvCache for request id:%ld , context request id:%ld", llmRequest.mRequestId,
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+        "Start receiving kvCache for request id:%ld , context request id:%ld", llmRequest.mRequestId,
         llmRequest.getContextPhaseParams().value().getReqId());
+    TLLM_CHECK(!processInfos.empty());
+
     constexpr SizeType32 beam{0};
     std::vector<runtime::ITensor::SharedPtr> recvBufferTmps;
     std::vector<runtime::ITensor::SharedPtr> outputBuffers;
@@ -166,18 +211,58 @@ void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, L
         }
         else
         {
-            int idx = 0;
-            for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
+
+            auto recvBufferFun
+                = [&](int deviceId, int blockIdxOffset, executor::kv_cache::ProcessInfo const& processInfo)
             {
-                auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
-                for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
+                NVTX3_SCOPED_RANGE(recvBufferFun);
+                TLLM_CUDA_CHECK(cudaSetDevice(deviceId));
+                int idx = blockIdxOffset;
+                for (auto poolIdx = 0; poolIdx < numPools; poolIdx++)
                 {
-                    for (auto const& processInfo : processInfos)
+                    auto const endIt = getBlockEndIt(*mCacheManager, llmRequest, beam, poolIdx);
+                    for (auto it = getBlockBeginIt(*mCacheManager, llmRequest, beam, poolIdx); it != endIt; ++it)
                     {
-                        comm.recvBuffer(*recvBufferTmps[idx], dataContext, processInfo);
+                        size_t commIdx = idx / (blockNum);
+                        size_t blockIdx = idx % (blockNum);
+                        size_t recvBufferIdx = blockIdx * processInfos.size() + commIdx;
+                        comm.recvBuffer(*recvBufferTmps[recvBufferIdx], dataContext, processInfo);
                         idx++;
                     }
                 }
+            };
+            int deviceId = bufferManager.getStream().getDevice();
+            if (processInfos.size() > 1)
+            {
+                int idxOffset = 0;
+                if (common::getEnvDisableReceiveKVCacheParallel())
+                {
+                    for (auto const& processInfo : processInfos)
+                    {
+                        recvBufferFun(deviceId, idxOffset, processInfo);
+                        idxOffset += blockNum;
+                    }
+                }
+                else
+                {
+                    std::vector<std::future<void>> futures;
+                    futures.reserve(processInfos.size());
+
+                    for (auto const& processInfo : processInfos)
+                    {
+                        futures.push_back(
+                            std::async(std::launch::async, recvBufferFun, deviceId, idxOffset, std::cref(processInfo)));
+                        idxOffset += blockNum;
+                    }
+                    for (auto& future : futures)
+                    {
+                        future.get();
+                    }
+                }
+            }
+            else
+            {
+                recvBufferFun(deviceId, 0, processInfos[0]);
             }
         }
     }
@@ -188,8 +273,8 @@ void CacheFormatter::formatInput(executor::kv_cache::Communicator const& comm, L
             selfIdx, selfConfig, bufferManager);
         bufferManager.getStream().synchronize();
     }
-    TLLM_LOG_DEBUG("Start receiving kvCache for request id:%ld , context request id:%ld", llmRequest.mRequestId,
-        llmRequest.getContextPhaseParams().value().getReqId());
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "Endreceiving kvCache for request id:%ld , context request id:%ld",
+        llmRequest.mRequestId, llmRequest.getContextPhaseParams().value().getReqId());
 }
 
 [[nodiscard]] bool CacheFormatter::inquireSupport(CacheState const& selfConfig, CacheState const& destConfig) const

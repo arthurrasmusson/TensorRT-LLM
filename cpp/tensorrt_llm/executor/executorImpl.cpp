@@ -1409,7 +1409,7 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                 "Batched logits post processor is not defined.");
 
             auto newLlmReq = std::make_shared<batch_manager::LlmRequest>(
-                reqWithId.id, std::move(reqWithId.req), logitsPostProcessor, applyLogitsPostProcessorBatched);
+                reqWithId.id, reqWithId.req, logitsPostProcessor, applyLogitsPostProcessorBatched);
             auto numReturnSequences = newLlmReq->getNumSubRequests();
 
             if (numReturnSequences > 1)
@@ -1512,6 +1512,13 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                     TLLM_CHECK_WITH_INFO(mModel->hasGuidedDecoder(),
                         "Request is specified with GuidedDecodingParams, but GuidedDecoder is not setup. Please "
                         "provide a valid GuidedDecodingConfig to setup GuidedDecoder.");
+                }
+
+                if (newReq->hasAdditionalOutputs())
+                {
+                    newReq->allocAdditionalOutputs([this](std::string const& name)
+                        { return mModel->getTensorDataType(name); },
+                        [this](std::string const& name) { return mModel->getTensorShape(name); });
                 }
 
                 mModel->updatePeftCache(newReq);
@@ -1741,6 +1748,9 @@ RequestStatsPerIteration Executor::Impl::getCurrentRequestStats(
             break;
         case batch_manager::LlmRequestState::kGENERATION_IN_PROGRESS:
         case batch_manager::LlmRequestState::kGENERATION_TO_COMPLETE:
+        case batch_manager::LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE:
+        case batch_manager::LlmRequestState::kDISAGG_GENERATION_INIT:
+        case batch_manager::LlmRequestState::kDISAGG_GENERATION_TRANS_IN_PROGRESS:
             requestStats.stage = executor::RequestStage::kGENERATION_IN_PROGRESS;
             break;
         default: TLLM_LOG_ERROR("Unexpected request state.");

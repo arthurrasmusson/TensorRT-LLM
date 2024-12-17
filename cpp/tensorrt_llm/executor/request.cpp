@@ -10,6 +10,8 @@
  * its affiliates is strictly prohibited.
  */
 
+#include <utility>
+
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestImpl.h"
@@ -384,5 +386,4 @@ void Request::setAllottedTimeMs(MillisecondsType allottedTimeMs)
 {
     return mImpl->setAllottedTimeMs(allottedTimeMs);
 }
-
 } // namespace tensorrt_llm::executor

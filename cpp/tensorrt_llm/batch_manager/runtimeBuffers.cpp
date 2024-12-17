@@ -40,10 +40,11 @@ namespace tensorrt_llm::batch_manager
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens)
+    executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens,
+    std::optional<std::vector<std::string>> const& additionalOutputNames)
 {
     create(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen, runtime, modelConfig,
-        worldConfig, decodingConfig);
+        worldConfig, decodingConfig, additionalOutputNames);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
@@ -65,7 +66,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
             // logits buffer need to be re-allocated with size of [numContextTokens + numGenSequences, vocabSizePadded]
             auto const& engine = runtime.getEngine();
             auto const& manager = runtime.getBufferManager();
-            auto const logitsType = engine.getTensorDataType("logits");
+            auto const logitsType = engine.getTensorDataType(kLogitsTensorName);
             logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
         }
         else if (modelConfig.computeGenerationLogits() && modelConfig.getSpeculativeDecodingMode().isNone())
@@ -125,7 +126,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
             numContextRequests, numGenRequests, modelConfig.getSpeculativeDecodingModulePtr()->getMaxDecodingTokens());
     }
 
-    if (lookaheadBuffers)
+    if (lookaheadBuffers && modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
     {
         lookaheadBuffers->reshape(
             numContextRequests, numGenRequests, modelConfig.getSpeculativeDecodingModulePtr()->getMaxDecodingTokens());
@@ -148,15 +149,15 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     seqSlotRemappingHost->reshape(numRequestsShape);
     seqSlotRemappingDevice->reshape(numRequestsShape);
 
-    if (modelConfig.useMrope())
-    {
-        auto const mropeRotarySinCosSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
-        mropeRotarySinCos->reshape(ITensor::makeShape({numRequests, mropeRotarySinCosSize}));
-        mropePositionDeltas->reshape(ITensor::makeShape({numRequests, 1}));
-    }
-
     auto const numTokens = getNumTokens();
     inputsIds->reshape(ITensor::makeShape({numTokens}));
+
+    if (modelConfig.useMrope())
+    {
+        auto const mropeRotaryCosSinSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
+        mropeRotaryCosSin->reshape(ITensor::makeShape({numRequests, mropeRotaryCosSinSize}));
+        mropePositionDeltas->reshape(ITensor::makeShape({numRequests, 1}));
+    }
 
     if (worldConfig.isPipelineParallel())
     {
@@ -168,13 +169,25 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         hiddenStates->reshape(hiddenStatesShape);
     }
 
+    for (auto const& outputTensor : mAdditionalOutputTensors)
+    {
+        auto const& [name, tensor] = outputTensor;
+        auto const& engine = runtime.getEngine();
+        auto shape = engine.getTensorShape(name.c_str());
+        TLLM_CHECK_WITH_INFO(
+            shape.d[0] == -1, "First dimension of additional output tensor '%s' must be dynamic", name.c_str());
+        shape.d[0] = numTokens;
+        tensor->reshape(shape);
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig)
+    executor::DecodingConfig const& decodingConfig,
+    std::optional<std::vector<std::string>> const& additionalOutputNames)
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -192,7 +205,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     auto constexpr nvTokenIdType = TRTDataType<TokenIdType>::value;
     inputsIds = manager.emptyTensor(MemoryType::kGPU, nvTokenIdType);
 
-    mropeRotarySinCos = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
+    mropeRotaryCosSin = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
     mropePositionDeltas = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
     decoderInputsIds = manager.emptyTensor(MemoryType::kGPU, nvTokenIdType);
@@ -302,6 +315,13 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     if (modelConfig.getSpeculativeDecodingMode().isEagle())
     {
         eagleBuffers.emplace(maxBatchSize, maxBeamWidth, manager, modelConfig, worldConfig, decodingConfig, runtime);
+    }
+
+    for (auto const& outputTensorName : additionalOutputNames.value_or(std::vector<std::string>{}))
+    {
+        auto const& engine = runtime.getEngine();
+        auto const dataType = engine.getTensorDataType(outputTensorName.c_str());
+        mAdditionalOutputTensors.emplace(outputTensorName, manager.emptyTensor(runtime::MemoryType::kGPU, dataType));
     }
 }
 
@@ -429,7 +449,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     std::vector<TokenIdType> decoderInputHost;
     std::vector<SizeType32> positionIdsHost;
     std::vector<SizeType32> positionIdsHostRow2;
-    std::vector<float> mropeRotarySinCosHost;
+    std::vector<float> mropeRotaryCosSinHost;
     std::vector<SizeType32> mropePositionDeltasHost;
 
     auto* contextLengthsHostPtr = bufferCast<SizeType32>(*contextLengthsHost);
@@ -441,7 +461,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     auto* logitsIdsHostPtr = bufferCast<SizeType32>(*logitsIdsHost);
     bool const isChatGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kChatGlm;
     bool const isGlm = modelConfig.getModelVariant() == ModelConfig::ModelVariant::kGlm;
-    auto const mropeRotarySinCosSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
+    auto const mropeRotaryCosSinSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
     bool isSkipCrossAttn = true;
 
     // sequence length fill common loop
@@ -472,23 +492,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             *decoderBuffers.sequenceLengths, *seqSlotsDeviceSlice, maxBeamWidth, *fillValuesDevice, stream);
     }
 
-    auto processMropeData = [&mropeRotarySinCosHost, &mropePositionDeltasHost, &modelConfig, &mropeRotarySinCosSize](
-                                std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> const& llmReq)
-    {
-        if (modelConfig.useMrope())
-        {
-            auto optMropeRotarySinCos = llmReq->getMropeRotarySinCos().value();
-            TLLM_CHECK_WITH_INFO(optMropeRotarySinCos->getShape().d[0] == mropeRotarySinCosSize,
-                "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotarySinCos->getShape().d[0],
-                int(mropeRotarySinCosSize));
-            auto* mropeRotarySinCos = bufferCast<float>(*optMropeRotarySinCos);
-            auto mropePositionDeltas = llmReq->getMropePositionDeltas().value();
-            mropeRotarySinCosHost.insert(
-                mropeRotarySinCosHost.end(), mropeRotarySinCos, mropeRotarySinCos + mropeRotarySinCosSize);
-            mropePositionDeltasHost.push_back(mropePositionDeltas);
-        }
-    };
-
     // context preparation loop
     if (!contextRequests.empty())
     {
@@ -498,8 +501,8 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         SizeType32 batchIdx{0};
         for (auto const& llmReq : contextRequests)
         {
-            TLLM_CHECK_WITH_INFO(llmReq->isContextInitState() || llmReq->isDisaggGenerationInitState(),
-                "The request should be in context phase or disaggregated generation init phase.");
+            TLLM_CHECK_WITH_INFO(llmReq->isContextInitState() || llmReq->isDisaggGenerationTransmissionComplete(),
+                "The request should be in context phase or disaggregated generation tranmissionComplete phase.");
             TLLM_CHECK_WITH_INFO(
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
 
@@ -585,7 +588,17 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                         std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
                 }
             }
-            processMropeData(llmReq);
+            if (modelConfig.useMrope())
+            {
+                auto optMropeRotaryCosSin = llmReq->getMropeRotaryCosSin().value();
+                TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
+                    "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotaryCosSin->getShape().d[0],
+                    int(mropeRotaryCosSinSize));
+                float* mropeRotaryCosSinFLoat = bufferCast<float>(*optMropeRotaryCosSin);
+                mropeRotaryCosSinHost.insert(mropeRotaryCosSinHost.end(), mropeRotaryCosSinFLoat,
+                    mropeRotaryCosSinFLoat + mropeRotaryCosSinSize);
+            }
+
             totalInputSize += inputLength;
             ++batchIdx;
         }
@@ -666,7 +679,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 {
                     inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
                 }
-                processMropeData(llmReq);
+
+                if (modelConfig.useMrope())
+                {
+                    auto optMropePositionDeltas = llmReq->getMropePositionDeltas().value();
+                    mropePositionDeltasHost.push_back(optMropePositionDeltas);
+                }
             }
 
             if (static_cast<bool>(pastKeyValueLengthsPtr))
@@ -769,9 +787,16 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
     if (modelConfig.useMrope())
     {
-
-        manager.copy(mropeRotarySinCosHost.data(), *mropeRotarySinCos);
-        manager.copy(mropePositionDeltasHost.data(), *mropePositionDeltas);
+        if (!mropeRotaryCosSinHost.empty())
+        {
+            auto mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, 0, numContextRequests);
+            manager.copy(mropeRotaryCosSinHost.data(), *mropeRotaryCosSinCtx);
+        }
+        if (!mropePositionDeltasHost.empty())
+        {
+            auto mropePositionDeltasGen = ITensor::slice(mropePositionDeltas, 0, numGenRequests);
+            manager.copy(mropePositionDeltasHost.data(), *mropePositionDeltasGen);
+        }
     }
 
     {
@@ -937,7 +962,7 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     if (modelConfig.useMrope())
     {
 
-        inputMap.insert_or_assign(kMRopeRotarySinCosTensorName, mropeRotarySinCos);
+        inputMap.insert_or_assign(kMRopeRotaryCosSinTensorName, mropeRotaryCosSin);
         inputMap.insert_or_assign(kMRopePositionDeltasTensorName, mropePositionDeltas);
     }
 
@@ -967,8 +992,11 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
         eagleBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
     }
 
-    // runtime::utils::printTensorMap(std::cerr, inputBuffers);
-    // runtime::utils::printTensorMap(std::cerr, outputBuffers);
+    for (auto const& outputTensor : mAdditionalOutputTensors)
+    {
+        outputMap.insert_or_assign(outputTensor.first, outputTensor.second);
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

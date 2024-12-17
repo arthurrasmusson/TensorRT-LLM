@@ -25,7 +25,8 @@ void tensorrt_llm::batch_manager::AssignReqSeqSlots::operator()(SequenceSlotMana
     {
         for (auto const& llmReq : requests)
         {
-            auto const isReqNew = llmReq->isContextInitState() && llmReq->isFirstContextChunk();
+            auto const isReqNew = (llmReq->isContextInitState() && llmReq->isFirstContextChunk())
+                || (llmReq->isDisaggGenerationTransmissionComplete());
             if (isReqNew && llmReq->getReturnPerfMetrics())
             {
                 llmReq->setFirstScheduledTime(std::chrono::steady_clock::now());

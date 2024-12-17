@@ -239,6 +239,20 @@ void DecodingConfig::setLookaheadDecoding(LookaheadDecodingConfig const& lookahe
     mDecodingMode = DecodingMode::Lookahead();
 }
 
+SizeType32 DecodingConfig::getLookaheadDecodingMaxNumRequest() const
+{
+    return mLookaheadDecodingMaxNumRequest;
+}
+
+void DecodingConfig::enableSeamlessLookaheadDecoding()
+{
+    mDecodingMode = DecodingMode::Lookahead();
+    if (!mLookaheadDecodingConfig.has_value())
+    {
+        mLookaheadDecodingConfig = executor::LookaheadDecodingConfig();
+    }
+}
+
 std::optional<MedusaChoices> DecodingConfig::getMedusaChoices() const
 {
     return mMedusaChoices;

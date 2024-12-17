@@ -64,7 +64,7 @@ public:
     static constexpr auto kPromptEmbeddingTableTensorName = "prompt_embedding_table";
     static constexpr auto kTasksTensorName = "tasks";
     static constexpr auto kPromptVocabSizeTensorName = "prompt_vocab_size";
-    static constexpr auto kMRopeRotarySinCosTensorName = "mrope_rotary_sin_cos";
+    static constexpr auto kMRopeRotaryCosSinTensorName = "mrope_rotary_cos_sin";
     static constexpr auto kMRopePositionDeltasTensorName = "mrope_position_deltas";
 
     using SizeType32 = runtime::SizeType32;
@@ -145,7 +145,7 @@ private:
     // Prompt tuning
     PromptTuningBuffers promptTuningBuffers;
     // Mrope
-    TensorPtr mropeRotarySinCos;
+    TensorPtr mropeRotaryCosSin;
     TensorPtr mropePositionDeltas;
 
     // LoRA
@@ -213,6 +213,7 @@ private:
 
     TensorPtr cacheGenerationLogits;           // Buffer for logits between steps to prevent from being overwritten.
     SizeType32 cacheGenerationLogitsOffset{0}; // Record the usage offset of the cacheGenerationLogits buffer.
+    TensorMap mAdditionalOutputTensors;        // Tensors storing additional output tensors.
 
     // engine I/O
     TensorMap inputMap;
@@ -223,7 +224,8 @@ public:
         std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
         runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig, executor::DecodingConfig const& decodingConfig,
-        std::optional<SizeType32> maxNumTokens = std::nullopt);
+        std::optional<SizeType32> maxNumTokens = std::nullopt,
+        std::optional<std::vector<std::string>> const& additionalOutputNames = std::nullopt);
 
     std::tuple<SizeType32, TensorMap const&, TensorMap&> prepareStep(RequestVector const& contextRequests,
         RequestVector const& genRequests, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
@@ -245,7 +247,8 @@ private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> maxAttentionWindowVec,
         SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
-        executor::DecodingConfig const& decodingConfig);
+        executor::DecodingConfig const& decodingConfig,
+        std::optional<std::vector<std::string>> const& additionalOutputNames = std::nullopt);
 
     void reshape(runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);

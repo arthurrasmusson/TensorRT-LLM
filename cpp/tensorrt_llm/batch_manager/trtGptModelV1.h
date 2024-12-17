@@ -89,6 +89,8 @@ public:
     [[nodiscard]] runtime::BufferManager const& getBufferManager() const override;
     [[nodiscard]] runtime::BufferManager::CudaStreamPtr getRuntimeStreamPtr() const override;
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
+    [[nodiscard]] nvinfer1::DataType getTensorDataType(std::string const& name) const override;
+    [[nodiscard]] nvinfer1::Dims getTensorShape(std::string const& name) const override;
 
     [[nodiscard]] executor::IterationType getIterCounter() const noexcept override
     {

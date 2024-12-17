@@ -33,6 +33,7 @@ class TllmRuntime;
 class IGptDecoderBatched;
 class AllReduceBuffers;
 class NcclCommunicator;
+class SpeculativeDecodingMode;
 } // namespace tensorrt_llm::runtime
 
 namespace tensorrt_llm::batch_manager
@@ -172,10 +173,15 @@ public:
     [[nodiscard]] static TrtGptModelOptionalParams fixOptionalParams(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
     void prepareDistGenInitRequests(RequestList const& activeRequests);
-
+    void prepareDistGenBufferAndDecoder(RequestVector const& generationRequests);
     RequestVector scheduleDistGenInitRequests(RequestList const& activeRequests);
 
     void resetIterationStats() override;
+
+    runtime::SpeculativeDecodingMode getSpeculativeDecodingMode() const noexcept
+    {
+        return mModelConfig.getSpeculativeDecodingMode();
+    }
 
 private:
     [[nodiscard]] SizeType32 getContextBufferId() const
@@ -224,10 +230,13 @@ private:
 
     void debugIOTensors(RequestVector const& contextRequests, RequestVector const& generationRequests,
         TensorMap const& inputMap, TensorMap const& outputMap);
+    void copyAdditionalOutputs(
+        RequestVector const& contextRequests, RequestVector const& generationRequests, TensorMap const& outputMap);
 
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
-    void createBuffers(executor::DecodingConfig const& decodingConfig);
+    void createBuffers(executor::DecodingConfig const& decodingConfig,
+        std::optional<std::vector<std::string>> const& additionalOutputNames);
     std::shared_ptr<KVCacheManager> createKvCacheManager(KvCacheConfig const& kvCacheConfig,
         SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool, KvCacheType kvCacheType = KvCacheType::kSELF);
     void createRnnStateManager();
@@ -302,6 +311,10 @@ private:
 
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const override;
 
+    [[nodiscard]] nvinfer1::DataType getTensorDataType(std::string const& name) const override;
+
+    [[nodiscard]] nvinfer1::Dims getTensorShape(std::string const& name) const override;
+
     void reshapeKvTensors(SizeType32 maxBlocksPerSeq, kv_cache_manager::CacheType kvCacheType, SizeType32 numPools);
 
     // This function waits for MPI async sends on a separate thread
@@ -327,6 +340,9 @@ private:
     /// @param numPrimaryBlocks The number of blocks in the kv-cache's primary pool.
     /// @param numTokensPerBlock The number of tokens per kv-cache block.
     void adjustMaxAttentionWindow(SizeType32 numPrimaryBlocks, SizeType32 numTokensPerBlock);
+
+    /// @brief Change the speculative decoding mode.
+    void changeSpecDecMode(ScheduledRequests const& scheduledRequests);
 
 protected:
     std::shared_ptr<BaseKVCacheManager> getKVCacheManager() override
@@ -389,6 +405,8 @@ private:
     TensorPtr mExtendedRuntimePerfKnobsHost;
     // Config for debugging output
     std::optional<executor::DebugConfig> mDebugConfig;
+    // List of additional outputs for each request
+    std::optional<std::vector<std::string>> mAdditionalOutputNames;
 
     /******************** Components ********************/
     std::shared_ptr<nvinfer1::ILogger> mLogger;
@@ -499,6 +517,8 @@ private:
     bool mIsLeaderInOrchMode{false};
     // List of completed draft requests which logits will need to be sent to the target model.
     RequestVector mDraftRequestsWaitingToSendLogits;
+    SizeType32 mSeamlessLADMaxDraftLen{0};
+    bool mUseSeamlessLookahead{false};
 
     /******************** Algorithms ********************/
     // Algorithms are reentrant, they are assigned a state at

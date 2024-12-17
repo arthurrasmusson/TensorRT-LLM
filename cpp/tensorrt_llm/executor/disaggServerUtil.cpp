@@ -11,6 +11,7 @@
  */
 
 #include "tensorrt_llm/executor/disaggServerUtil.h"
+#include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/types.h"
 
 namespace tensorrt_llm::executor::disagg_executor
@@ -422,6 +423,9 @@ private:
 
     void waitResponseAndAppendThreadFun(bool isContext, int executorIdx)
     {
+
+        tensorrt_llm::common::setThreadName("waitResponseAndAppendThreadFun");
+
         auto& executor = isContext ? mContextExecutors[executorIdx] : mGenerationExecutors[executorIdx];
 
         while (!mShutdown)

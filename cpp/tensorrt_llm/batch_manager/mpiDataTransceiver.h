@@ -23,7 +23,9 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/cache_transmission/cacheConcatenate.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/cudaEvent.h"
 #include "tensorrt_llm/runtime/cudaStream.h"
 
 namespace tensorrt_llm::batch_manager
@@ -148,7 +150,6 @@ public:
         , mSelfState{std::move(selfCacheState),
               executor::kv_cache::CommState{
                   tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session()), selfIndex}}
-        , mBufferManager(std::make_shared<runtime::CudaStream>())
     {
         mFormatters.emplace_back(std::move(formatters)...);
         TLLM_CHECK(mFormatters.size() == 1);
@@ -162,7 +163,24 @@ private:
     MpiComm mComm;
     std::vector<TFormatter> mFormatters;
     executor::DataTransceiverState mSelfState;
-    runtime::BufferManager mBufferManager;
+
+    struct ReceiveCacheResource
+    {
+
+        runtime::BufferManager mBufferManager;
+        runtime::CudaEvent mCudaEvent;
+
+        ReceiveCacheResource(runtime::BufferManager&& bufferManager, runtime::CudaEvent&& cudaEvent)
+            : mBufferManager(bufferManager)
+            , mCudaEvent(std::move(cudaEvent))
+        {
+        }
+    };
+
+    std::unique_ptr<ReceiveCacheResource> const& getReceiveCacheResource(LlmRequest const& llmRequest);
+
+    std::unordered_map<std::string, std::unique_ptr<ReceiveCacheResource>> mProcessToResources;
+    std::mutex mProcessIoResouceMutex;
 };
 
 } // namespace tensorrt_llm::batch_manager

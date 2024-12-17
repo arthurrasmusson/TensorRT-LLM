@@ -15,6 +15,12 @@ add_gtest(requestTest requestTest.cpp)
 add_gtest(responseTest responseTest.cpp)
 add_gtest(executorTest executorTest.cpp)
 target_link_libraries(executorTest PRIVATE modelSpecStatic testingUtils)
+add_gtest(executorTestSmall executorTestSmall.cpp)
+target_link_libraries(executorTestSmall PRIVATE modelSpecStatic testingUtils)
+add_gtest(executorTestSmallArbitraryOutputTensors
+          executorTestSmallArbitraryOutputTensors.cpp)
+target_link_libraries(executorTestSmallArbitraryOutputTensors
+                      PRIVATE modelSpecStatic testingUtils)
 add_gtest(executorConfigTest executorConfigTest.cpp)
 add_gtest(executorTensorTest tensorTest.cpp)
 add_gtest(serializeUtilsTest serializeUtilsTest.cpp)

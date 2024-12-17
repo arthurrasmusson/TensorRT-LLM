@@ -32,7 +32,9 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/serializeUtils.h"
+#include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <numeric>
 #include <unordered_set>
 
@@ -199,63 +201,206 @@ void CacheTransceiver::requestAndReceiveSync(LlmRequest* llmRequest)
 {
     TLLM_CHECK(llmRequest && llmRequest->isGenerationOnlyRequest());
     {
-        llmRequest->setKvCacheTransferStart(std::chrono::steady_clock::now());
         auto future = mDataRequester->requestAndReceiveAsync(*llmRequest);
         future.get();
-        llmRequest->setKvCacheTransferEnd(std::chrono::steady_clock::now());
     }
-    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::kGENERATION_IN_PROGRESS;
+    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE;
 }
 
-void CacheTransceiver::checkTranferStatus(bool blocking)
+void CacheTransceiver::requestAndReceiveAsync(LlmRequest* llmRequest)
 {
-    // mMpiCommTensorPara
+    TLLM_CHECK(llmRequest && llmRequest->isGenerationOnlyRequest());
+
+    if (std::find_if(mRequesterFutures.begin(), mRequesterFutures.end(),
+            [llmRequest](auto const& pair) { return pair.first->mRequestId == llmRequest->mRequestId; })
+        != mRequesterFutures.end())
+    {
+        TLLM_LOG_WARNING("request id %zu already in mRequestFutres", llmRequest->mRequestId);
+        return;
+    }
+
+    auto future = mDataRequester->requestAndReceiveAsync(*llmRequest);
+    mRequesterFutures.emplace_back(llmRequest, std::move(future));
+    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_GENERATION_TRANS_IN_PROGRESS;
+}
+
+std::vector<LlmRequest::RequestIdType> gatherRequestIds(
+    mpi::MpiComm const& mpiComm, std::vector<LlmRequest::RequestIdType> const& requestIds)
+{
+    int localSize = static_cast<int>(requestIds.size());
+    std::vector<int> sizes(mpiComm.getSize());
+    mpiComm.allgather(&localSize, sizes.data(), 1, mpi::MpiType::kINT32);
+    // std::vector<LlmRequest::RequestIdType> all_data(total_size);
+    std::vector<int> displs(mpiComm.getSize());
+    int totalSize = 0;
+    for (int i = 0; i < mpiComm.getSize(); i++)
+    {
+        displs[i] = totalSize;
+        totalSize += sizes[i];
+    }
+    std::vector<LlmRequest::RequestIdType> retData(totalSize);
+    mpiComm.allgatherv(requestIds.data(), static_cast<int>(requestIds.size()), mpi::MpiType::kUINT64, retData.data(),
+        sizes, displs, mpi::MpiType::kUINT64);
+    return retData;
+}
+
+void CacheTransceiver::checkContextTransferStatus(bool blocking)
+{
     std::vector<LlmRequest::RequestIdType> contextCompleteRequestIds;
-
-    if ((!mMpiGroupTensorParaComm) || (mMpiGroupTensorParaComm->getRank() == 0))
+    for (auto&& [request, future] : mResponderFutures)
     {
-        for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
+        if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
         {
-            if (it->second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready || blocking)
-            {
-
-                it->second.get();
-
-                it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
-                contextCompleteRequestIds.push_back(it->first->mRequestId);
-                it = mResponderFutures.erase(it);
-            }
-            else
-            {
-                ++it;
-            }
+            contextCompleteRequestIds.push_back(request->mRequestId);
         }
     }
 
-    if (mMpiGroupTensorParaComm && (mMpiGroupTensorParaComm->getSize() > 1))
+    std::unordered_map<LlmRequest::RequestIdType, int> frequencyMap;
+    if ((mMpiGroupTensorParaComm) && mMpiGroupTensorParaComm->getSize() > 1)
     {
-        mMpiGroupTensorParaComm->bcast(contextCompleteRequestIds, 0);
-        if (!(contextCompleteRequestIds.empty()) && (mMpiGroupTensorParaComm->getRank() > 0))
-        {
-            std::unordered_set<LlmRequest::RequestIdType> toCompleteIdSet{
-                contextCompleteRequestIds.begin(), contextCompleteRequestIds.end()};
-            for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
-            {
-                if (toCompleteIdSet.find(it->first->mRequestId) != toCompleteIdSet.end())
-                {
-                    it->second.get();
-                    it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
-                    it = mResponderFutures.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-        }
 
-        mMpiGroupTensorParaComm->barrier();
+        auto gatherRequestIdVec = gatherRequestIds(*mMpiGroupTensorParaComm, contextCompleteRequestIds);
+        for (auto&& requestId : gatherRequestIdVec)
+        {
+            frequencyMap[requestId]++;
+        }
     }
+    else
+    {
+        for (auto&& requestId : contextCompleteRequestIds)
+        {
+            frequencyMap[requestId]++;
+        }
+    }
+    std::vector<std::pair<LlmRequest::RequestIdType, int>> freqVec(frequencyMap.begin(), frequencyMap.end());
+
+    std::sort(freqVec.begin(), freqVec.end(),
+        [](std::pair<LlmRequest::RequestIdType, int> const& left,
+            std::pair<LlmRequest::RequestIdType, int> const& right) { return left.second > right.second; });
+    std::unordered_set<LlmRequest::RequestIdType> toCompleteIdSet;
+    for (auto&& [requestId, freq] : freqVec)
+    {
+        if (freq == ((mMpiGroupTensorParaComm) ? mMpiGroupTensorParaComm->getSize() : 1))
+        {
+            toCompleteIdSet.insert(requestId);
+        }
+    }
+    for (auto it = mResponderFutures.begin(); it != mResponderFutures.end();)
+    {
+        if (blocking || (toCompleteIdSet.find(it->first->mRequestId) != toCompleteIdSet.end()))
+        {
+            it->second.get();
+            it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
+            it = mResponderFutures.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void CacheTransceiver::checkGenTransferStatus(int atLeastRequestNum)
+{
+
+    bool blockAll = atLeastRequestNum < 0;
+    std::vector<LlmRequest::RequestIdType> genTransferReadyRequestIds;
+    for (auto&& [request, future] : mRequesterFutures)
+    {
+        if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        {
+            genTransferReadyRequestIds.push_back(request->mRequestId);
+        }
+    }
+    std::unordered_map<LlmRequest::RequestIdType, int> frequencyMap;
+
+    std::vector<LlmRequest::RequestIdType> toBlockRequestIds;
+    if ((mMpiGroupComm) && mMpiGroupComm->getSize() > 1)
+    {
+        auto gatherRequestIdVec = gatherRequestIds(*mMpiGroupComm, genTransferReadyRequestIds);
+        for (auto&& requestId : gatherRequestIdVec)
+        {
+            frequencyMap[requestId]++;
+        }
+    }
+    else
+    {
+        for (auto&& requestId : genTransferReadyRequestIds)
+        {
+            frequencyMap[requestId]++;
+        }
+    }
+
+    std::vector<std::pair<LlmRequest::RequestIdType, int>> freqVec(frequencyMap.begin(), frequencyMap.end());
+
+    std::sort(freqVec.begin(), freqVec.end(),
+        [](std::pair<LlmRequest::RequestIdType, int> const& left,
+            std::pair<LlmRequest::RequestIdType, int> const& right) { return left.second > right.second; });
+    std::unordered_set<LlmRequest::RequestIdType> toCompleteIdSet;
+    size_t idx = 0;
+    while (atLeastRequestNum > static_cast<int>(toCompleteIdSet.size()))
+    {
+        if (idx >= freqVec.size())
+        {
+            break;
+        }
+        toCompleteIdSet.insert(freqVec.at(idx).first);
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), " checkGenTransferStatus atLest form freqVec requestId: %zu ",
+            freqVec.at(idx).first);
+        idx++;
+    }
+    idx = 0;
+
+    // insert order
+    while (atLeastRequestNum > static_cast<int>(toCompleteIdSet.size()))
+    {
+        if (idx >= mRequesterFutures.size())
+        {
+            break;
+        }
+        if (toCompleteIdSet.find(mRequesterFutures.at(idx).first->mRequestId) == toCompleteIdSet.end())
+        {
+            toCompleteIdSet.insert(mRequesterFutures.at(idx).first->mRequestId);
+            TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+                " checkGenTransferStatus atLest form RequesterFeature requestId: %zu atLeastRequestNum:%d",
+                mRequesterFutures.at(idx).first->mRequestId, atLeastRequestNum);
+        }
+        idx++;
+    }
+    for (auto&& [requestId, freq] : freqVec)
+    {
+        if (freq == ((mMpiGroupComm != nullptr) ? mMpiGroupComm->getSize() : 1))
+        {
+            toCompleteIdSet.insert(requestId);
+        }
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), " checkGenTransferStatus freqVec requestId: %zu,freq:%d  ",
+            requestId, freq);
+    }
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+        " checkGenTransferStatus toCompleteIdSet size: %zu,atLeastRequestNum:%d  ", toCompleteIdSet.size(),
+        atLeastRequestNum);
+    for (auto it = mRequesterFutures.begin(); it != mRequesterFutures.end();)
+    {
+        if (blockAll || toCompleteIdSet.find(it->first->mRequestId) != toCompleteIdSet.end())
+        {
+            it->second.get();
+
+            TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+                "****it->first->mRequestId:%ld , context request id:%ld***********get feature***",
+                it->first->mRequestId, it->first->getContextPhaseParams().value().getReqId());
+            it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE;
+            it = mRequesterFutures.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+bool CacheTransceiver::checkGenTransferComplete() const
+{
+    return mRequesterFutures.empty();
 }
 
 } // namespace tensorrt_llm::batch_manager

@@ -98,6 +98,10 @@ MedusaBuffers::MedusaBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, r
     medusaPositionOffsetsDevice = manager.copyFrom(*medusaPositionOffsetsHost, runtime::MemoryType::kGPU);
     medusaTreeIdsDevice = manager.copyFrom(*medusaTreeIdsHost, runtime::MemoryType::kGPU);
     medusaPathsDevice = manager.copyFrom(*medusaPathsHost, runtime::MemoryType::kGPU);
+
+    // use speculative decoding buffer
+    medusaUseSpecDecoding = manager.cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
+    runtime::bufferCast<SizeType32>(*medusaUseSpecDecoding)[0] = 1;
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -125,6 +129,7 @@ void MedusaBuffers::insertInputTensors(
     inputBuffers.insert_or_assign("spec_decoding_packed_mask", attentionPackedMaskDevice);
     inputBuffers.insert_or_assign("spec_decoding_generation_lengths", medusaGenerationLengthsDevice);
     inputBuffers.insert_or_assign("spec_decoding_position_offsets", medusaPositionOffsetsDevice);
+    inputBuffers.insert_or_assign("spec_decoding_use", medusaUseSpecDecoding);
     if (worldConfig.isLastPipelineParallelRank())
     {
         outputBuffers.insert_or_assign("medusa_logits", medusaLogitsDevice);

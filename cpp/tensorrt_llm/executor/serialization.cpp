@@ -195,8 +195,9 @@ OutputConfig Serialization::deserializeOutputConfig(std::istream& is)
     auto excludeInputFromOutput = su::deserialize<bool>(is);
     auto returnEncoderOutput = su::deserialize<bool>(is);
     auto returnPerfMetrics = su::deserialize<bool>(is);
+    auto additionalOutputs = su::deserialize<std::optional<std::vector<OutputConfig::AdditionalModelOutput>>>(is);
     return OutputConfig{returnLogProbs, returnContextLogits, returnGenerationLogits, excludeInputFromOutput,
-        returnEncoderOutput, returnPerfMetrics};
+        returnEncoderOutput, returnPerfMetrics, additionalOutputs};
 }
 
 void Serialization::serialize(OutputConfig const& config, std::ostream& os)
@@ -207,6 +208,7 @@ void Serialization::serialize(OutputConfig const& config, std::ostream& os)
     su::serialize(config.excludeInputFromOutput, os);
     su::serialize(config.returnEncoderOutput, os);
     su::serialize(config.returnPerfMetrics, os);
+    su::serialize(config.additionalModelOutputs, os);
 }
 
 size_t Serialization::serializedSize(OutputConfig const& config)
@@ -218,6 +220,29 @@ size_t Serialization::serializedSize(OutputConfig const& config)
     totalSize += su::serializedSize(config.excludeInputFromOutput);
     totalSize += su::serializedSize(config.returnEncoderOutput);
     totalSize += su::serializedSize(config.returnPerfMetrics);
+    totalSize += su::serializedSize(config.additionalModelOutputs);
+    return totalSize;
+}
+
+// OutputConfig::AdditionalModelOutput
+OutputConfig::AdditionalModelOutput Serialization::deserializeAdditionalModelOutput(std::istream& is)
+{
+    auto name = su::deserialize<std::string>(is);
+    auto gatherContext = su::deserialize<bool>(is);
+    return OutputConfig::AdditionalModelOutput{name, gatherContext};
+}
+
+void Serialization::serialize(OutputConfig::AdditionalModelOutput const& additionalModelOutput, std::ostream& os)
+{
+    su::serialize(additionalModelOutput.name, os);
+    su::serialize(additionalModelOutput.gatherContext, os);
+}
+
+size_t Serialization::serializedSize(OutputConfig::AdditionalModelOutput const& additionalModelOutput)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(additionalModelOutput.name);
+    totalSize += su::serializedSize(additionalModelOutput.gatherContext);
     return totalSize;
 }
 
@@ -275,21 +300,21 @@ size_t Serialization::serializedSize(PromptTuningConfig const& config)
 // MropeConfig
 MropeConfig Serialization::deserializeMropeConfig(std::istream& is)
 {
-    auto mropeRotarySinCos = su::deserialize<Tensor>(is);
+    auto mropeRotaryCosSin = su::deserialize<Tensor>(is);
     auto mropePositionDeltas = su::deserialize<SizeType32>(is);
-    return MropeConfig{std::move(mropeRotarySinCos), std::move(mropePositionDeltas)};
+    return MropeConfig{std::move(mropeRotaryCosSin), std::move(mropePositionDeltas)};
 }
 
 void Serialization::serialize(MropeConfig const& config, std::ostream& os)
 {
-    su::serialize(config.mMRopeRotarySinCos, os);
+    su::serialize(config.mMRopeRotaryCosSin, os);
     su::serialize(config.mMRopePositionDeltas, os);
 }
 
 size_t Serialization::serializedSize(MropeConfig const& config)
 {
     size_t totalSize = 0;
-    totalSize += su::serializedSize(config.mMRopeRotarySinCos);
+    totalSize += su::serializedSize(config.mMRopeRotaryCosSin);
     totalSize += su::serializedSize(config.mMRopePositionDeltas);
 
     return totalSize;
@@ -736,6 +761,7 @@ Result Serialization::deserializeResult(std::istream& is)
     result.sequenceIndex = su::deserialize<SizeType32>(is);
     result.isSequenceFinal = su::deserialize<bool>(is);
     result.requestPerfMetrics = su::deserialize<std::optional<RequestPerfMetrics>>(is);
+    result.additionalOutputs = su::deserialize<std::vector<AdditionalOutput>>(is);
     return result;
 }
 
@@ -755,6 +781,7 @@ void Serialization::serialize(Result const& result, std::ostream& os)
     su::serialize(result.sequenceIndex, os);
     su::serialize(result.isSequenceFinal, os);
     su::serialize(result.requestPerfMetrics, os);
+    su::serialize(result.additionalOutputs, os);
 }
 
 size_t Serialization::serializedSize(Result const& result)
@@ -774,6 +801,7 @@ size_t Serialization::serializedSize(Result const& result)
     totalSize += su::serializedSize(result.sequenceIndex);
     totalSize += su::serializedSize(result.isSequenceFinal);
     totalSize += su::serializedSize(result.requestPerfMetrics);
+    totalSize += su::serializedSize(result.additionalOutputs);
     return totalSize;
 }
 
@@ -838,6 +866,28 @@ std::vector<char> Serialization::serialize(std::vector<Response> const& response
     return buffer;
 }
 
+AdditionalOutput Serialization::deserializeAdditionalOutput(std::istream& is)
+{
+    return {
+        Serialization::deserializeString(is),
+        Serialization::deserializeTensor(is),
+    };
+}
+
+void Serialization::serialize(AdditionalOutput const& additionalOutput, std::ostream& os)
+{
+    su::serialize(additionalOutput.name, os);
+    su::serialize(additionalOutput.output, os);
+}
+
+size_t serializedSize(AdditionalOutput const& additionalOutput)
+{
+    size_t totalSize = 0;
+    totalSize += su::serializedSize(additionalOutput.name);
+    totalSize += su::serializedSize(additionalOutput.output);
+    return totalSize;
+}
+
 // ExecutorConfig
 ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
 {
@@ -885,11 +935,15 @@ ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getSpecDecConfig), ExecutorConfig>>(is);
     auto guidedDecodingConfig
         = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGuidedDecodingConfig), ExecutorConfig>>(is);
+    auto additionalOutputNames
+        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getAdditionalOutputNames), ExecutorConfig>>(
+            is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
         peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig,
-        debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds, specDecConfig, guidedDecodingConfig};
+        debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds, specDecConfig, guidedDecodingConfig,
+        additionalOutputNames};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -920,6 +974,7 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getMaxSeqIdleMicroseconds());
     totalSize += su::serializedSize(executorConfig.getSpecDecConfig());
     totalSize += su::serializedSize(executorConfig.getGuidedDecodingConfig());
+    totalSize += su::serializedSize(executorConfig.getAdditionalOutputNames());
 
     return totalSize;
 }
@@ -950,6 +1005,7 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getMaxSeqIdleMicroseconds(), os);
     su::serialize(executorConfig.getSpecDecConfig(), os);
     su::serialize(executorConfig.getGuidedDecodingConfig(), os);
+    su::serialize(executorConfig.getAdditionalOutputNames(), os);
 }
 
 // KvCacheConfig

@@ -12,7 +12,9 @@
 
 #include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/common/cudaUtils.h"
 #include <cstdio>
+#include <future>
 #include <memory>
 #if ENABLE_UCX
 #include "tensorrt_llm/batch_manager/ucxDataTransceiver.h"
@@ -209,9 +211,12 @@ TEST_F(MockTransceiverTest, MpiRequesterBasic)
     auto receiver = std::make_unique<MockDataReceiver>();
     EXPECT_CALL(*receiver, sendRequestInfo).WillOnce(Return());
     EXPECT_CALL(*receiver, receiveSync).WillOnce(Return());
-
     DataRequester requester{std::move(receiver)};
     auto request = makeLlmRequest(0);
+    auto state = std::make_unique<texec::DataTransceiverState>();
+    state->setCommState(texec::kv_cache::CommState{std::vector<int>{0}});
+    auto stats = texec::ContextPhaseParams({}, 0, state.release());
+    request->setContextPhaseParams(std::move(stats));
     auto future = requester.requestAndReceiveAsync(*request);
     future.get();
 }
@@ -331,6 +336,7 @@ protected:
         {
             auto future = mRequester->requestAndReceiveAsync(*llmRequest);
             future.get();
+            TLLM_CUDA_CHECK(cudaDeviceSynchronize());
             auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
             for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
             {
@@ -649,20 +655,25 @@ protected:
         return future;
     }
 
-    void addRequestAndTransportCacheForGeneration(std::shared_ptr<LlmRequest> const& llmRequest)
+    std::future<void> addRequestAndTransportCacheForGeneration(std::shared_ptr<LlmRequest> const& llmRequest)
     {
         auto constexpr beamIdx{0};
         auto constexpr beamWidth{1};
         mManager->addSequence(llmRequest->mRequestId, llmRequest->getNumTokens(beamIdx), beamWidth, llmRequest);
 
-        auto future = mRequester->requestAndReceiveAsync(*llmRequest);
-        future.get();
+        return mRequester->requestAndReceiveAsync(*llmRequest);
+    }
+
+    void generationVerifyKVCache(std::shared_ptr<LlmRequest> const& llmRequest)
+    {
+        auto constexpr beamIdx{0};
+        auto constexpr beamWidth{1};
         int blockIdx = 0;
 
+        TLLM_CUDA_CHECK(cudaDeviceSynchronize());
         auto blockEndIt = getBlockEndIt(*mManager, *llmRequest, beamIdx, 0);
         for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
         {
-
             verifyBlockData(*it, blockIdx, llmRequest->mRequestId);
             blockIdx++;
         }
@@ -844,11 +855,12 @@ TEST_P(MpiAsymmetricalCacheTest, TestCase)
         setUpCacheTransceiver();
         std::vector<std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest>> requests;
 
-        for (auto len : {10, 20, 30})
+        for (auto len : {30, 10, 60, 30, 60, 10})
         {
             requests.emplace_back(makeLlmRequest(len));
         }
         std::vector<std::future<void>> contextFutures;
+        std::vector<std::future<void>> generationFutures;
 
         if (mIsContext)
         {
@@ -863,7 +875,7 @@ TEST_P(MpiAsymmetricalCacheTest, TestCase)
             mComm->barrier();
             for (auto&& request : requests)
             {
-                addRequestAndTransportCacheForGeneration(request);
+                generationFutures.push_back(std::move(addRequestAndTransportCacheForGeneration(request)));
             }
         }
         if (mIsContext)
@@ -871,6 +883,17 @@ TEST_P(MpiAsymmetricalCacheTest, TestCase)
             for (auto&& cfuture : contextFutures)
             {
                 cfuture.get();
+            }
+        }
+        else
+        {
+            for (auto&& gfuture : generationFutures)
+            {
+                gfuture.get();
+            }
+            for (auto&& request : requests)
+            {
+                generationVerifyKVCache(request);
             }
         }
         mComm->barrier();

@@ -36,7 +36,9 @@
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/kernels/decodingCommon.h"
+#include "tensorrt_llm/layers/defaultDecodingParams.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/gptDecoderBatched.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
@@ -110,6 +112,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     , mDecodingConfig{optionalParams.decodingConfig}
     , mExtendedRuntimePerfKnobConfig{optionalParams.extendedRuntimePerfKnobConfig}
     , mDebugConfig{optionalParams.debugConfig}
+    , mAdditionalOutputNames{optionalParams.additionalOutputNames}
     , mLogger{logger ? std::move(logger) : std::make_shared<TllmLogger>()}
     , mRuntime{std::make_shared<TllmRuntime>(
           rawEngine, mLogger.get(), optionalParams.gpuWeightsPercent, modelConfig.useShapeInference())}
@@ -161,6 +164,13 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
             mModelConfig.isTransformerBased(), "Only transformer based model support context generation fusion now.");
     }
 
+    if (mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
+    {
+        mSeamlessLADMaxDraftLen = modelConfig.getMaxDecodingDraftTokens();
+        // TODO: enable it when speculativeDecodingMode == None and run with '--lookahead_config'
+        mUseSeamlessLookahead = false;
+    }
+
     setupSpeculativeDecodingModule(mDecodingConfig);
 
     if (mModelConfig.getSpeculativeDecodingMode().needsKVCacheRewind())
@@ -190,7 +200,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
 
     auto& memCounter = MemoryCounters::getInstance();
     auto const gpuUsage1 = memCounter.getGpu();
-    createBuffers(mDecodingConfig);
+    createBuffers(mDecodingConfig, mAdditionalOutputNames);
     auto const gpuUsage2 = memCounter.getGpu();
     TLLM_LOG_INFO("[MemUsageChange] Allocated %s GPU memory for runtime buffers.",
         memCounter.bytesToString(gpuUsage2 - gpuUsage1).c_str());
@@ -412,7 +422,8 @@ TrtGptModelInflightBatching::~TrtGptModelInflightBatching()
 {
     if (mCacheTransceiver)
     {
-        mCacheTransceiver->checkTranferStatus(true);
+        mCacheTransceiver->checkContextTransferStatus(true);
+        TLLM_CHECK_WITH_INFO(mCacheTransceiver->checkGenTransferComplete(), "Genearation transfer not complete");
     }
     if (mAsyncSendWaitThread)
     {
@@ -443,7 +454,7 @@ void TrtGptModelInflightBatching::setupSpeculativeDecodingModule(executor::Decod
         SizeType32 maxDraftPathLen{0};
         std::tie(std::ignore, std::ignore, maxDraftTokens, maxDraftPathLen)
             = maxLookaheadConfig.calculateSpeculativeResource();
-        TLLM_CHECK(maxDraftTokens == mModelConfig.getMaxDecodingDraftTokens());
+        TLLM_CHECK(maxDraftTokens <= mModelConfig.getMaxDecodingDraftTokens());
         mModelConfig.getSpeculativeDecodingModulePtr()->setMaxDraftTokens(maxDraftTokens);
         mModelConfig.getSpeculativeDecodingModulePtr()->setMaxDraftPathLen(maxDraftPathLen);
 
@@ -903,7 +914,7 @@ void TrtGptModelInflightBatching::forwardSync()
     }
     if (mCacheTransceiver)
     {
-        mCacheTransceiver->checkTranferStatus();
+        mCacheTransceiver->checkContextTransferStatus();
     }
     ++mIterCounter;
 
@@ -961,6 +972,17 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
         TLLM_LOG_DEBUG("Running DECODER request scheduler");
         auto [fittingRequests, requestsToPause]
             = (*mCapacityScheduler)(activeRequests, mKvCacheManager, mPeftCacheManager, mCrossKvCacheManager);
+        if (fittingRequests.empty())
+        {
+            TLLM_LOG_WARNING(
+                "CapacityScheduler pick up no requests, probably because of insufficient resources such as kvCache "
+                ",will try wait for kvCache transfer to complete");
+            if (mCacheTransceiver)
+            {
+                mCacheTransceiver->checkContextTransferStatus(true);
+                // will free kvCache in next iteration.
+            }
+        }
         std::tie(currRequests.contextRequests, currRequests.generationRequests)
             = (*mMicroBatchScheduler)(fittingRequests, mInflightReqIds, mMaxBatchSizeRuntime, mMaxNumTokensRuntime);
 
@@ -968,6 +990,11 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
         (*mPauseRequests)(requestsToPause, mInflightReqIds, mReqIdsToPause, false, *mSeqSlotManager, mKvCacheManager,
             mCrossKvCacheManager, mPeftCacheManager);
+
+        if (mUseSeamlessLookahead)
+        {
+            changeSpecDecMode(currRequests);
+        }
 
         if (!currRequests.empty())
         {
@@ -995,6 +1022,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             mPeftTables.at(mMicroBatchId)
                 = mPeftCacheManager->ensureBatch(currRequests.contextRequests, currRequests.generationRequests, true);
+
+            prepareDistGenBufferAndDecoder(currRequests.generationRequests);
             executeBatch(currRequests);
 
             if (mWorldConfig.isLastPipelineParallelRank() && mGuidedDecoder)
@@ -1379,7 +1408,8 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& decodingConfig)
+void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& decodingConfig,
+    std::optional<std::vector<std::string>> const& additionalOutputNames)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
@@ -1388,7 +1418,7 @@ void TrtGptModelInflightBatching::createBuffers(executor::DecodingConfig const& 
     {
         mBuffers.emplace_back(std::make_shared<RuntimeBuffers>(getMaxBatchSize(), mOperatingBeamWidth,
             getMaxAttentionWindowVec(), getMaxAttentionWindow(), getSinkTokenLen(), *mRuntime, mModelConfig,
-            mWorldConfig, decodingConfig, getMaxNumTokens()));
+            mWorldConfig, decodingConfig, getMaxNumTokens(), additionalOutputNames));
     }
 
     mDecodingInputs.resize(mNumMicroBatches);
@@ -1478,40 +1508,123 @@ void TrtGptModelInflightBatching::prepareDistGenInitRequests(RequestList const& 
 
     if (!toPrepare)
     {
+
+        if (common::getEnvDisableKVCacheTransferOverlap())
+        {
+            return;
+        }
+        if (mCacheTransceiver)
+        {
+            auto timeStart = std::chrono::steady_clock::now();
+
+            auto const needCheck = std::any_of(activeRequests.begin(), activeRequests.end(),
+                [](auto const& req) { return req->isDisaggGenerationTransmissionInProgress(); });
+            auto const needCheckOne = std::all_of(activeRequests.begin(), activeRequests.end(),
+                [](auto const& req) { return req->isDisaggGenerationTransmissionInProgress(); });
+
+            if (needCheck)
+            {
+                int atLeastNum = needCheckOne ? 1 : 0;
+                TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+                    "noPreppared requests, checkGenTransferStatus atLeastNum:%d", atLeastNum);
+
+                mCacheTransceiver->checkGenTransferStatus(atLeastNum);
+
+                auto timeEnd = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration<float, std::milli>(timeEnd - timeStart).count();
+                TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+                    "no Prepare prepareDistGenInitRequests time:%f ms, "
+                    "needCheckOne:%d,needCheck:%ld,activeRequests.size():%ld",
+                    duration, needCheckOne, needCheck, activeRequests.size());
+            }
+        }
         return;
     }
+    auto timeStart = std::chrono::steady_clock::now();
 
+    auto const genInitReqNum = std::count_if(activeRequests.begin(), activeRequests.end(),
+        [](auto const& req) { return req->isDisaggGenerationInitState(); });
     auto newGenReqs = scheduleDistGenInitRequests(activeRequests);
-
     for (auto& newGenReq : newGenReqs)
     {
         if (newGenReq->isDisaggGenerationInitState())
         {
-            auto const reqSeqSlot = mSeqSlotManager->getSequenceSlot(true, newGenReq->mRequestId);
-            newGenReq->mSeqSlot = reqSeqSlot;
             auto const requestId = newGenReq->mRequestId;
             mKvCacheManager->addSequence(
                 requestId, newGenReq->mPromptLen, newGenReq->mSamplingConfig.beamWidth, newGenReq);
-            RequestVector contextRequests;
-            RequestVector generationRequests;
-            contextRequests.push_back(newGenReq);
+            if (common::getEnvDisableKVCacheTransferOverlap())
+            {
+                mCacheTransceiver->requestAndReceiveSync(newGenReq.get());
+            }
+            else
+            {
+                mCacheTransceiver->requestAndReceiveAsync(newGenReq.get());
+            }
+        }
+    }
+    if (common::getEnvDisableKVCacheTransferOverlap())
+    {
+        return;
+    }
+    if (mCacheTransceiver)
+    {
+        auto const blockTransfer = std::all_of(activeRequests.begin(), activeRequests.end(),
+            [](auto const& req) { return req->isDisaggGenerationTransmissionInProgress(); });
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "newGenReqs.size():%ld requests, activeRequests.size():%ld checkGenTransferStatus :%d original "
+            "gen_only_requests_num:%ld",
+            newGenReqs.size(), activeRequests.size(), blockTransfer, genInitReqNum);
+        mCacheTransceiver->checkGenTransferStatus(blockTransfer ? 1 : 0);
+        auto timeEnd = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration<float, std::milli>(timeEnd - timeStart).count();
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "prepareDistGenInitRequests time:%f ms, "
+            "blockTransfer:%d,genInitReqNum:%ld,newGenReqs.size():%ld,activeRequests.size():%ld",
+            duration, blockTransfer, genInitReqNum, newGenReqs.size(), activeRequests.size());
+    }
+}
+
+void TrtGptModelInflightBatching::prepareDistGenBufferAndDecoder(RequestVector const& generationRequests)
+{
+
+    if (!mModelConfig.getSpeculativeDecodingMode().needsDecoderPrologue())
+    {
+        // set decoderStep for disagg_generation
+        RequestVector cacheTransCompleteRequests;
+        for (auto const& request : generationRequests)
+        {
+            if (request->isDisaggGenerationTransmissionComplete())
+            {
+                cacheTransCompleteRequests.push_back((request));
+            }
+        }
+        if (!cacheTransCompleteRequests.empty())
+        {
+            auto timeStart = std::chrono::steady_clock::now();
             auto const bufferId = getFusedBufferId();
             auto& runtimeBuffers = *mBuffers[bufferId];
-            runtimeBuffers.prepareStep(contextRequests, generationRequests, getMaxBeamWidth(), getMaxAttentionWindow(),
+            runtimeBuffers.prepareStep(cacheTransCompleteRequests, {}, getMaxBeamWidth(), getMaxAttentionWindow(),
                 *mDecoderBuffers, mKvCacheManager.get(), mCrossKvCacheManager.get(), mRnnStateManager.get(),
                 mPeftTables[mMicroBatchId], *mRuntime, mModelConfig, mWorldConfig);
-            setupDecoderStep(contextRequests);
+            setupDecoderStep(cacheTransCompleteRequests);
             sync_check_cuda_error();
-            // TODO: need to modificate the hard coding.
-            newGenReq->setContextCurrentPosition(newGenReq->mPromptLen);
-            newGenReq->setDecodingIter(1);
-            auto const reqBeamWidth = newGenReq->mSamplingConfig.beamWidth;
-            auto firstGenTokens = newGenReq->getContextPhaseParams().value().getFirstGenTokens();
+            auto timeEnd = std::chrono::steady_clock::now();
+            auto duration = std::chrono::duration<float, std::milli>(timeEnd - timeStart).count();
+            TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+                "prepareDistGenBufferAndDecoder time:%f ms , cacheTransCompleteRequests.size():%ld", duration,
+                cacheTransCompleteRequests.size());
+        }
+        for (auto& request : cacheTransCompleteRequests)
+        {
+            request->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
+            request->setContextCurrentPosition(request->mPromptLen);
+            request->setDecodingIter(1);
+            auto const reqBeamWidth = request->mSamplingConfig.beamWidth;
+            auto firstGenTokens = request->getContextPhaseParams().value().getFirstGenTokens();
             for (SizeType32 beam = 0; beam < reqBeamWidth; ++beam)
             {
-                newGenReq->addNewToken(firstGenTokens.at(beam), beam);
+                request->addNewToken(firstGenTokens.at(beam), beam);
             }
-            mCacheTransceiver->requestAndReceiveSync(newGenReq.get());
         }
     }
 }
@@ -1598,6 +1711,53 @@ void TrtGptModelInflightBatching::prepareGraph(SizeType32 bufferId, SizeType32 o
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void TrtGptModelInflightBatching::copyAdditionalOutputs(
+    RequestVector const& contextRequests, RequestVector const& generationRequests, TensorMap const& outputMap)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    auto const& manager = mRuntime->getBufferManager();
+    SizeType32 srcTensorIndex{0}; // One index shared across all output tensors
+    for (auto const& llmReq : contextRequests)
+    {
+        auto numContextTokens = llmReq->getContextChunkSize();
+        for (auto const& outputTensor : llmReq->getAdditionalContextOutputs())
+        {
+            auto const& outputTensorName = outputTensor.first;
+            auto tensorIt = outputMap.find(outputTensorName);
+            TLLM_CHECK_WITH_INFO(
+                tensorIt != outputMap.end(), "Additional context output tensor not found %s", outputTensorName.c_str());
+
+            auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex, numContextTokens);
+            auto dstView = ITensor::slice(outputTensor.second, llmReq->getContextCurrentPosition(), numContextTokens);
+            manager.copy(*srcView, *dstView);
+        }
+        srcTensorIndex += numContextTokens;
+    }
+
+    for (auto const& llmReq : generationRequests)
+    {
+        auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+        for (auto const& outputTensor : llmReq->getAdditionalGenerationOutputs())
+        {
+            auto const& outputTensorName = outputTensor.first;
+            auto tensorIt = outputMap.find(outputTensorName);
+            TLLM_CHECK_WITH_INFO(tensorIt != outputMap.end(), "Additional generation output tensor not found %s",
+                outputTensorName.c_str());
+
+            for (SizeType32 beam = 0; beam < reqBeamWidth; beam++)
+            {
+                auto generatedLength = llmReq->getNumTokens(beam) - llmReq->getPromptLen();
+                TLLM_CHECK(generatedLength >= 1);
+                auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex + beam, 1);
+                auto dstView = ITensor::slice(outputTensor.second, {beam, generatedLength - 1}, 1);
+                manager.copy(*srcView, *dstView);
+            }
+        }
+        srcTensorIndex += reqBeamWidth;
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 void TrtGptModelInflightBatching::executeStep(
     RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId)
 {
@@ -1652,6 +1812,11 @@ void TrtGptModelInflightBatching::executeStep(
     if (mDebugConfig)
     {
         debugIOTensors(contextRequests, generationRequests, inputMap, outputMap);
+    }
+
+    if (mAdditionalOutputNames.has_value() && !mAdditionalOutputNames.value().empty())
+    {
+        copyAdditionalOutputs(contextRequests, generationRequests, outputMap);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -2654,6 +2819,7 @@ void TrtGptModelInflightBatching::rewindKVCacheBlocks(SizeType32 numSequences)
     auto const elemSize = BufferDataType(mModelConfig.getKvDataType()).getSize();
     auto const sizeInBytesPerKVHead = mModelConfig.getSizePerHead() * elemSize;
     auto const maxBlocksPerSeq = mKvCacheManager->getMaxBlocksPerSeq();
+    auto const useOneMoreBlock = mKvCacheManager->isUseOneMoreBlock();
 
     auto const poolPointers = mKvCacheManager->getBlockPoolPointers();
     auto* const* pointerArrayPtr = bufferCast<void*>(*poolPointers);
@@ -2673,7 +2839,7 @@ void TrtGptModelInflightBatching::rewindKVCacheBlocks(SizeType32 numSequences)
         *mDecoderBuffers->draftBuffers.acceptedPackedPathsDevice, *runtimeBuffers.sequenceLengthsDevice,
         pointerArrayPtr, offsetArrayPtr, localNbLayers, numSequences, numKvHeads, sizeInBytesPerKVHead, commonRewindLen,
         rewindLens, *runtimeBuffers.seqSlotRemappingDevice, *runtimeBuffers.sortedSeqSlots, getMaxAttentionWindow(),
-        maxBlocksPerSeq, tokensPerBlock, mRuntime->getStreamPtr()->get());
+        maxBlocksPerSeq, tokensPerBlock, useOneMoreBlock, mRuntime->getStreamPtr()->get());
 
     sync_check_cuda_error();
 
@@ -2749,7 +2915,7 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
     TLLM_LOG_INFO("Changing operating beam width from %d to %d", mOperatingBeamWidth, beamWidth);
     mOperatingBeamWidth = beamWidth;
 
-    createBuffers(mDecodingConfig);
+    createBuffers(mDecodingConfig, mAdditionalOutputNames);
     createDecoder(mDecodingConfig.getDecodingMode());
 
     if (static_cast<bool>(mKvCacheManager))
@@ -2763,6 +2929,103 @@ void TrtGptModelInflightBatching::changeBeamWidth(SizeType32 beamWidth)
         auto const& blockManager = mCrossKvCacheManager->getBlockManager();
         reshapeKvTensors(
             mCrossKvCacheManager->getMaxBlocksPerSeq(), blockManager.getCacheType(), blockManager.getNumPools());
+    }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void TrtGptModelInflightBatching::changeSpecDecMode(ScheduledRequests const& scheduledRequests)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    if ((!mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
+            && !mModelConfig.getSpeculativeDecodingMode().isNone())
+        || scheduledRequests.empty() || mSeamlessLADMaxDraftLen == 0 || mModelConfig.computeGenerationLogits()
+        || mModelConfig.isRnnBased())
+    {
+        return;
+    }
+
+    bool canUseLookahead = false;
+    auto maxNumRequestForLad = mDecodingConfig.getLookaheadDecodingMaxNumRequest();
+    SizeType32 numRequests = scheduledRequests.contextRequests.size() + scheduledRequests.generationRequests.size();
+    if (numRequests > maxNumRequestForLad)
+    {
+        if (mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
+        {
+            canUseLookahead = false;
+        }
+        else
+        {
+            return;
+        }
+    }
+    {
+        bool useTopKTopP = false;
+        bool useBanWords = false;
+        bool useTempAccVocabPenalties = false; // use temperature and penalties that need to accumulate #vocab.
+        SizeType32 beamWidth = 1;
+        for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
+        {
+            for (auto const& llmReq : requests)
+            {
+                useTopKTopP |= !(llmReq->mSamplingConfig.useDefaultValues(
+                                     llmReq->mSamplingConfig.topK, layers::DefaultDecodingParams::getTopK())
+                    || llmReq->mSamplingConfig.useDefaultValues(llmReq->mSamplingConfig.topK, 1));
+                useTopKTopP |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.topP, layers::DefaultDecodingParams::getTopP());
+                useBanWords |= llmReq->getBadWordsList().has_value();
+                useBanWords |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.noRepeatNgramSize, layers::DefaultDecodingParams::getNoRepeatNgramSize());
+                useTempAccVocabPenalties |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.temperature, layers::DefaultDecodingParams::getTemperature());
+                useTempAccVocabPenalties |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.repetitionPenalty, layers::DefaultDecodingParams::getRepetitionPenalty());
+                useTempAccVocabPenalties |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.presencePenalty, layers::DefaultDecodingParams::getPresencePenalty());
+                useTempAccVocabPenalties |= !llmReq->mSamplingConfig.useDefaultValues(
+                    llmReq->mSamplingConfig.frequencyPenalty, layers::DefaultDecodingParams::getFrequencyPenalty());
+                beamWidth = llmReq->mSamplingConfig.beamWidth;
+                if (useTopKTopP || useBanWords || useTempAccVocabPenalties || beamWidth > 1)
+                {
+                    break;
+                }
+            }
+            canUseLookahead = !(useTopKTopP || useBanWords || useTempAccVocabPenalties || beamWidth > 1);
+        }
+    }
+
+    // Change speculative decoding mode
+    auto const bufferId = mCtxGenFusion
+        ? getFusedBufferId()
+        : (!scheduledRequests.contextRequests.empty() ? getContextBufferId() : getGenerationBufferId());
+    // TODO: enable lookahead for generation requests.
+    bool canChangeToLookahead = scheduledRequests.generationRequests.empty();
+    if (mModelConfig.getSpeculativeDecodingMode().isNone() && canUseLookahead && canChangeToLookahead)
+    {
+        // None -> Lookahead
+        mModelConfig.enableSeamlessLookaheadDecoding(mSeamlessLADMaxDraftLen);
+        mDecodingConfig.enableSeamlessLookaheadDecoding();
+        setupSpeculativeDecodingModule(mDecodingConfig);
+        mBuffers[bufferId]->lookaheadBuffers->enableLookaheadDecoding(
+            getMaxBatchSize(), mModelConfig.getMaxDecodingTokens());
+        mDecoderBuffers->enableLookaheadDecoding(getMaxNumSequences(), mModelConfig.getMaxDecodingTokens());
+        createDecoder(mDecodingConfig.getDecodingMode());
+    }
+    else if (mModelConfig.getSpeculativeDecodingMode().isLookaheadDecoding()
+        && (!canUseLookahead || numRequests > maxNumRequestForLad))
+    {
+        // Lookahead -> None
+        mModelConfig.disableSeamlessLookaheadDecoding();
+        mDecodingConfig.setDecodingMode(executor::DecodingMode::Auto());
+        mBuffers[bufferId]->lookaheadBuffers->disableLookaheadDecoding();
+        mDecoderBuffers->disableLookaheadDecoding(getMaxNumSequences());
+        mDecoder->disableLookahead(getMaxNumSequences(), scheduledRequests.generationRequests);
+        for (auto const& llmReq : scheduledRequests.generationRequests)
+        {
+            if (llmReq->getNumDraftTokens() > 0)
+            {
+                llmReq->discardDraftTokens(llmReq->getNumDraftTokens());
+            }
+        }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -2845,6 +3108,18 @@ executor::DebugTensorsPerIteration TrtGptModelInflightBatching::getCurrentDebugT
     }
 
     return debugTensors;
+}
+
+nvinfer1::DataType TrtGptModelInflightBatching::getTensorDataType(std::string const& name) const
+{
+    auto const& engine = mRuntime->getEngine();
+    return engine.getTensorDataType(name.c_str());
+}
+
+nvinfer1::Dims TrtGptModelInflightBatching::getTensorShape(std::string const& name) const
+{
+    auto const& engine = mRuntime->getEngine();
+    return engine.getTensorShape(name.c_str());
 }
 
 } // namespace tensorrt_llm::batch_manager

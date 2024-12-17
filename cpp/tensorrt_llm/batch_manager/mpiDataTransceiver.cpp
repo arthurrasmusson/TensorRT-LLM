@@ -11,6 +11,8 @@
  */
 
 #include "tensorrt_llm/batch_manager/mpiDataTransceiver.h"
+#include "tensorrt_llm/common/envUtils.h"
+#include <mutex>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -26,15 +28,20 @@ namespace tensorrt_llm::batch_manager
     TLLM_CHECK(id == MpiComm::Id::REQUEST_SEND);
     auto requesterRank{status.MPI_SOURCE};
     std::size_t infoSize{0};
-    mComm->recv(std::addressof(infoSize), 1, mpi::MpiType::kUINT64, requesterRank, MpiComm::kID_TAG);
+
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "recvRequestInfo for requesterRank rank:%d", requesterRank);
+    mComm->recv(std::addressof(infoSize), 1, mpi::MpiType::kUINT64, requesterRank, MpiComm::KINFO_SIZE_TAG);
 
     std::string serializedInfo;
     serializedInfo.resize(infoSize);
-    mComm->recv(serializedInfo.data(), infoSize, mpi::MpiType::kCHAR, requesterRank, MpiComm::kID_TAG);
+    mComm->recv(serializedInfo.data(), infoSize, mpi::MpiType::kCHAR, requesterRank, MpiComm::KINFO_TAG);
     std::istringstream iss(serializedInfo);
     auto info = std::make_unique<RequestInfo>(RequestInfo::deserialize(iss));
     auto const& commState = info->getTransState().getCommState();
     TLLM_CHECK(requesterRank == commState->getMpiState().mRanks[commState->getSelfIdx()]);
+
+    TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(), "End recvRequestInfo for request id:%ld requesterRank rank:%d",
+        info->getRequestId(), requesterRank);
     return info;
 #else
     TLLM_THROW("Multi device support is disabled.");
@@ -50,9 +57,10 @@ void MpiComm::sendRequestInfo(RequestInfo const& info, executor::kv_cache::Proce
 
     MpiComm::Id id{MpiComm::Id::REQUEST_SEND};
     auto responderRank = processInfo.getRank();
+
     mComm->send(std::addressof(id), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
-    mComm->send(std::addressof(infoSize), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::kID_TAG);
-    mComm->send(serializedInfo.data(), infoSize, mpi::MpiType::kCHAR, responderRank, MpiComm::kID_TAG);
+    mComm->send(std::addressof(infoSize), 1, mpi::MpiType::kUINT64, responderRank, MpiComm::KINFO_SIZE_TAG);
+    mComm->send(serializedInfo.data(), infoSize, mpi::MpiType::kCHAR, responderRank, MpiComm::KINFO_TAG);
 }
 
 [[nodiscard]] RequestInfo MpiDataSender::recvRequestInfo()
@@ -118,8 +126,16 @@ void MpiDataReceiver::sendRequestInfo(LlmRequest const& llmRequest)
              mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx(), destCacheState))
     {
         TLLM_CHECK(mpiState.mRanks.size() > static_cast<std::size_t>(index));
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "Start sendRequestInfo for request id:%ld , context request id:%ld responder rank:%d",
+            llmRequest.mRequestId, llmRequest.getContextPhaseParams().value().getReqId(), mpiState.mRanks.at(index));
+
         mComm.sendRequestInfo(
             RequestInfo{requestId, mSelfState}, executor::kv_cache::ProcessInfo{mpiState.mRanks.at(index)});
+
+        TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
+            "END sendRequestInfo for request id:%ld , context request id:%ld responder rank:%d", llmRequest.mRequestId,
+            llmRequest.getContextPhaseParams().value().getReqId(), mpiState.mRanks.at(index));
     }
 }
 
@@ -136,8 +152,32 @@ void MpiDataReceiver::receiveSync(LlmRequest const& llmRequest)
         TLLM_CHECK(mpiState.mRanks.size() > static_cast<std::size_t>(index));
         processInfos.emplace_back(executor::kv_cache::ProcessInfo{mpiState.mRanks.at(index)});
     }
+
+    auto const& resource = getReceiveCacheResource(llmRequest);
     formatter->formatInput(mComm, llmRequest, std::move(processInfos), mSelfState.getCacheState().value(),
-        mSelfState.getCommState().value().getSelfIdx(), destCacheState, mBufferManager);
+        mSelfState.getCommState().value().getSelfIdx(), destCacheState, resource->mBufferManager);
+}
+
+std::unique_ptr<MpiDataReceiver::ReceiveCacheResource> const& MpiDataReceiver::getReceiveCacheResource(
+    LlmRequest const& llmRequest)
+{
+
+    std::scoped_lock<std::mutex> lock(mProcessIoResouceMutex);
+    TLLM_CHECK(llmRequest.getDataTransceiverState().getCommState().has_value());
+    std::string processString = llmRequest.getDataTransceiverState().getCommState()->getMpiState().toString();
+
+    if (common::getEnvRequestKVCacheSerial())
+    {
+        processString = "default";
+    }
+    if (mProcessToResources.find(processString) == mProcessToResources.end())
+    {
+        mProcessToResources.emplace(processString,
+            std::make_unique<ReceiveCacheResource>(
+                runtime::BufferManager{std::make_shared<runtime::CudaStream>()}, runtime::CudaEvent{}));
+    }
+
+    return mProcessToResources.at(processString);
 }
 
 } // namespace tensorrt_llm::batch_manager

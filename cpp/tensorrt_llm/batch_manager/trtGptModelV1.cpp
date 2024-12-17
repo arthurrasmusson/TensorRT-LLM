@@ -678,6 +678,16 @@ void TrtGptModelV1::setReplicateLogitsPostProcessor(bool replicateLogitsPostProc
     TLLM_THROW("Logits post processor is not supported in V1 batcher.");
 }
 
+nvinfer1::DataType TrtGptModelV1::getTensorDataType(std::string const& name) const
+{
+    return mSession->getTensorDataType(name);
+}
+
+nvinfer1::Dims TrtGptModelV1::getTensorShape(std::string const& name) const
+{
+    return mSession->getTensorShape(name);
+}
+
 TrtGptModelV1::~TrtGptModelV1() = default;
 
 } // namespace tensorrt_llm::batch_manager

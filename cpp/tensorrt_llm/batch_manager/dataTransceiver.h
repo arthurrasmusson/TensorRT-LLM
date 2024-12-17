@@ -17,6 +17,7 @@
 #include "tensorrt_llm/executor/cacheCommunicator.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/serializeUtils.h"
+#include "tensorrt_llm/runtime/cudaEvent.h"
 
 namespace tensorrt_llm::batch_manager
 {
@@ -191,7 +192,7 @@ public:
     /// @param llmRequest Request object. Its data should be in an allocated but unwritten state when called, and the
     /// data for this request should remain intact only after future synchronization.
     /// @return Once the data is fully received, the future object will become valid.
-    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest const& llmRequest) const;
+    [[nodiscard]] std::future<void> requestAndReceiveAsync(LlmRequest& llmRequest) const;
 
     /// @brief Destructor.
     ~DataRequester();

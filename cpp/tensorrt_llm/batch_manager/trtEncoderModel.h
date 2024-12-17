@@ -87,6 +87,18 @@ public:
         return getModelConfig().getDataType();
     }
 
+    nvinfer1::DataType getTensorDataType(std::string const& name) const override
+    {
+        auto const& engine = mRuntime->getEngine();
+        return engine.getTensorDataType(name.c_str());
+    }
+
+    nvinfer1::Dims getTensorShape(std::string const& name) const override
+    {
+        auto const& engine = mRuntime->getEngine();
+        return engine.getTensorShape(name.c_str());
+    }
+
     [[nodiscard]] TrtGptModelType getModelType() const override
     {
         throw std::runtime_error("TrtEncoderModel does not have model type."); // FIXME:

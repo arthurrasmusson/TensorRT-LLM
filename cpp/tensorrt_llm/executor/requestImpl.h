@@ -17,6 +17,7 @@
 #include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/executor/tensor.h"
 #include "tensorrt_llm/executor/types.h"
+#include <vector>
 
 namespace su = tensorrt_llm::executor::serialize_utils;
 

@@ -18,6 +18,7 @@
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -118,6 +119,18 @@ struct MpiState
         return mRanks == other.mRanks;
     }
 
+    [[nodiscard]] std::string toString() const
+    {
+        std::stringstream sstring;
+        sstring << "[";
+        for (auto rank : mRanks)
+        {
+            sstring << rank << ",";
+        }
+        sstring << "]";
+        return sstring.str();
+    }
+
     std::vector<SizeType32> mRanks;
 };
 
@@ -126,6 +139,11 @@ struct SocketState
     [[nodiscard]] bool operator==(SocketState const& other) const noexcept
     {
         return mPort == other.mPort && mIp == other.mIp;
+    }
+
+    [[nodiscard]] std::string toString() const
+    {
+        return mIp + ":" + std::to_string(mPort);
     }
 
     std::uint16_t mPort;
@@ -185,6 +203,24 @@ public:
     [[nodiscard]] bool operator==(CommState const& other) const noexcept
     {
         return mState == other.mState;
+    }
+
+    [[nodiscard]] std::string toString() const
+    {
+        if (isMpiState())
+        {
+            return "MPI:" + getMpiState().toString();
+        }
+        {
+            std::stringstream sstring;
+            sstring << "SOCKET:[";
+            for (auto&& socket : getSocketState())
+            {
+                sstring << socket.toString() << ",";
+            }
+            sstring << "]";
+            return sstring.str();
+        }
     }
 
 private:

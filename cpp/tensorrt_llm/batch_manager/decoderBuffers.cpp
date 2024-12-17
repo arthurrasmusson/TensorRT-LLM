@@ -130,6 +130,22 @@ void DecoderBuffers::DraftBuffers::create(
     }
 }
 
+void DecoderBuffers::enableLookaheadDecoding(SizeType32 maxNumSequences, SizeType32 maxTokensPerStep)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    newOutputTokens->reshape(ITensor::makeShape({maxTokensPerStep, maxNumSequences, 1}));
+    newOutputTokensHost->reshape(ITensor::makeShape({maxTokensPerStep, maxNumSequences, 1}));
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void DecoderBuffers::disableLookaheadDecoding(SizeType32 maxNumSequences)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    newOutputTokens->reshape(ITensor::makeShape({1, maxNumSequences, 1}));
+    newOutputTokensHost->reshape(ITensor::makeShape({1, maxNumSequences, 1}));
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
 DecoderStepAsyncSend::DecoderStepAsyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
     BufferPtr const& newOutputTokensHost, BufferPtr const& finished, BufferPtr const& sequenceLengthsHost,
     BufferPtr const& cumLogProbsHost, BufferPtr const& logProbsHost, BufferPtr const& cacheIndirectionOutput,

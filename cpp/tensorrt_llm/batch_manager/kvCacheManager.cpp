@@ -947,9 +947,11 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
 
     // If maxBeamWidth > 1, use one more block for each sequence in the paged kv cache to avoid dropping the needed
     // tokens, when enabling cyclic kv cache.
-    auto const useOneMoreBlock
+    mUseOneMoreBlock
         = maxSequenceLength.has_value() && maxSequenceLength.value() > maxAttentionWindow && maxBeamWidth > 1;
-    if (useOneMoreBlock)
+    TLLM_CHECK_WITH_INFO(!mUseOneMoreBlock || mTemporaryAttentionWindow == 0,
+        "Can't support sliding window attention, paged context fmha, and beam search are used together.");
+    if (mUseOneMoreBlock)
     {
         mMaxTokenNum += tokensPerBlock;
     }
@@ -1505,6 +1507,18 @@ bool KVCacheManager::schedulingHasFreeBlocks(SizeType32 numRequired) const
 std::vector<std::vector<SizeType32>> const& KVCacheManager::getCacheBlockIds(RequestIdType requestId) const
 {
     return mSequences.at(requestId).getCacheBlockIds();
+}
+
+std::vector<std::vector<std::vector<SizeType32>>> KVCacheManager::getBatchCacheBlockIds(
+    std::vector<LlmRequest::RequestIdType> const& requestIds) const
+{
+    std::vector<std::vector<std::vector<SizeType32>>> result{};
+    result.reserve(requestIds.size());
+    for (auto& requestId : requestIds)
+    {
+        result.emplace_back(mSequences.at(requestId).getCacheBlockIds());
+    }
+    return result;
 }
 
 runtime::ITensor::SharedPtr KVCacheManager::getPrimaryPool(SizeType32 layer_idx) const

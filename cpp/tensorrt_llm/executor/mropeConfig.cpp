@@ -15,15 +15,15 @@
 
 namespace tensorrt_llm::executor
 {
-MropeConfig::MropeConfig(Tensor mropeRotarySinCos, SizeType32 mropePositionDeltas)
-    : mMRopeRotarySinCos(std::move(mropeRotarySinCos))
+MropeConfig::MropeConfig(Tensor mropeRotaryCosSin, SizeType32 mropePositionDeltas)
+    : mMRopeRotaryCosSin(std::move(mropeRotaryCosSin))
     , mMRopePositionDeltas(std::move(mropePositionDeltas))
 {
 }
 
-Tensor MropeConfig::getMRopeRotarySinCos() const
+Tensor MropeConfig::getMRopeRotaryCosSin() const
 {
-    return mMRopeRotarySinCos;
+    return mMRopeRotaryCosSin;
 }
 
 SizeType32 MropeConfig::getMRopePositionDeltas() const

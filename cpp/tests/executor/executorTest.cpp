@@ -2444,10 +2444,14 @@ void verifyGenerateDistStats(std::deque<RequestStatsPerIteration> const& iterati
     {
         for (auto const& requestStats : iteration.requestStats)
         {
-            if (requestStats.stage != RequestStage::kQUEUED)
+            if (requestStats.stage == RequestStage::kGENERATION_COMPLETE)
             {
                 EXPECT_TRUE(requestStats.disServingStats.has_value());
                 EXPECT_GT(requestStats.disServingStats.value().kvCacheTransferMS, 0.0);
+            }
+            if (requestStats.stage != RequestStage::kQUEUED)
+            {
+                EXPECT_TRUE(requestStats.disServingStats.has_value());
             }
             else
             {
@@ -4333,6 +4337,8 @@ public:
     MOCK_METHOD(SizeType32, getMaxDraftLen, (), (const));
     MOCK_METHOD(SizeType32, getNumMicroBatches, (), (const));
     MOCK_METHOD(nvinfer1::DataType, getLogitDataType, (), (const));
+    MOCK_METHOD(nvinfer1::DataType, getTensorDataType, (std::string const&), (const));
+    MOCK_METHOD(nvinfer1::Dims, getTensorShape, (std::string const&), (const));
     MOCK_METHOD(void, getCurrentIterationStats, (IterationStats&), (const));
     MOCK_METHOD(void, getCurrentRequestStats, (RequestStatsPerIteration&), (const));
     MOCK_METHOD(DebugTensorsPerIteration, getCurrentDebugTensors, (), (const));
@@ -6992,6 +6998,22 @@ INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP2PP2DisaggAsymmetricExecutorTest, Dis
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
         testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
         testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
+    testing::Combine(testing::Values(7),
+        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp1", "llama_tp2_pp1"}),
+        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4}, {5, 6}}),
+        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
+        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
+    generateTestNameDisaggParams);
+
+INSTANTIATE_TEST_SUITE_P(LlamaCon2TP2Gen2TP1DisaaggOrchestrator, DisaggOrchestratorParamsTest,
+    testing::Combine(testing::Values(7),
+        testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp1", "llama_tp1_pp1", "llama_tp1_pp1"}),
+        testing::Values(std::vector<std::vector<int>>{{1, 2}, {3, 4}, {5}, {6}}),
+        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}, {0}, {1}}),
+        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
     generateTestNameDisaggParams);
 
 INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,

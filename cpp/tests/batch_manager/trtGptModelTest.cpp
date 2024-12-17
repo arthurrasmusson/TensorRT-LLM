@@ -44,6 +44,7 @@ namespace
 auto const TEST_RESOURCE_PATH = fs::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
 auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
 auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
+auto const LLAMA_MODEL_PATH = ENGINE_PATH / "llama-7b-hf";
 } // namespace
 
 namespace tensorrt_llm::batch_manager
@@ -1094,6 +1095,105 @@ TEST_F(TrtGptModelLogitsTest, ReturnContextLogitsWithChunkedContext)
             }
         }
         finishList.clear();
+    }
+}
+
+class LlamaModelLADTest : public TrtGptModelTest
+{
+protected:
+    LlamaModelLADTest()
+        : TrtGptModelTest(LLAMA_MODEL_PATH / GetModelSpec().getModelPath() / "tp1-pp1-cp1-gpu")
+    {
+    }
+
+    static ModelSpec& GetModelSpec()
+    {
+        static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin()
+            .usePackedInput()
+            .setKVCacheType(KVCacheType::kPAGED)
+            .useRandomEndId()
+            .useLookaheadDecoding();
+        return modelSpec;
+    }
+};
+
+TEST_F(LlamaModelLADTest, SeamlessLookaheadDecoding)
+{
+    GTEST_SKIP() << "Will enable this test when we have a force LAD support.";
+    SizeType32 requestId = 0;
+    for (bool const initLADConfig : {true, false})
+    {
+        RequestList requestList{};
+        for (SizeType32 i = 0; i < 8; ++i)
+        {
+            SamplingConfig inSamplingConfig;
+            int correlationId = requestId;
+            auto maxNewTokens = 8;
+            auto tokens = std::make_shared<std::vector<int32_t>>(std::initializer_list<int32_t>{1, 2, 3, 4});
+            auto llmRequest
+                = std::make_shared<LlmRequest>(correlationId, maxNewTokens, tokens, inSamplingConfig, false);
+            requestList.emplace_back(std::move(llmRequest));
+            requestId += 1;
+        }
+
+        TrtGptModelOptionalParams optionalParams;
+        optionalParams.enableChunkedContext = false;
+        optionalParams.enableTrtOverlap = false;
+        optionalParams.maxBeamWidth = 1;
+        optionalParams.schedulerConfig = executor::SchedulerConfig{executor::CapacitySchedulerPolicy::kMAX_UTILIZATION};
+        if (initLADConfig)
+        {
+            optionalParams.decodingConfig.setLookaheadDecoding(executor::LookaheadDecodingConfig(5, 5, 5));
+        }
+
+        auto trtGptModel = std::make_shared<TrtGptModelInflightBatching>(
+            mLogger, mModelConfig, mWorldConfig, *mRawEngine, true, optionalParams);
+
+        // Generate tokens for the requests in request_table
+        // We need to sync with decoder
+        trtGptModel->forwardAsync(requestList);
+        trtGptModel->forwardSync();
+        EXPECT_EQ(trtGptModel->getSpeculativeDecodingMode().isLookaheadDecoding(), true);
+
+        // Add new requests
+        for (SizeType32 i = 0; i < 4; ++i)
+        {
+            SamplingConfig inSamplingConfig;
+            int correlationId = requestId;
+            auto maxNewTokens = 8;
+            auto tokens = std::make_shared<std::vector<int32_t>>(std::initializer_list<int32_t>{1, 2, 3, 4});
+            auto llmRequest
+                = std::make_shared<LlmRequest>(correlationId, maxNewTokens, tokens, inSamplingConfig, false);
+            requestList.emplace_back(std::move(llmRequest));
+            requestId += 1;
+        }
+        trtGptModel->forwardAsync(requestList);
+        trtGptModel->forwardSync();
+        EXPECT_EQ(trtGptModel->getSpeculativeDecodingMode().isLookaheadDecoding(), false);
+
+        // Complete all of the requests
+        SizeType32 maxNumIterations = 8;
+        forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
+
+        // Run new requests with lookahead
+        requestList.clear();
+        for (SizeType32 i = 0; i < 4; ++i)
+        {
+            SamplingConfig inSamplingConfig;
+            int correlationId = requestId;
+            auto maxNewTokens = 8;
+            auto tokens = std::make_shared<std::vector<int32_t>>(std::initializer_list<int32_t>{1, 2, 3, 4});
+            auto llmRequest
+                = std::make_shared<LlmRequest>(correlationId, maxNewTokens, tokens, inSamplingConfig, false);
+            requestList.emplace_back(std::move(llmRequest));
+            requestId += 1;
+        }
+        trtGptModel->forwardAsync(requestList);
+        trtGptModel->forwardSync();
+        EXPECT_EQ(trtGptModel->getSpeculativeDecodingMode().isLookaheadDecoding(), true);
+        forwardRequestsToCompletion(trtGptModel, requestList, maxNumIterations);
+        requestList.clear();
     }
 }
 

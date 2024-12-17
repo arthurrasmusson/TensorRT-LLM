@@ -283,6 +283,20 @@ void concatenateKVCache(runtime::ITensor::SharedPtr* inputBlocks, int inputBlock
     int iPpNum = iCacheState.getParallelConfig().mPipelineParallelism;
     unsigned int gridDimx = oCacheState.getModelConfig().mNbKvHeadsPerLayer.size() / oPpNum;
     unsigned int gridDimy = outputBlockNum;
+
+    constexpr int64_t maxBlocksNum = 512;
+    while ((static_cast<int64_t>(gridDimx * gridDimy)) > maxBlocksNum)
+    {
+        if (gridDimx > 1)
+        {
+            gridDimx = gridDimx / 2;
+        }
+        if ((static_cast<int64_t>(gridDimx * gridDimy)) > maxBlocksNum && (gridDimy > 1))
+        {
+            gridDimy = gridDimy / 2;
+        }
+    }
+
     dim3 gridDim{gridDimx, gridDimy};
     int const headsInputModel
         = iCacheState.getModelConfig().mNbKvHeadsPerLayer[0] * iCacheState.getParallelConfig().mTensorParallelism;
