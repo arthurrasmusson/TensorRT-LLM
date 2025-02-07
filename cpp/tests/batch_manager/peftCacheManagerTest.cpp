@@ -10,6 +10,10 @@
  * its affiliates is strictly prohibited.
  */
 
+#ifndef TOP_LEVEL_DIR
+#error "Define TOP_LEVEL_DIR"
+#endif
+
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/batch_manager/peftCacheManagerConfig.h"
@@ -52,6 +56,7 @@ auto const TEST_DEST_LORA_TP2 = TEST_RESOURCE_PATH / "lora-test-weights-tp2/targ
 auto const TEST_KEYS_LORA_TP2 = TEST_RESOURCE_PATH / "lora-test-weights-tp2/config.npy";
 auto const TEST_KEYS_LORA_TP2_PAGES_RANK0 = TEST_RESOURCE_PATH / "lora-test-weights-tp2/cache_pages_rank0.npy";
 auto const TEST_KEYS_LORA_TP2_PAGES_RANK1 = TEST_RESOURCE_PATH / "lora-test-weights-tp2/cache_pages_rank1.npy";
+auto const TEST_PREFETCH = TEST_RESOURCE_PATH / "lora_prefetch";
 } // namespace
 
 namespace tensorrt_llm::batch_manager
@@ -250,7 +255,7 @@ TEST_F(PeftCacheManagerTest, putToCapacity)
         for (auto const& [reqId, e] : reqIdToEx)
         {
             std::cout << reqId << " : " << e << std::endl;
-            if (reqId < 10)
+            if (reqId < 11)
             {
                 EXPECT_EQ("", e);
             }
@@ -518,7 +523,7 @@ TEST_F(PeftCacheManagerTest, getMaxNumSlots)
     config.numHostModuleLayer = 8291 * 2;
 
     EXPECT_EQ(65, hostSlots);
-    EXPECT_EQ(176896, deviceSlots);
+    EXPECT_EQ(182424, deviceSlots);
 }
 
 TEST_F(PeftCacheManagerTest, getPageManagerConfig)
@@ -530,17 +535,17 @@ TEST_F(PeftCacheManagerTest, getPageManagerConfig)
 
     EXPECT_EQ(runtime::MemoryType::kCPU, hostCfg.getMemoryType());
     EXPECT_EQ(nvinfer1::DataType::kFLOAT, hostCfg.getDataType());
-    EXPECT_EQ(445, hostCfg.getTotalNumPages());
+    EXPECT_EQ(456, hostCfg.getTotalNumPages());
     EXPECT_EQ(24, hostCfg.getMaxPagesPerBlock());
-    EXPECT_EQ(246, hostCfg.getSlotsPerPage());
+    EXPECT_EQ(288, hostCfg.getSlotsPerPage());
     EXPECT_EQ(24, hostCfg.getPageWidth());
     EXPECT_FALSE(hostCfg.getInitToZero());
 
     EXPECT_EQ(runtime::MemoryType::kGPU, deviceCfg.getMemoryType());
     EXPECT_EQ(nvinfer1::DataType::kFLOAT, deviceCfg.getDataType());
-    EXPECT_EQ(113, deviceCfg.getTotalNumPages());
+    EXPECT_EQ(116, deviceCfg.getTotalNumPages());
     EXPECT_EQ(8, deviceCfg.getMaxPagesPerBlock());
-    EXPECT_EQ(246, deviceCfg.getSlotsPerPage());
+    EXPECT_EQ(288, deviceCfg.getSlotsPerPage());
     EXPECT_EQ(24, deviceCfg.getPageWidth());
     EXPECT_FALSE(deviceCfg.getInitToZero());
 
@@ -554,18 +559,68 @@ TEST_F(PeftCacheManagerTest, getPageManagerConfig)
 
     EXPECT_EQ(runtime::MemoryType::kCPU, hostCfg.getMemoryType());
     EXPECT_EQ(nvinfer1::DataType::kFLOAT, hostCfg.getDataType());
-    EXPECT_EQ(4235, hostCfg.getTotalNumPages());
+    EXPECT_EQ(3617, hostCfg.getTotalNumPages());
     EXPECT_EQ(4, hostCfg.getMaxPagesPerBlock());
-    EXPECT_EQ(246, hostCfg.getSlotsPerPage());
+    EXPECT_EQ(288, hostCfg.getSlotsPerPage());
     EXPECT_EQ(24, hostCfg.getPageWidth());
     EXPECT_FALSE(hostCfg.getInitToZero());
 
     EXPECT_EQ(runtime::MemoryType::kGPU, deviceCfg.getMemoryType());
     EXPECT_EQ(nvinfer1::DataType::kFLOAT, deviceCfg.getDataType());
-    EXPECT_EQ(113, deviceCfg.getTotalNumPages());
+    EXPECT_EQ(116, deviceCfg.getTotalNumPages());
     EXPECT_EQ(8, deviceCfg.getMaxPagesPerBlock());
-    EXPECT_EQ(246, deviceCfg.getSlotsPerPage());
+    EXPECT_EQ(288, deviceCfg.getSlotsPerPage());
     EXPECT_EQ(24, deviceCfg.getPageWidth());
     EXPECT_FALSE(deviceCfg.getInitToZero());
 }
+
+class PeftCacheManagerPrefetchTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+{
+protected:
+    PeftCacheManagerPrefetchTest() {}
+
+    void SetUp() override
+    {
+        mModelConfig = std::make_unique<ModelConfig>(0, 2, 2, 0, 1, 16, nvinfer1::DataType::kFLOAT);
+        mModelConfig->setMlpHiddenSize(32);
+        mWorldConfig = std::make_unique<WorldConfig>(2, 1, 1, 0);
+        std::vector<LoraModule> modules{
+            LoraModule(LoraModule::ModuleType::kATTN_QKV, 16, 3 * 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kATTN_Q, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kATTN_K, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kATTN_V, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kATTN_DENSE, 16, 16, false, true, 1, -1),
+            LoraModule(LoraModule::ModuleType::kMLP_H_TO_4H, 16, 32, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kMLP_4H_TO_H, 32, 16, false, true, 1, -1),
+            LoraModule(LoraModule::ModuleType::kMLP_GATE, 16, 32, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kCROSS_ATTN_QKV, 16, 3 * 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kCROSS_ATTN_Q, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kCROSS_ATTN_K, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kCROSS_ATTN_V, 16, 16, false, true, -1, 0),
+            LoraModule(LoraModule::ModuleType::kCROSS_ATTN_DENSE, 16, 16, false, true, 1, -1),
+        };
+        mModelConfig->setLoraModules(modules);
+        mModelConfig->setMaxLoraRank(64);
+        mStream = std::make_shared<CudaStream>();
+        mManager = std::make_unique<BufferManager>(mStream);
+
+        PeftCacheManagerConfig config(
+            2 * 8 * 128, 2 * 8 * 92, 8, 64, 1, 1, 1, 24, 8, std::nullopt, std::nullopt, TEST_PREFETCH.string());
+
+        mPeftManager = std::make_unique<PeftCacheManager>(config, *mModelConfig, *mWorldConfig, *mManager);
+    }
+
+    std::shared_ptr<BufferManager> mManager;
+    BufferManager::CudaStreamPtr mStream;
+    std::unique_ptr<ModelConfig> mModelConfig;
+    std::unique_ptr<WorldConfig> mWorldConfig;
+    std::unique_ptr<PeftCacheManager> mPeftManager;
+};
+
+TEST_F(PeftCacheManagerPrefetchTest, prefetch)
+{
+    EXPECT_TRUE(mPeftManager->isTaskCached(3));
+    EXPECT_TRUE(mPeftManager->isTaskCached(5));
+}
+
 } // namespace tensorrt_llm::batch_manager

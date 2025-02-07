@@ -597,7 +597,7 @@ protected:
             TLLM_THROW("Responder based UCX need to compiled with ENABLE_UCX");
 #endif
         }
-        else
+        else if (tensorrt_llm::common::getEnvUseMPIKvCache())
         {
 
             TLLM_LOG_INFO("Enable MPI KV cache transport.");

@@ -20,6 +20,7 @@
 #include "tensorrt_llm/runtime/loraCache.h"
 #include "tensorrt_llm/runtime/loraUtils.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
+#include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 #include "tensorrt_llm/runtime/workerPool.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -55,19 +56,20 @@ std::pair<uint64_t, uint64_t> PeftCacheManager::getMaxNumSlots(PeftCacheManagerC
     TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     if (config.numHostModuleLayer > 0)
     {
-        totalHostSlots = common::ceilDiv(static_cast<uint64_t>(config.numHostModuleLayer) * max1dModSize, pageWidth);
+        totalHostSlots = static_cast<uint64_t>(config.numHostModuleLayer) * common::ceilDiv(max1dModSize, pageWidth);
         TLLM_LOG_DEBUG("totalHostSlots=%llu", totalHostSlots);
     }
     else
     {
         auto const memSize = config.hostCacheSize.value_or(PeftCacheManagerConfig::kDefaultHostCacheSize);
         totalHostSlots = memSize / pageWidthSize;
+        TLLM_LOG_DEBUG("memSize: %llu, totalHostSlots: %llu", memSize, totalHostSlots);
     }
 
     if (config.numDeviceModuleLayer > 0)
     {
         totalDeviceSlots
-            = common::ceilDiv(static_cast<uint64_t>(config.numDeviceModuleLayer) * max1dModSize, pageWidth);
+            = static_cast<uint64_t>(config.numDeviceModuleLayer) * common::ceilDiv(max1dModSize, pageWidth);
     }
     else
     {
@@ -96,9 +98,10 @@ PeftCacheManager::getPageManagerConfig(PeftCacheManagerConfig const& config, run
     auto const tpSize = worldConfig.getTensorParallelism();
     auto const ppSize = worldConfig.getPipelineParallelism();
     auto const numLocalLayers = modelConfig.getNbAttentionLayers(ppSize);
-    uint64_t min1dModSize = std::numeric_limits<uint64_t>::max();
+    uint64_t min1dModSize = std::numeric_limits<uint64_t>::max(); // used to setup the pageWidth
     uint64_t total1dModSize = 0;
-    uint64_t max1dModSize = 0;
+    uint64_t total1lSlots = 0; // the slots we need for each layer, summing the slots of all modules
+    uint64_t max1dModSize = 0; // used to compute the totalHostSlots and totalDeviceSlots
     for (auto const& module : modelConfig.getLoraModules())
     {
         uint64_t const oneDSize = static_cast<uint64_t>(module.localInDim(tpSize) + module.localOutDim(tpSize));
@@ -109,16 +112,19 @@ PeftCacheManager::getPageManagerConfig(PeftCacheManagerConfig const& config, run
     }
     TLLM_LOG_DEBUG("total1dModSize=%llu", total1dModSize);
     auto const pageWidth = min1dModSize;
-    TLLM_LOG_DEBUG("pageWidth=%llu", pageWidth);
+
+    for (auto const& module : modelConfig.getLoraModules())
+    {
+        uint64_t const oneDSize = static_cast<uint64_t>(module.localInDim(tpSize) + module.localOutDim(tpSize));
+        total1lSlots += config.optimalAdapterSize * common::ceilDiv(oneDSize, pageWidth);
+    }
     uint64_t const max1dLoraSize = total1dModSize * static_cast<uint64_t>(numLocalLayers);
-    TLLM_LOG_DEBUG("max1dLoraSize=%llu", max1dLoraSize);
-    uint64_t const optLoraSize = config.optimalAdapterSize * max1dLoraSize;
+    uint64_t const totalSlots = total1lSlots * static_cast<uint64_t>(numLocalLayers);
     uint64_t const maxLoraSize = config.maxAdapterSize * max1dLoraSize;
-    uint64_t const optNumSlots = common::ceilDiv(optLoraSize, pageWidth);
     uint64_t const minNumSlots = common::ceilDiv(config.maxAdapterSize * max1dModSize, pageWidth);
-    uint64_t const numSlotsPerPage = std::max(optNumSlots, minNumSlots);
+    uint64_t const numSlotsPerPage = std::max(totalSlots, minNumSlots);
     uint64_t const minTotalSlots = common::ceilDiv(config.maxAdapterSize * max1dLoraSize, pageWidth);
-    TLLM_LOG_DEBUG("max1dModeSize=%llu", max1dModSize);
+    TLLM_LOG_DEBUG("max1dModSize=%llu", max1dModSize);
 
     auto [totalHostSlots, totalDeviceSlots]
         = getMaxNumSlots(config, modelConfig.getDataType(), pageWidth, max1dModSize, bufferManager);
@@ -153,12 +159,77 @@ PeftCacheManager::getPageManagerConfig(PeftCacheManagerConfig const& config, run
     return std::make_pair(hostPageConfig, devicePageConfig);
 }
 
+void PeftCacheManager::prefetchLoraWeights(std::string const& modelDir, runtime::BufferManager const& bufferManager)
+{
+    // This function loads LoRA weights from modelDir. In the folder, users can put many
+    // folders for different lora tasks.
+    // For example, assume we want to store lora weights in modelDir and there are three
+    // lora tasks `0`, `1` and `3`, then the architecture of the folder would be like
+    // modelDir
+    // ├── 0
+    // │   ├── model.lora_config.npy
+    // │   └── model.lora_weights.npy
+    // ├── 1
+    // │   ├── model.lora_config.npy
+    // │   └── model.lora_weights.npy
+    // └── 3
+    //     ├── model.lora_config.npy
+    //     └── model.lora_weights.npy
+    //
+    // If the name of the lora task is not digit, will print warning and
+    // skip loading lora weight from the folder
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
+
+    namespace fs = std::filesystem;
+    std::vector<std::string> tasks;
+
+    if (!fs::exists(modelDir) || !fs::is_directory(modelDir))
+    {
+        TLLM_LOG_DEBUG("Cannot find the %s, skipping prefetching the lora weights.", modelDir.c_str());
+        return;
+    }
+    // collect the lora tasks under modelDir
+    for (auto const& entry : fs::directory_iterator(modelDir))
+    {
+        if (fs::is_directory(entry.path()))
+        {
+            std::string task_name = entry.path().filename().string();
+            if (all_of(task_name.begin(), task_name.end(), ::isdigit))
+            {
+                tasks.push_back(task_name);
+            }
+            else
+            {
+                TLLM_LOG_WARNING(
+                    "lora task name %s is invalid, skipping to load lora weight from this folder.", task_name.c_str());
+            }
+        }
+    }
+
+    TLLM_LOG_DEBUG("find %u lora tasks to prefetch.", tasks.size());
+    // load lora tasks one by one
+    using TensorPtr = runtime::ITensor::SharedPtr;
+    auto const multiLoraPath = fs::path{modelDir};
+    for (std::uint32_t taskId = 0; taskId < tasks.size(); ++taskId)
+    {
+        auto const weightsFn = (multiLoraPath / tasks[taskId] / "model.lora_weights.npy").string();
+        auto const configFn = (multiLoraPath / tasks[taskId] / "model.lora_config.npy").string();
+        TensorPtr weights = runtime::utils::loadNpy(bufferManager, weightsFn, runtime::MemoryType::kCPU);
+        TensorPtr config = runtime::utils::loadNpy(bufferManager, configFn, runtime::MemoryType::kCPU);
+        TLLM_LOG_DEBUG("prefetch lora task %s", tasks[taskId].c_str());
+        mHostLoraCache->put(std::stoi(tasks[taskId]), weights, config, true);
+    }
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
+}
+
 PeftCacheManager::PeftCacheManager(PeftCacheManagerConfig const& config, runtime::ModelConfig const& modelConfig,
     runtime::WorldConfig const& worldConfig, runtime::BufferManager const& bufferManager)
     : mModelConfig(modelConfig)
     , mWorldConfig(worldConfig)
     , mDevice{runtime::utils::initDevice(worldConfig)}
 {
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
+
     auto cfg = config;
     cfg.optimalAdapterSize = std::min(cfg.optimalAdapterSize, modelConfig.getMaxLoraRank());
     cfg.maxAdapterSize = std::min(cfg.maxAdapterSize, modelConfig.getMaxLoraRank());
@@ -168,6 +239,13 @@ PeftCacheManager::PeftCacheManager(PeftCacheManagerConfig const& config, runtime
 
     mPutWorkerPool = std::make_shared<runtime::WorkerPool>(cfg.numPutWorkers, mDevice);
     mEnsureWorkerPool = std::make_unique<runtime::WorkerPool>(config.numEnsureWorkers, mDevice);
+
+    if (config.loraPrefetchDir.has_value())
+    {
+        prefetchLoraWeights(config.loraPrefetchDir.value(), bufferManager);
+    }
+
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void PeftCacheManager::addRequestPeft(std::shared_ptr<LlmRequest> llmRequest, bool tryGpuCache)
@@ -243,7 +321,7 @@ void PeftCacheManager::addRequestPeft(std::shared_ptr<LlmRequest> llmRequest, bo
         TLLM_THROW("Error storing task=%lu in PEFT cache -- %s", taskId, e.what());
     }
 
-    auto fn = [taskId, req = llmRequest, loadNeeded, tryGpuCache, this]()
+    auto fn = [taskId, req = llmRequest, loadNeeded, this]()
     {
         auto optWeights = req->getLoraWeights();
         auto optConfig = req->getLoraConfig();
@@ -339,7 +417,8 @@ PeftCacheManager::PeftTable PeftCacheManager::ensureBatch(
     {
         resetDeviceCache();
     }
-    auto [taskIdToFuture, taskIdToReqIds] = getTaskMaps(contextRequests, generationRequests);
+    auto [taskIdToFuture_, taskIdToReqIds] = getTaskMaps(contextRequests, generationRequests);
+    auto taskIdToFuture = std::move(taskIdToFuture_); // captured structured bindings are a C++20 extension
 
     std::map<uint64_t, std::future<std::vector<runtime::LoraCache::TaskLayerModuleConfig>>> ensureFutures;
     for (auto& [taskId, taskFuture] : taskIdToFuture)

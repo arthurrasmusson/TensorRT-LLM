@@ -27,8 +27,6 @@ public:
         bool hasGenAwaitThreads)
         : mhasContextAwaitThreads(hasContextAwaitThreads)
         , mhasGenAwaitThreads(hasGenAwaitThreads)
-        , mContextAciveRequestNum(ctxEnginePaths.size())
-        , mGenActiveRequestNum(genEnginePaths.size())
     {
         TLLM_CHECK(ctxEnginePaths.size() == ctxExecutorConfigs.size());
         TLLM_CHECK(genEnginePaths.size() == genExecutorConfigs.size());
@@ -92,7 +90,6 @@ public:
         {
             size_t contextId = selectContextId.has_value() ? selectContextId.value() : selectContextExecutor();
             auto contextReqIds = mContextExecutors[contextId]->enqueueRequests(requests);
-            mContextAciveRequestNum.at(contextId) += static_cast<int64_t>(contextReqIds.size());
             {
                 std::scoped_lock<std::mutex> lock{mContextMapMutexs[contextId]};
                 for (size_t i = 0; i < requests.size(); ++i)
@@ -108,7 +105,6 @@ public:
                 size_t contextId = selectContextId.has_value() ? selectContextId.value() : selectContextExecutor();
 
                 auto contextReqId = mContextExecutors[contextId]->enqueueRequest(requests[i]);
-                ++mContextAciveRequestNum.at(contextId);
                 {
                     std::scoped_lock<std::mutex> lock{mContextMapMutexs[contextId]};
                     mContextReqIdToGlobalId[contextId][contextReqId] = globalReqIds[i];
@@ -133,7 +129,6 @@ public:
         {
             size_t genIdx = selectGenIdx.has_value() ? selectGenIdx.value() : selectGenerationExecutor();
             auto genReqIds = mGenerationExecutors[genIdx]->enqueueRequests(requests);
-            mGenActiveRequestNum.at(genIdx) += static_cast<int64_t>(genReqIds.size());
             {
                 std::scoped_lock<std::mutex> lock{mGenerationMapMutexs[genIdx]};
                 for (size_t i = 0; i < requests.size(); ++i)
@@ -149,7 +144,6 @@ public:
                 size_t genIdx = selectGenIdx.has_value() ? selectGenIdx.value() : selectGenerationExecutor();
 
                 auto genReqId = mGenerationExecutors[genIdx]->enqueueRequest(requests[i]);
-                ++mGenActiveRequestNum.at(genIdx);
                 {
                     std::scoped_lock<std::mutex> lock{mGenerationMapMutexs[genIdx]};
                     mGenerationReqIdToGlobalId[genIdx][genReqId] = globalRequestIds[i];
@@ -170,7 +164,7 @@ public:
             std::unique_lock<std::mutex> lock(mResponsesContextMtx);
             auto pred = [&mShutdown = mShutdown, &resp = this->mContextResponses]() -> bool
             { return !resp.empty() || mShutdown; };
-            auto storeResponses = [this, &resp = this->mContextResponses, &responses]()
+            auto storeResponses = [&resp = this->mContextResponses, &responses]()
             {
                 responses = std::move(resp);
                 resp.clear();
@@ -210,7 +204,6 @@ public:
                 TLLM_CHECK(globalId != 0);
                 responses.emplace_back(std::move(resp), globalId);
             }
-            mContextAciveRequestNum.at(contextIdx.value()) -= static_cast<int64_t>(responseFromExecutor.size());
             return responses;
         }
         TLLM_CHECK(timeout.has_value());
@@ -230,7 +223,6 @@ public:
                 TLLM_CHECK(globalId != 0);
                 responses.emplace_back(std::move(resp), globalId);
             }
-            mContextAciveRequestNum.at(ci) -= static_cast<int64_t>(responseFromExecutor.size());
         }
 
         return responses;
@@ -248,7 +240,7 @@ public:
             std::unique_lock<std::mutex> lock(mResponseGenerationMtx);
             auto pred = [&mShutdown = mShutdown, &resp = this->mGenerationResponses]() -> bool
             { return !resp.empty() || mShutdown; };
-            auto storeResponses = [this, &resp = this->mGenerationResponses, &responses]()
+            auto storeResponses = [&resp = this->mGenerationResponses, &responses]()
             {
                 responses = std::move(resp);
                 resp.clear();
@@ -284,10 +276,6 @@ public:
                     globalId = mGenerationReqIdToGlobalId.at(genIdx.value()).at(reqId);
                 }
                 TLLM_CHECK(globalId != 0);
-                if (resp.getResult().isFinal)
-                {
-                    --mGenActiveRequestNum.at(genIdx.value());
-                }
                 responses.emplace_back(std::move(resp), globalId);
             }
             return responses;
@@ -309,10 +297,6 @@ public:
                     globalId = mGenerationReqIdToGlobalId.at(gi).at(reqId);
                 }
                 TLLM_CHECK(globalId != 0);
-                if (resp.getResult().isFinal)
-                {
-                    --mGenActiveRequestNum.at(gi);
-                }
                 responses.emplace_back(std::move(resp), globalId);
             }
         }
@@ -384,16 +368,23 @@ private:
 
     size_t selectContextExecutor()
     {
-        auto contextIdx = std::distance(mContextAciveRequestNum.begin(),
-            std::min_element(mContextAciveRequestNum.begin(), mContextAciveRequestNum.end()));
-        return contextIdx;
+        static size_t selectContextId = 0;
+        auto contextId = (selectContextId++) % mContextExecutors.size();
+        if (selectContextId >= mContextExecutors.size())
+        {
+            selectContextId = 0;
+        }
+        return contextId;
     }
 
     size_t selectGenerationExecutor()
     {
-        auto generationIdx = std::distance(
-            mGenActiveRequestNum.begin(), std::min_element(mGenActiveRequestNum.begin(), mGenActiveRequestNum.end()));
-
+        static size_t selectGenerationId = 0;
+        auto generationIdx = (selectGenerationId++) % mGenerationExecutors.size();
+        if (selectGenerationId >= mGenerationExecutors.size())
+        {
+            selectGenerationId = 0;
+        }
         return generationIdx;
     }
 
@@ -453,7 +444,6 @@ private:
                 }
                 if (responseWithIds.size() > 0)
                 {
-                    mContextAciveRequestNum.at(executorIdx) -= static_cast<int64_t>(responseWithIds.size());
                     appendNewContextResponse(std::move(responseWithIds));
                 }
             }
@@ -470,10 +460,6 @@ private:
                         globalId = mGenerationReqIdToGlobalId.at(executorIdx).at(reqId);
                     }
                     TLLM_CHECK(globalId != 0);
-                    if (response.getResult().isFinal)
-                    {
-                        --mGenActiveRequestNum.at(executorIdx);
-                    }
                     responseWithIds.emplace_back(std::move(response), globalId);
                 }
                 if (responseWithIds.size() > 0)
@@ -504,8 +490,6 @@ private:
     std::atomic<bool> mShutdown{false};
     std::atomic<bool> mhasContextAwaitThreads{false};
     std::atomic<bool> mhasGenAwaitThreads{false};
-    std::vector<std::atomic<int64_t>> mContextAciveRequestNum;
-    std::vector<std::atomic<int64_t>> mGenActiveRequestNum;
     bool mIsOrchestrator{false};
 };
 

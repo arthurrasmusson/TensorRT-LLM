@@ -166,7 +166,7 @@ void CacheTransceiver::setContextState(LlmRequest* llmRequest)
 void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
 {
     TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
-    llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS;
+    llmRequest->setState(LlmRequestState::kDISAGG_CONTEXT_TRANS_IN_PROGRESS);
     if (mResponderFutures.find(llmRequest) != mResponderFutures.end())
     {
         if (llmRequest->getContextProgress() == nullptr)
@@ -190,7 +190,7 @@ void CacheTransceiver::respondAndSendLayerWise(
         llmRequest->setContextProgress(progress);
         TLLM_LOG_DEBUG("Request %ld is sending layer-wise", llmRequest->mRequestId);
 
-        llmRequest->mState = LlmRequestState::kDISAGG_CONTEXT_INIT_AND_TRANS;
+        llmRequest->setState(LlmRequestState::kDISAGG_CONTEXT_INIT_AND_TRANS);
         setContextState(llmRequest.get());
         auto future = mDataResponder->respondAndSendAsync(*llmRequest);
         mResponderFutures.emplace(llmRequest.get(), std::move(future));
@@ -204,7 +204,7 @@ void CacheTransceiver::requestAndReceiveSync(LlmRequest* llmRequest)
         auto future = mDataRequester->requestAndReceiveAsync(*llmRequest);
         future.get();
     }
-    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE;
+    llmRequest->setState(LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE);
 }
 
 void CacheTransceiver::requestAndReceiveAsync(LlmRequest* llmRequest)
@@ -221,7 +221,7 @@ void CacheTransceiver::requestAndReceiveAsync(LlmRequest* llmRequest)
 
     auto future = mDataRequester->requestAndReceiveAsync(*llmRequest);
     mRequesterFutures.emplace_back(llmRequest, std::move(future));
-    llmRequest->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_GENERATION_TRANS_IN_PROGRESS;
+    llmRequest->setState(LlmRequestState::kDISAGG_GENERATION_TRANS_IN_PROGRESS);
 }
 
 std::vector<LlmRequest::RequestIdType> gatherRequestIds(
@@ -290,7 +290,7 @@ void CacheTransceiver::checkContextTransferStatus(bool blocking)
         if (blocking || (toCompleteIdSet.find(it->first->mRequestId) != toCompleteIdSet.end()))
         {
             it->second.get();
-            it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::kDISAGG_CONTEXT_COMPLETE;
+            it->first->setState(LlmRequestState::kDISAGG_CONTEXT_COMPLETE);
             it = mResponderFutures.erase(it);
         }
         else
@@ -388,7 +388,7 @@ void CacheTransceiver::checkGenTransferStatus(int atLeastRequestNum)
             TLLM_LOG_DEBUG(mpi::MpiComm::world().getRank(),
                 "****it->first->mRequestId:%ld , context request id:%ld***********get feature***",
                 it->first->mRequestId, it->first->getContextPhaseParams().value().getReqId());
-            it->first->mState = tensorrt_llm::batch_manager::LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE;
+            it->first->setState(LlmRequestState::KDISAGG_GENERATION_TRANS_COMPLETE);
             it = mRequesterFutures.erase(it);
         }
         else

@@ -289,7 +289,7 @@ TEST_F(GptManagerTest, BasicValidationTest)
                         llmReq->addNewTokens({100 * callCount + static_cast<tr::TokenIdType>(llmReq->mRequestId)});
                         if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
                         {
-                            llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
+                            llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                         }
                     }
 
@@ -357,7 +357,7 @@ TEST_F(GptManagerTest, ZeroOutputLength)
                     for (auto llmReq : requestList)
                     {
                         // Don't add any tokens to simulate no output tokens
-                        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
+                        llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                     }
 
                     callCount++;
@@ -751,11 +751,16 @@ void runTest(fs::path const& modelPath, TrtGptModelType modelType, nvinfer1::Dat
     optionalParams.maxBeamWidth = beamWidth;
     optionalParams.enableTrtOverlap = false;
     optionalParams.schedulerConfig = texec::SchedulerConfig{texec::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT};
-    if (returnContextLogits || returnGenerationLogits)
+    if (returnContextLogits)
     {
-        // Return logits will need more memory
+        // Return context logits will need more memory
         optionalParams.kvCacheConfig.freeGpuMemoryFraction = 0.3;
     }
+    if (returnGenerationLogits)
+    {
+        optionalParams.gatherGenerationLogits = true;
+    }
+
     auto batchManager = std::make_shared<GptManager>(modelPath, modelType, getInferenceRequestsCb, sendResponseCb,
         nullptr, returnBatchManagerStatsCb, optionalParams, std::nullopt, excludeInputInOutput);
 

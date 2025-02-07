@@ -10,18 +10,14 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "tensorrt_llm/common/logger.h"
-#ifndef TOP_LEVEL_DIR
-#error "Define TOP_LEVEL_DIR"
-#endif
-
-#include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/GptManager.h"
+#include "tensorrt_llm/batch_manager/BatchManager.h"
 #include "tensorrt_llm/batch_manager/inferenceRequest.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/namedTensor.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaProfilerUtils.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/stlUtils.h"
 #include "tensorrt_llm/common/stringUtils.h"
@@ -37,10 +33,10 @@
 #include "trtGptModel.h"
 #include "trtGptModelFactory.h"
 
+#include <cuda_profiler_api.h>
 #include <nlohmann/json.hpp>
 
 #include <cstring>
-#include <cuda_profiler_api.h>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -390,6 +386,8 @@ std::shared_ptr<LlmRequest> GptManager::fillLlmRequest(std::shared_ptr<Inference
         samplingConfig.randomSeed, newReq->getRandomSeedNamed(), {1});
     setOptionalValueFromScalarTensor<std::vector<SizeType32>, int32_t>(
         samplingConfig.noRepeatNgramSize, newReq->getNoRepeatNgramSizeNamed(), {1});
+    setOptionalValueFromScalarTensor<std::vector<float>, float>(
+        samplingConfig.minP, newReq->getRuntimeMinPNamed(), {1});
 
     std::optional<bool> returnLogProbs = false;
     setOptionalValueFromScalarTensor<bool, bool>(returnLogProbs, newReq->getReturnLogProbsNamed(), {1});
@@ -478,7 +476,7 @@ BatchManagerErrorCode_t GptManager::fetchNewRequests()
                 // Allocate host memory for generation logits
                 if (r->getReturnGenerationLogits())
                 {
-                    if (!mTrtGptModel->getModelConfig().computeGenerationLogits())
+                    if (!mTrtGptModel->getGatherGenerationLogits())
                     {
                         TLLM_THROW("Return generation logit need to build engine with gather_generation_logits");
                     }
@@ -528,7 +526,7 @@ BatchManagerErrorCode_t GptManager::pollStopSignals()
         auto requestId = req->mRequestId;
         if (stoppedReqIds.find(requestId) != stoppedReqIds.end())
         {
-            req->mState = LlmRequestState::kGENERATION_COMPLETE;
+            req->setState(LlmRequestState::kGENERATION_COMPLETE);
             mTrtGptModel->terminateRequest(req);
         }
     }

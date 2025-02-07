@@ -27,7 +27,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig schedule
     ExtendedRuntimePerfKnobConfig const& extendedRuntimePerfKnobConfig, std::optional<DebugConfig> debugConfig,
     SizeType32 recvPollPeriodMs, uint64_t maxSeqIdleMicroseconds,
     std::optional<SpeculativeDecodingConfig> specDecConfig, std::optional<GuidedDecodingConfig> guidedDecodingConfig,
-    std::optional<std::vector<std::string>> additionalOutputNames)
+    std::optional<std::vector<std::string>> additionalOutputNames, bool gatherGenerationLogits)
     : mMaxBeamWidth(maxBeamWidth)
     , mSchedulerConfig(std::move(schedulerConfig))
     , mKvCacheConfig(std::move(kvCacheConfig))
@@ -51,6 +51,7 @@ ExecutorConfig::ExecutorConfig(SizeType32 maxBeamWidth, SchedulerConfig schedule
     , mSpeculativeDecodingConfig(specDecConfig)
     , mGuidedDecodingConfig(std::move(guidedDecodingConfig))
     , mAdditionalOutputNames(std::move(additionalOutputNames))
+    , mGatherGenerationLogits(gatherGenerationLogits)
 {
     TLLM_CHECK(iterStatsMaxIterations >= 0);
     TLLM_CHECK(requestStatsMaxIterations >= 0);
@@ -183,6 +184,11 @@ std::optional<std::vector<std::string>> ExecutorConfig::getAdditionalOutputNames
     return mAdditionalOutputNames;
 }
 
+bool ExecutorConfig::getGatherGenerationLogits() const
+{
+    return mGatherGenerationLogits;
+}
+
 void ExecutorConfig::setMaxBeamWidth(SizeType32 maxBeamWidth)
 {
     mMaxBeamWidth = maxBeamWidth;
@@ -303,6 +309,11 @@ void ExecutorConfig::setGuidedDecodingConfig(GuidedDecodingConfig const& guidedD
 void ExecutorConfig::setAdditionalOutputNames(std::vector<std::string> const& additionalOutputNames)
 {
     mAdditionalOutputNames = additionalOutputNames;
+}
+
+void ExecutorConfig::setGatherGenerationLogits(bool gatherGenerationLogits)
+{
+    mGatherGenerationLogits = gatherGenerationLogits;
 }
 
 } // namespace tensorrt_llm::executor

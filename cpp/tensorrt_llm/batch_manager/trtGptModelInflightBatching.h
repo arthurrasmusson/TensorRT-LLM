@@ -13,13 +13,11 @@
 #pragma once
 
 #include "tensorrt_llm/batch_manager/BatchManager.h"
-#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-#include "tensorrt_llm/runtime/iGptDecoderBatched.h"
+#include "tensorrt_llm/runtime/gptDecoderBatched.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -30,11 +28,16 @@
 namespace tensorrt_llm::runtime
 {
 class TllmRuntime;
-class IGptDecoderBatched;
+class GptDecoderBatched;
 class AllReduceBuffers;
 class NcclCommunicator;
 class SpeculativeDecodingMode;
 } // namespace tensorrt_llm::runtime
+
+namespace tensorrt_llm::mpi
+{
+class MpiWaitThread;
+} // namespace tensorrt_llm::mpi
 
 namespace tensorrt_llm::batch_manager
 {
@@ -51,11 +54,13 @@ class RnnStateManager;
 class SequenceSlotManager;
 class DecoderStepAsyncSend;
 class DecoderSlotAsyncSend;
-struct DecoderBuffers;
+class DecoderBuffers;
 class SlotDecoderBuffers;
 class LlmRequest;
 class RuntimeBuffers;
 class BasePeftCacheManager;
+class GuidedDecoder;
+class CacheTransceiver;
 
 // Algorithms
 class CapacityScheduler;
@@ -63,21 +68,17 @@ class MicroBatchScheduler;
 class PauseRequests;
 class AssignReqSeqSlots;
 class AllocateKvCache;
-class GuidedDecoder;
+class HandleContextLogits;
+class HandleGenerationLogits;
+class GenerateRequestOptions;
+class LogitsPostProcessor;
+class MakeDecodingBatchInputOutput;
+class CreateNewDecoderRequests;
 
 namespace utils
 {
 class CudaGraphExecutorCache;
 } // namespace utils
-
-constexpr int32_t kMPI_SPEC_DEC_ID_TAG{129};
-constexpr int32_t kMPI_SPEC_DEC_DATA_TAG{1025};
-
-enum class FastLogitsMpiId : uint64_t
-{
-    ASK_TENSOR = 1,
-    SEND_TENSOR = 2,
-};
 
 class TrtGptModelInflightBatching : public TrtGptModel
 {
@@ -252,6 +253,11 @@ private:
     /// @param beamWidth New operating beam width. Must be smaller than initial maxBeamWidth.
     void changeBeamWidth(SizeType32 beamWidth);
 
+    SizeType32 getOperatingBeamWidth() const override
+    {
+        return mOperatingBeamWidth;
+    }
+
     /// @details Should be called after setting up the current batch in executeBatch to get the correct number of
     /// context tokens.
     IterationStatsIFB fillIterationStats(
@@ -264,9 +270,7 @@ private:
     void setupContext(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
-    TensorPtr retrieveDraftLogits(TensorPtr const& tensor);
-
-    void setupDecoderStep(RequestVector const& contextRequests);
+    void setupDecoderStep(RequestVector const& contextRequests, std::shared_ptr<RuntimeBuffers>& buffers);
     DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr const& decoderFinishEvent);
@@ -285,14 +289,17 @@ private:
     void rewindKVCacheBlocks(SizeType32 numSequences);
     void setupSpeculativeDecodingModule(executor::DecodingConfig const& decodingConfig);
 
-    std::vector<bool> computeActiveVec(ScheduledRequests const& scheduledRequests);
-
     /// @brief Copies the content of the cache indirection outputs to the cache indirection inputs.
     /// @param[in] scheduledRequests The requests to copy the cache indirections for.
     /// @param[in] genBufferId The id of the generation buffers for those requests.
     void copyCacheIndirectionFromOutputsToInputs(ScheduledRequests const& scheduledRequests, SizeType32 genBufferId);
 
     void invokeLogitsPostProcessors(ScheduledRequests const& scheduledRequests);
+
+    [[nodiscard]] bool getGatherGenerationLogits() const override
+    {
+        return getModelConfig().computeGenerationLogits() || mGatherGenerationLogits;
+    }
 
     [[nodiscard]] runtime::ModelConfig const& getModelConfig() const override
     {
@@ -385,10 +392,7 @@ protected:
         mReplicateLogitsPostProcessor = replicateLogitsPostProcessor;
     }
 
-    SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override
-    {
-        return mKvCacheManager->getMaxCapacityBatchSize(inputLength, outputLength);
-    }
+    SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override;
 
 private:
     /******************** Configs ********************/
@@ -413,7 +417,7 @@ private:
     // Runner for the TRT engine. The engine produces logits.
     std::shared_ptr<runtime::TllmRuntime> mRuntime;
     // Decoder that generates new tokens from the logits.
-    std::shared_ptr<runtime::IGptDecoderBatched> mDecoder;
+    std::shared_ptr<runtime::GptDecoderBatched> mDecoder;
     // Synchronization handles for decoder
     std::vector<DecoderFinishedEventPtr> mDecoderFinishedEvents;
 
@@ -477,19 +481,23 @@ private:
     SizeType32 mMaxNumTokensTunerRecommended;
     /// The min of mMaxNumTokens and mMaxNumTokensTunerRecommended
     std::optional<SizeType32> mMaxNumTokensRuntime;
+    // Controls if generation logits should be gathered, so that returnGenerationLogits can be requested.
+    bool mGatherGenerationLogits{false};
 
     /******************** Buffers ********************/
     // Buffers for each micro batch. Unfused path (mCtxGenFusion==false) uses two times the buffers.
     std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
     // Global buffer to interface with decoder. Slots in this buffer are selected by mSeqSlotManager.
     std::shared_ptr<DecoderBuffers> mDecoderBuffers;
-    // Decoder input for each micro batch
-    std::vector<std::shared_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
-    std::shared_ptr<runtime::decoder_batch::Output> mDecodingOutput;
     // Buffers for each slot in the decoder
     std::vector<std::shared_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
     // PEFT table for each micro batch
     std::vector<PeftTable> mPeftTables;
+    // Decoder input ids buffer.
+    TensorPtr mDecoderInputsIds;
+    // Decoder input for each micro batch.
+    std::vector<std::unique_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
+    std::unique_ptr<runtime::decoder_batch::Output> mDecodingOutput;
 
     /******************** Book keeping ********************/
     // List of requests in each micro batch
@@ -529,6 +537,12 @@ private:
     std::unique_ptr<tensorrt_llm::batch_manager::PauseRequests const> mPauseRequests;
     std::unique_ptr<tensorrt_llm::batch_manager::AssignReqSeqSlots const> mAssignReqSeqSlots;
     std::unique_ptr<tensorrt_llm::batch_manager::AllocateKvCache const> mAllocateKvCache;
+    std::unique_ptr<tensorrt_llm::batch_manager::HandleContextLogits const> mHandleContextLogits;
+    std::unique_ptr<tensorrt_llm::batch_manager::HandleGenerationLogits const> mHandleGenerationLogits;
+    std::unique_ptr<tensorrt_llm::batch_manager::GenerateRequestOptions const> mGenerateRequestOptions;
+    std::unique_ptr<tensorrt_llm::batch_manager::LogitsPostProcessor const> mLogitsPostProcessor;
+    std::unique_ptr<tensorrt_llm::batch_manager::MakeDecodingBatchInputOutput const> mMakeDecodingBatchInputOutput;
+    std::unique_ptr<tensorrt_llm::batch_manager::CreateNewDecoderRequests const> mCreateNewDecoderRequests;
 };
 
 } // namespace tensorrt_llm::batch_manager

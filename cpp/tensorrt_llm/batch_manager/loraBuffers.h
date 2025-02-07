@@ -37,7 +37,7 @@ public:
 
     runtime::LoraManager mLoraManager;
 
-    void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::TllmRuntime const& tllmRuntime,
+    LoraBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::TllmRuntime const& tllmRuntime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     static void validate(std::optional<std::uint64_t> const& optTaskId,

@@ -33,8 +33,8 @@ public:
     runtime::PromptTuningParams mPromptTuningParams;
     SizeType32 mMaxPromptVocabSize;
 
-    void create(SizeType32 maxBatchSize, runtime::BufferManager const& manager, runtime::ModelConfig const& modelConfig,
-        runtime::WorldConfig const& worldConfig);
+    PromptTuningBuffers(SizeType32 maxBatchSize, runtime::BufferManager const& manager,
+        runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
     void validate(std::optional<TensorPtr> const& optReqPromptEmbeddingTable,
         std::optional<SizeType32> const& optReqPromptVocabSize);

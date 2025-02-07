@@ -18,7 +18,7 @@
 namespace tensorrt_llm::batch_manager
 {
 
-void LoraBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::TllmRuntime const& tllmRuntime,
+LoraBuffers::LoraBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::TllmRuntime const& tllmRuntime,
     runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
 {
     auto const localNbLayers = modelConfig.getNbAttentionLayers(worldConfig.getPipelineParallelism());
@@ -26,8 +26,9 @@ void LoraBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runti
 
     auto nbModelConfigs = static_cast<SizeType32>(modelConfig.getLoraModules().size());
 
+    // there are 3 pointers: LoRA A, LoRA B, and a DoRA magnitude (null if not DoRA)
     auto loraWeightsPtrsShape
-        = runtime::ITensor::makeShape({nbModelConfigs, localNbLayers, maxBatchSize * maxBeamWidth, 2});
+        = runtime::ITensor::makeShape({nbModelConfigs, localNbLayers, maxBatchSize * maxBeamWidth, 3});
     auto loraAdapterSizesShape
         = runtime::ITensor::makeShape({nbModelConfigs, localNbLayers, maxBatchSize * maxBeamWidth});
 

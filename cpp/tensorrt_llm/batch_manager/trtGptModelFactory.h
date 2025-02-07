@@ -71,7 +71,11 @@ public:
                 "TrtGptModelType::V1 is deprecated and will be removed in a future release."
                 " Please use TrtGptModelType::InflightBatching or TrtGptModelType::InflightFusedBatching instead.");
 
-            return std::make_shared<TrtGptModelV1>(logger, modelConfig, worldConfig, rawEngine, optionalParams);
+            TrtGptModelOptionalParams const& fixedOptionalParams
+                = TrtGptModelV1::optionalParamsAreValid(modelConfig, optionalParams)
+                ? optionalParams
+                : TrtGptModelV1::fixOptionalParams(modelConfig, optionalParams);
+            return std::make_shared<TrtGptModelV1>(logger, modelConfig, worldConfig, rawEngine, fixedOptionalParams);
         }
         else if ((modelType == TrtGptModelType::InflightBatching)
             || (modelType == TrtGptModelType::InflightFusedBatching))

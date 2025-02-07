@@ -168,8 +168,8 @@ void LRUEvictionPolicy::claimBlock(BlockPtr block, std::optional<executor::Reten
 
         BlockPtr parent = block->getPrevBlock();
 
-        if (parent.get() != nullptr && mFreeBlockIterators[parent->getBlockId()] == std::nullopt
-            && isReleasedLeafBlock(parent))
+        if (parent.get() != nullptr && parent->getBlockId() != -1
+            && mFreeBlockIterators[parent->getBlockId()] == std::nullopt && isReleasedLeafBlock(parent))
         {
             auto& q = mFreeQueues[getCacheLevel(parent)][getPriorityIdx(parent->getPriority())];
             mFreeBlockIterators[parent->getBlockId()] = q.insert(q.end(), parent);

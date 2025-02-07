@@ -327,7 +327,7 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
                 {
                     if (llmReq->isEncoderInitState())
                     {
-                        llmReq->mState = LlmRequestState::kCONTEXT_INIT;
+                        llmReq->setState(LlmRequestState::kCONTEXT_INIT);
                         TLLM_LOG_DEBUG("request ID: %u finishes encoder phase", llmReq->mRequestId);
                     }
                 }
@@ -368,9 +368,9 @@ void TrtEncoderModel::terminateRequest(std::shared_ptr<LlmRequest> const& llmReq
     // For enc-dec models, only remove cross kv cache after decoder
     // genenration has finished
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    if (llmReq->mState == LlmRequestState::kENCODER_INIT)
+    if (llmReq->isEncoderInitState())
     {
-        llmReq->mState = LlmRequestState::kCONTEXT_INIT;
+        llmReq->setState(LlmRequestState::kCONTEXT_INIT);
     }
     else
     {
@@ -402,9 +402,9 @@ void TrtEncoderModel::fillEncoderOutputSync(RequestVector const& requestList, Te
         llmReq->setEncoderOutputHost(currentEncoderOutput);
         encoderOutputHostPtr += seqLen * mHiddenSize * bytesPerValue * mWorldConfig.getTensorParallelism();
 
-        if (llmReq->mState == LlmRequestState::kENCODER_INIT)
+        if (llmReq->isEncoderInitState())
         {
-            llmReq->mState = LlmRequestState::kCONTEXT_INIT;
+            llmReq->setState(LlmRequestState::kCONTEXT_INIT);
         }
         else
         {

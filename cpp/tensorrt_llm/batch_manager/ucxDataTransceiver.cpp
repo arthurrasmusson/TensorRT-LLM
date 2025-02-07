@@ -22,10 +22,8 @@ namespace tensorrt_llm::batch_manager
 
 using CacheState = tensorrt_llm::executor::kv_cache::CacheState;
 
-#if __cplusplus
 extern "C"
 {
-#endif
 
     std::unique_ptr<DataResponder> makeUcxCacheResponder(executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager)
@@ -43,10 +41,7 @@ extern "C"
         return std::make_unique<DataRequester>(std::make_unique<UcxDataReceiver>(std::make_unique<UcxCommFactory>(),
             std::move(selfCacheState), selfIndex, std::make_unique<CacheFormatter>(cacheManager)));
     }
-
-#if __cplusplus
 }
-#endif
 
 void UcxEndpoint::sendBuffer(runtime::IBuffer const& buf) const
 {

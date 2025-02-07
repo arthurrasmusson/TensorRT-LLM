@@ -10,7 +10,7 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "transformerBuffers.h"
+#include "tensorrt_llm/batch_manager/transformerBuffers.h"
 
 #include "tensorrt_llm/batch_manager/kvCacheConfig.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
@@ -24,6 +24,7 @@
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
+#include "tensorrt_llm/runtime/tllmBuffers.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 #include <cstdint>
 
@@ -34,7 +35,7 @@ namespace tensorrt_llm::batch_manager
 {
 
 TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
-    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
     runtime::WorldConfig const& worldConfig)
     : maxInputLen(modelConfig.getMaxInputLen())
@@ -120,6 +121,20 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
     contextProgressHost = BufferManager::cpu(ITensor::makeShape({1}), nvinfer1::DataType::kINT64);
     bufferCast<int64_t>(*contextProgressHost)[0] = 0;
+
+    if (modelConfig.useGemmAllReducePlugin() && worldConfig.isTensorParallel())
+    {
+        nvinfer1::DataType ARType = modelConfig.getGemmAllReduceDtype();
+
+        auto hiddenSize = modelConfig.getHiddenSize() * worldConfig.getTensorParallelism();
+
+        auto tpGroup = worldConfig.getTensorParallelGroup();
+        std::set<int> tpGroupSet(tpGroup.begin(), tpGroup.end());
+
+        auto outputDims = ITensor::makeShape({modelConfig.getMaxNumTokens().value() * hiddenSize});
+
+        gemmAllReduceOutput = std::make_shared<IpcNvlsTensor>(outputDims, ARType, tpGroupSet);
+    }
 }
 
 void TransformerBuffers::reshape(SizeType32 numSequences, SizeType32 numInputTokens)
@@ -190,6 +205,7 @@ void TransformerBuffers::reshape(SizeType32 numSequences, SizeType32 numInputTok
             TLLM_LOG_DEBUG("crossAttentionPackedMaskDevice not allocated yet");
         }
     }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, SizeType32 maxBlocksPerSeq,
@@ -235,9 +251,11 @@ void TransformerBuffers::reshapeKvTensors(SizeType32 maxBatchSize, SizeType32 ma
         crossAttentionPackedMaskCuMaskRowsDevice->reshape(ITensor::makeShape({maxBatchSize + 1}));
         manager.setZero(*crossAttentionPackedMaskCuMaskRowsDevice);
     }
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
+void TransformerBuffers::getBuffers(
+    TensorMap& inputBuffers, TensorMap& outputBuffers, runtime::ModelConfig const& modelConfig) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(transformerBuffersGetBuffers);
@@ -265,6 +283,22 @@ void TransformerBuffers::getBuffers(TensorMap& inputBuffers) const
     if (skipCrossAttnBlocks)
     {
         inputBuffers.insert_or_assign(kSkipCrossAttentionBlocksTensorName, skipCrossAttnBlocks);
+    }
+
+    if (modelConfig.useGemmAllReducePlugin())
+    {
+        for (int idx = 0; idx < modelConfig.getNbAttentionLayers() * 2; ++idx)
+        {
+            // XXX (xsimmons): this is a bit hacky as it assumes
+            // 2x RowLinear layers per attention block.
+            // This will be fixed soon when I remove coupling between model
+            // and runtime.
+            auto gemmARViewUC = gemmAllReduceOutput->getUnicastView();
+            auto gemmARViewMC = gemmAllReduceOutput->getMulticastView();
+
+            outputBuffers.insert_or_assign("gemm_allreduce_uc_out_" + std::to_string(idx), gemmARViewUC);
+            outputBuffers.insert_or_assign("gemm_allreduce_mc_out_" + std::to_string(idx), gemmARViewMC);
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -337,7 +371,7 @@ void TransformerBuffers::copyKvBlockOffsets(RequestVector const& contextRequests
     kv_cache_manager::BaseKVCacheManager const* crossKvCacheManager, BufferManager const& manager)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(copyKvBlockPointers);
+    NVTX3_SCOPED_RANGE(copyKvBlockOffsets);
 
     auto const& cudaStream = manager.getStream();
 

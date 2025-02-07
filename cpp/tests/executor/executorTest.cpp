@@ -14,46 +14,36 @@
 #error "Define TOP_LEVEL_DIR"
 #endif
 
-#include "tensorrt_llm/executor/executor.h"
-#include "disaggExecutor.h"
+#include "executorTest.h"
+
 #include "modelSpec.h"
-#include "tensorrt_llm/batch_manager/trtGptModel.h"
 #include "tensorrt_llm/common/assert.h"
-#include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/mpiUtils.h"
-#include "tensorrt_llm/executor/dataTransceiverState.h"
-#include "tensorrt_llm/executor/requestWithId.h"
+#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
-#include "tensorrt_llm/plugins/api/tllmPlugin.h"
+#include "tensorrt_llm/runtime/gptJsonConfig.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 #include "tensorrt_llm/runtime/iTensor.h"
-#include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tests/utils/common.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <memory>
-#include <mutex>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <functional>
-#include <numeric>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
-using ::testing::_;
-using ::testing::Invoke;
-
 namespace tr = tensorrt_llm::runtime;
-namespace tb = tensorrt_llm::batch_manager;
 namespace tc = tensorrt_llm::common;
 
 using namespace tensorrt_llm::testing;
@@ -62,182 +52,15 @@ using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 using tensorrt_llm::testing::KVCacheType;
 using tensorrt_llm::testing::ModelSpec;
-using tensorrt_llm::testing::OutputContentType;
-using tensorrt_llm::testing::QuantMethod;
 
 namespace
 {
 
-auto const TEST_RESOURCE_PATH = std::filesystem::path{TOP_LEVEL_DIR} / "cpp/tests/resources";
-auto const ENGINE_PATH = TEST_RESOURCE_PATH / "models/rt_engine";
-auto const GPT_MODEL_PATH = ENGINE_PATH / "gpt2";
-auto const LLAMA_MODEL_PATH = ENGINE_PATH / "llama-7b-hf";
-auto const MEDUSA_MODEL_PATH = ENGINE_PATH / "vicuna-7b-medusa";
-auto const CHATGLM_MODEL_PATH = ENGINE_PATH / "chatglm-6b";
-auto const CHATGLM2_MODEL_PATH = ENGINE_PATH / "chatglm2-6b";
-auto const CHATGLM3_MODEL_PATH = ENGINE_PATH / "chatglm3-6b";
-auto const GLM_MODEL_PATH = ENGINE_PATH / "glm-10b";
-auto const DATA_PATH = TEST_RESOURCE_PATH / "data";
-auto const GPT_DATA_PATH = DATA_PATH / "gpt2";
-auto const GPT_XGRAMMAR_TOKENIZER_INFO_PATH = GPT_DATA_PATH / "xgrammar_tokenizer_info.json";
-auto const LLAMA_DATA_PATH = DATA_PATH / "llama-7b-hf";
-auto const LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH = LLAMA_DATA_PATH / "xgrammar_tokenizer_info.json";
-auto const MEDUSA_DATA_PATH = DATA_PATH / "vicuna-7b-medusa";
-auto const CHATGLM_DATA_PATH = DATA_PATH / "chatglm-6b";
-auto const CHATGLM2_DATA_PATH = DATA_PATH / "chatglm2-6b";
-auto const CHATGLM3_DATA_PATH = DATA_PATH / "chatglm3-6b";
-auto const GLM_DATA_PATH = DATA_PATH / "glm-10b";
-auto const ENC_DEC_DATA_BASE = DATA_PATH / "enc_dec";
-auto const ENC_DEC_ENGINE_BASE = TEST_RESOURCE_PATH / "models/enc_dec/trt_engines";
-
-auto constexpr T5_NAME = "t5-small";
-auto constexpr BART_NAME = "bart-large-cnn";
-
-ModelSpec getDefaultModelSpec()
-{
-    static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
-    modelSpec.useGptAttentionPlugin().setKVCacheType(KVCacheType::kPAGED).usePackedInput();
-
-    return modelSpec;
-}
-
-auto const FP16_GPT_ATTENTION_PACKED_DIR
-    = getDefaultModelSpec().setKVCacheType(KVCacheType::kCONTINUOUS).getModelPath();
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_DIR = getDefaultModelSpec().getModelPath();
-auto const FP16_GPT_LORA_DIR = getDefaultModelSpec().useLoraPlugin().getModelPath();
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR
-    = getDefaultModelSpec().useDraftTokensExternalDecoding().gatherLogits().returnAcceptedTokensLogits().getModelPath();
-auto const FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR = getDefaultModelSpec().gatherLogits().getModelPath();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_FILE = getDefaultModelSpec().getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_LONG_RESULT_FILE
-    = getDefaultModelSpec().setInputFile("input_tokens_long.npy").getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE = getDefaultModelSpec().gatherLogits().getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE
-    = getDefaultModelSpec().gatherLogits().getGenerationLogitsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE = getDefaultModelSpec().gatherLogits().getContextLogitsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE = getDefaultModelSpec().getCumLogProbsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE
-    = getDefaultModelSpec().gatherLogits().getCumLogProbsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE = getDefaultModelSpec().getLogProbsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE = getDefaultModelSpec().gatherLogits().getLogProbsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP1_FILE = getDefaultModelSpec().getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE
-    = getDefaultModelSpec().useTensorParallelism(4).getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE
-    = getDefaultModelSpec().useTensorParallelism(2).usePipelineParallelism(2).getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE
-    = getDefaultModelSpec().usePipelineParallelism(4).getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE
-    = getDefaultModelSpec().usePipelineParallelism(2).getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP1_FILE
-    = getDefaultModelSpec().useTensorParallelism(2).getResultsFile();
-
-// GptExecutorTest.GenerationLogitsEarlyStop requires to use context_fmha_fp32_acc flag in runtime for better accuracy
-auto const FP16_PLUGIN_PACKED_PAGED_GATHER_CONTEXTFMHAFP32ACC_RESULT_FILE
-    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getResultsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_GENERATION_LOGITS_FILE
-    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getGenerationLogitsFile();
-auto const FP16_PLUGIN_PACKED_PAGED_CONTEXTFMHAFP32ACC_CONTEXT_LOGITS_FILE
-    = getDefaultModelSpec().gatherLogits().enableContextFMHAFp32Acc().getContextLogitsFile();
-
 auto const LORA_DATA_PATH = DATA_PATH / "lora-test-weights-gpt2-tp1";
 auto const LORA_WEIGHTS_FILE = LORA_DATA_PATH / "source.npy";
 auto const LORA_CONFIG_FILE = LORA_DATA_PATH / "config.npy";
-auto const EXECUTOR_WORKER_PATH
-    = std::filesystem::path{TOP_LEVEL_DIR} / "cpp/build/tensorrt_llm/executor_worker/executorWorker";
-
-std::string getEncDecEnginePath(std::string const& modelName, SizeType32 tp, SizeType32 pp, SizeType32 cp)
-{
-    return modelName + '/' + std::to_string(tp * pp * cp) + "-gpu/float16";
-}
-
-TokenIdType getDecTokenFromJsonConfig(std::filesystem::path decEnginePath, std::string const& token_name)
-{
-    TokenIdType tokenId = 0;
-    try
-    {
-        std::ifstream decoderJsonConfigPath(decEnginePath / "config.json");
-        auto const decoderPretrainedConfig
-            = nlohmann::json::parse(decoderJsonConfigPath, nullptr, true, true).at("pretrained_config");
-        tokenId = decoderPretrainedConfig.at(token_name).template get<int32_t>();
-    }
-    catch (nlohmann::json::out_of_range& e)
-    {
-        TLLM_LOG_ERROR(
-            "Parameter %s cannot be found from decoder config.json in pretrained_config. Using default id 0.",
-            token_name.c_str());
-    }
-    catch (nlohmann::json::type_error const& e)
-    {
-        TLLM_LOG_ERROR(
-            "Parameter %s has a different type from decoder config.json in pretrained_config. Using default id 0.",
-            token_name.c_str());
-    }
-    return tokenId;
-}
-
-TestData loadTestData(BeamResult const& beamResults, ITensor const& givenInput, SizeType32 const maxBeamWidth,
-    tr::BufferManager& manager, OutputConfig const& outConfig, ModelIds const& modelIds)
-{
-    auto const [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, modelIds.padId);
-    auto const& [beamWidth, resultsFile, contextLogitsFile, genLogitsFile, cumLogProbsFile, logProbsFile] = beamResults;
-
-    TestData testData{nbGivenInputs, beamWidth};
-    testData.expectedOutputIds = tr::utils::loadNpy(manager, resultsFile.string(), tr::MemoryType::kCPU);
-
-    auto const& outputShape = testData.expectedOutputIds->getShape();
-    EXPECT_EQ(outputShape.nbDims, 2);
-    EXPECT_EQ(nbGivenInputs * beamWidth, outputShape.d[0]);
-    testData.maxSeqLen = static_cast<SizeType32>(outputShape.d[1]);
-    EXPECT_LE(maxInputLength, testData.maxSeqLen);
-    EXPECT_LE(beamWidth, maxBeamWidth);
-
-    auto const maxNewTokens = testData.maxSeqLen - maxInputLength;
-
-    testData.endIds.insert(testData.endIds.end(), nbGivenInputs, modelIds.endId);
-
-    if (outConfig.returnContextLogits && beamWidth == 1)
-    {
-        testData.loadContextLogits(contextLogitsFile, givenInputLengths, manager);
-    }
-    if (outConfig.returnGenerationLogits && beamWidth == 1)
-    {
-        testData.loadGenerationLogits(genLogitsFile, manager);
-    }
-    if (outConfig.returnLogProbs && beamWidth == 1)
-    {
-        testData.loadLogProbs(cumLogProbsFile, logProbsFile, manager);
-    }
-
-    for (SizeType32 inputIdx = 0; inputIdx < nbGivenInputs; ++inputIdx)
-    {
-        for (SizeType32 beam = 0; beam < beamWidth; ++beam)
-        {
-            SizeType32 expectedLen = givenInputLengths[inputIdx] + maxNewTokens;
-            testData.expectedOutputLengths[inputIdx * beamWidth + beam] = expectedLen;
-        }
-    }
-
-    return testData;
-}
 
 } // namespace
-
-class GptExecutorTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
-{
-protected:
-    void SetUp() override
-    {
-        mLogger = std::make_shared<tr::TllmLogger>();
-        initTrtLlmPlugins(mLogger.get());
-    }
-
-    void TearDown() override {}
-
-    std::shared_ptr<nvinfer1::ILogger> mLogger{};
-    SizeType32 mMaxWaitMs = 300000;
-    SizeType32 mTrigWarnMs = 10000;
-};
 
 void testInvalidCtor(std::filesystem::path const& enginePath, ModelType modelType, ExecutorConfig executorConfig,
     std::string expectedErrMsg = "")
@@ -264,7 +87,7 @@ TEST_F(GptExecutorTest, validCtor)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 }
 
@@ -272,7 +95,7 @@ TEST_F(GptExecutorTest, invalidCtor)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     std::filesystem::path invalidPath{"Bla"};
 
     // Invalid path
@@ -285,7 +108,7 @@ TEST_F(GptExecutorTest, enqueueAfterShutdown)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxNewTokens = 5;
@@ -340,7 +163,7 @@ TEST_F(GptExecutorTest, missingPeftTask)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_LORA_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_LORA_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -378,6 +201,7 @@ TEST_F(GptExecutorTest, ReturnAcceptedTokenLogits)
 
     // Create executor config
     auto executorConfig = ExecutorConfig(beamWidth);
+    executorConfig.setGatherGenerationLogits(true);
 
     // Enable kv cache reuse of executorConfig
     bool enableBlockReuse = true;
@@ -387,8 +211,8 @@ TEST_F(GptExecutorTest, ReturnAcceptedTokenLogits)
     executorConfig.setKvCacheConfig(kvCacheConfig);
 
     // Create executor
-    auto trtEnginePath
-        = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR()
+        / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create request
@@ -459,9 +283,10 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     // Create executor config
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setExtendedRuntimePerfKnobConfig(perfKnobConfig);
+    executorConfig.setGatherGenerationLogits(true);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -479,9 +304,9 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     BeamResult beamResult{beamWidth};
     auto const resultsPath
         = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-    beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-    beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-    beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+    beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE();
+    beamResult.contextLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE();
+    beamResult.genLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE();
 
     // Set return generation logits for this request
     OutputConfig outConfig;
@@ -489,7 +314,7 @@ TEST_F(GptExecutorTest, GenerationLogitsEarlyStop)
     outConfig.excludeInputFromOutput = true;
 
     // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
+    auto testData = TestData::loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
     auto const maxSeqLen = testData.maxSeqLen;
 
     // Load expected outputs and inputs
@@ -609,7 +434,7 @@ TEST_F(GptExecutorTest, GenerationChangeEndId)
     executorConfig.setExtendedRuntimePerfKnobConfig(perfKnobConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -627,14 +452,14 @@ TEST_F(GptExecutorTest, GenerationChangeEndId)
     BeamResult beamResult{beamWidth};
     auto const resultsPath
         = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-    beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CONTEXTFMHAFP32ACC_RESULT_FILE;
+    beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_CONTEXTFMHAFP32ACC_RESULT_FILE();
 
     // Just return tokens for check
     OutputConfig outConfig;
     outConfig.excludeInputFromOutput = true;
 
     // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
+    auto testData = TestData::loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
     auto const maxSeqLen = testData.maxSeqLen;
 
     // Load expected outputs and inputs
@@ -740,12 +565,8 @@ using ParamCancelReqType = std::tuple<bool, bool, int, int, std::string>;
 using LeaderApiUsageType = std::tuple<bool, std::string>;
 using ParamStatsType = std::tuple<int, bool>;
 using AllParamsType = std::tuple<BatchingType, bool, int, bool, bool, bool, bool, std::string, bool, bool, int>;
-using EncDecParamsType = std::tuple<std::string, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32>;
 using LogitsProcParamsType = std::tuple<std::string, bool, bool>;
 using GuidedDecodingParamsType = std::tuple<std::string>;
-using DisaggParamsType = std::tuple<int, std::vector<std::string>, std::vector<std::vector<int>>,
-    std::vector<std::vector<int>>, std::vector<int>, int>;
-
 using TimeoutTestParamsType = std ::tuple<std::string, bool>;
 
 std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
@@ -898,7 +719,8 @@ std::string generateTestNameAllParams(testing::TestParamInfo<AllParamsType> cons
         name += "Streaming";
     }
 
-    name.append("BW" + std::to_string(beamWidth));
+    name.append("_BW" + std::to_string(beamWidth));
+    name.append("Nseq" + std::to_string(numReturnSequences));
 
     if (computeLogProbs)
     {
@@ -930,86 +752,6 @@ std::string generateTestNameAllParams(testing::TestParamInfo<AllParamsType> cons
     {
         name.append("returnAllGeneratedTokens");
     }
-    name.append("N" + std::to_string(numReturnSequences));
-    return name;
-}
-
-std::string generateTestNameEncDec(testing::TestParamInfo<EncDecParamsType> const& info)
-{
-    auto modelName = std::get<0>(info.param);
-    auto const beamWidth = std::get<1>(info.param);
-    auto const maxNewTokens = std::get<2>(info.param);
-    auto const tp = std::get<3>(info.param);
-    auto const pp = std::get<4>(info.param);
-
-    // GTEST does not allow '-' in its test name
-    for (auto& c : modelName)
-    {
-        if (c == '-')
-        {
-            c = '_';
-        }
-    }
-
-    std::string name = "EncDecTest";
-    name.append("_" + modelName);
-    name.append("_BeamWidth" + std::to_string(beamWidth));
-    name.append("_MaxNewTokens" + std::to_string(maxNewTokens));
-    name.append("_TP" + std::to_string(tp));
-    name.append("_PP" + std::to_string(pp));
-    return name;
-}
-
-std::string generateTestNameDisaggParams(testing::TestParamInfo<DisaggParamsType> const& info)
-{
-    auto const processNum = std::get<0>(info.param);
-    auto const modelNames = std::get<1>(info.param);
-    auto const participantIdsEachInstance = std::get<2>(info.param);       // std::vector<std::vector<int>>
-    auto const participantDeviceIdsEachInstance = std::get<3>(info.param); // std::vector<std::vector<int>>;
-    auto const instanceRoles = std::get<4>(info.param); // std::vector<int> ; //1 is context , 0 is generation
-    auto const controllerRank = std::get<5>(info.param);
-
-    auto convertToString = [](std::vector<std::vector<int>> const& vec)
-    {
-        std::ostringstream oss;
-        oss << "XX";
-
-        for (size_t i = 0; i < vec.size(); ++i)
-        {
-            for (size_t j = 0; j < vec[i].size(); ++j)
-            {
-                oss << vec[i][j];
-                if (j < vec[i].size() - 1)
-                {
-                    oss << "_";
-                }
-            }
-            if (i < vec.size() - 1)
-            {
-                oss << "X_X";
-            }
-        }
-
-        oss << "XX";
-        return oss.str();
-    };
-    std::string name = "DisaggExecutorTest_";
-
-    name.append("ProcessNum_" + std::to_string(processNum));
-    // name.append("_contextModel_" + contextModel + "_genModel_" + genModel);
-    name.append("_modelNames_");
-    for (auto&& modelName : modelNames)
-    {
-        name.append(modelName).append("_");
-    }
-
-    name.append("_controllerRank_" + std::to_string(controllerRank));
-
-    name.append("_ranks_").append(convertToString(participantIdsEachInstance));
-    name.append("_devices_").append(convertToString(participantDeviceIdsEachInstance));
-    name.append("_roles_").append(convertToString({instanceRoles}));
-    name.append("_controllerRank_" + std::to_string(controllerRank));
-
     return name;
 }
 
@@ -1025,23 +767,11 @@ class AllParamsTest : public GptExecutorTest, public ::testing::WithParamInterfa
 {
 };
 
-class DisaggParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<DisaggParamsType>
-{
-};
-
-class DisaggOrchestratorParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<DisaggParamsType>
-{
-};
-
 class ParamCancelReqTest : public GptExecutorTest, public ::testing::WithParamInterface<ParamCancelReqType>
 {
 };
 
 class LeaderApiUsageTest : public GptExecutorTest, public ::testing::WithParamInterface<LeaderApiUsageType>
-{
-};
-
-class EncDecParamsTest : public GptExecutorTest, public ::testing::WithParamInterface<EncDecParamsType>
 {
 };
 
@@ -1066,7 +796,7 @@ TEST_F(GptExecutorTest, GetLatestStats)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1165,7 +895,7 @@ TEST_F(GptExecutorTest, GetLatestStatsWithMultipleRequests)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
@@ -1274,7 +1004,7 @@ TEST_F(GptExecutorTest, GetLatestRequestStats)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
     executorConfig.setEnableChunkedContext(true);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
@@ -1432,7 +1162,7 @@ TEST_F(GptExecutorTest, GetLatestRequestStatsScheduling)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
     executorConfig.setEnableChunkedContext(true);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create 100 requests. Note the max batch size for this model is 64 so some requests won't be scheduled right away.
@@ -1528,7 +1258,7 @@ TEST_F(GptExecutorTest, GetRequestStatsMultipleRequests)
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setRequestStatsMaxIterations(1000);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto sendRequestWaitForResponseFn = [&]()
@@ -1599,7 +1329,7 @@ TEST_F(GptExecutorTest, BatchSizeTuning)
     SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT, std::nullopt, dynamicBatchConfig);
     executorConfig.setSchedulerConfig(schedulerConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     std::vector<SizeType32> tunerRecommendedBatchSizes;
@@ -1655,7 +1385,7 @@ TEST_F(GptExecutorTest, GetLatestDebugTensors)
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setDebugConfig(debugConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1732,7 +1462,7 @@ TEST_P(ParamTest, SingleRequestDemo)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -1807,7 +1537,7 @@ TEST_P(ParamTest, MultipleRequestDemo)
     SizeType32 numRequests = 20;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxPromptLen = 20;
@@ -1901,12 +1631,12 @@ TEST_P(ParamStatsTest, MultipleRequestStats)
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setIterStatsMaxIterations(iterStatsMaxIterations);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
 
     std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
     if (useOrchestratorMode)
     {
-        orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
     }
     auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
         useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt, std::nullopt,
@@ -2027,7 +1757,7 @@ TEST_P(ParamTest, MultipleRequestBatchResponses)
     SizeType32 constexpr numRequests{20};
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr maxPromptLen{20};
@@ -2122,7 +1852,7 @@ TEST_P(ParamTest, GetNumResponsesReadyTest)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 maxNumRequests = 50;
@@ -2172,589 +1902,6 @@ TEST_P(ParamTest, GetNumResponsesReadyTest)
 namespace
 {
 
-struct FlakyTestInfo
-{
-    // Pair of batch ID + beam which are flaky
-    std::set<std::pair<SizeType32, SizeType32>> batchIdBeams;
-};
-
-void verifyOutput(std::unordered_map<SizeType32, std::vector<BeamTokens>> const& resultTokens, TestData const& testData,
-    std::vector<SizeType32> const& givenInputLengths, SizeType32 nbGivenInputs, bool streaming,
-    bool excludeInputFromOutput, FlakyTestInfo flakyTestInfo, bool isSpeculativeDecoding, bool returnAllGeneratedTokens,
-    SizeType32 reqBeamWidth, SizeType32 numReturnSequences, bool isNonGreedySampling)
-{
-    for (auto const& [batchId, beamTokens] : resultTokens)
-    {
-        for (auto seqIdx = 0; seqIdx < numReturnSequences; seqIdx++)
-        {
-            auto const& tokens = beamTokens.at(seqIdx);
-            auto const inputLength = givenInputLengths.at(batchId);
-            SizeType32 const numReturnBeams = tokens.size();
-            auto const* const expectedOutputData = tr::bufferCast<TokenIdType const>(*testData.expectedOutputIds);
-            auto const expectedOutputLengths = testData.expectedOutputLengths;
-            auto const endId = testData.endIds[batchId];
-            auto const maxSeqLen = testData.maxSeqLen;
-
-            for (SizeType32 beam = 0; beam < numReturnBeams; ++beam)
-            {
-                bool isFlaky = flakyTestInfo.batchIdBeams.count(std::make_pair(batchId, beam));
-                if (isFlaky)
-                {
-                    TLLM_LOG_WARNING("Disabling token comparison for batchId %d beam %d, test if flaky", batchId, beam);
-                }
-
-                auto const expectInputOutputLength
-                    = expectedOutputLengths[batchId * reqBeamWidth + beam]; // Ground truth output length
-                auto expectedOutputLength
-                    = expectInputOutputLength - inputLength;                // Number of new generated output tokens
-                if (returnAllGeneratedTokens)
-                {
-                    // If returnAllGeneratedTokens, then the tokens of each iteration will contain all the previously
-                    // generated tokens. Such as: [(a), (a, b), (a, b, c), (a, b, c, d), ...]
-                    expectedOutputLength = (1 + expectedOutputLength) * expectedOutputLength / 2;
-                }
-
-                bool inputNotIncluded = (streaming || excludeInputFromOutput);
-                bool anyMismatch = false;
-                auto predictedTokens = tokens.at(beam);
-                // Remove the prompt
-                if (!inputNotIncluded)
-                {
-                    predictedTokens.erase(predictedTokens.begin(), predictedTokens.begin() + inputLength);
-                }
-
-                if (!isNonGreedySampling)
-                {
-                    EXPECT_EQ(predictedTokens.size(), expectedOutputLength)
-                        << "b: " << batchId << " seq: " << seqIdx << " beam: " << beam;
-                }
-
-                if (returnAllGeneratedTokens)
-                {
-                    // If returnAllGeneratedTokens, the output of the last iteration will contain all the output tokens
-                    predictedTokens.erase(
-                        predictedTokens.begin(), predictedTokens.end() - (expectInputOutputLength - inputLength));
-                }
-                auto numPredTokens = static_cast<SizeType32>(predictedTokens.size());
-
-                if (isSpeculativeDecoding)
-                {
-                    // WAR to ensure bulk execution of spec decoding.
-                    // We hope that no request in batch can finish 2x faster than any other request.
-                    // For the cases when BS < 8, some predicted tokens are mismatched to reference data.
-                    numPredTokens /= 2;
-                }
-
-                for (auto i = 0; i < numPredTokens; ++i)
-                {
-                    // Use the expected data for that beamWidth
-                    auto const expectIndex = tc::flat_index3(batchId, beam, inputLength + i, reqBeamWidth, maxSeqLen);
-                    auto const expectedToken = expectedOutputData[expectIndex];
-                    if (expectedToken == endId)
-                    {
-                        // TODO: can not find the error when (expectedToken == endId) && (predictedToken != endId)
-                        break;
-                    }
-                    auto const predictedToken = predictedTokens.at(i);
-                    if (!isFlaky && !isNonGreedySampling)
-                    {
-                        EXPECT_EQ(predictedToken, expectedToken)
-                            << "b: " << batchId << " seq: " << seqIdx << " beam: " << beam << " i: " << i;
-                    }
-                    anyMismatch |= (predictedToken != expectedToken);
-                }
-                if (!isFlaky && !isNonGreedySampling)
-                {
-                    EXPECT_FALSE(anyMismatch) << "b: " << batchId << " seq: " << seqIdx << " beam: " << beam;
-                }
-                else if (isNonGreedySampling)
-                {
-                    EXPECT_TRUE(anyMismatch) << "b: " << batchId << " seq: " << seqIdx << " beam: " << beam;
-                }
-            }
-        }
-    }
-}
-
-void verifyLogProbs(bool computeLogProbs, TestData const& testData, bool streaming, bool excludeInputFromOutput,
-    SizeType32 inputLength, SizeType32 beamWidth, BeamTokens const& beamTokens,
-    std::optional<VecLogProbs> const& cumLogProbs, std::optional<std::vector<VecLogProbs>> const& logProbs,
-    SizeType32 batchId, FlakyTestInfo flakyTestInfo)
-{
-    auto expectedCumLogProbs = testData.expectedCumLogProbs[batchId];
-    auto expectedLogProbs = testData.expectedLogProbs[batchId];
-    auto const expectedOutputLengths = testData.expectedOutputLengths;
-    auto const numReturnBeams = beamTokens.size();
-
-    if (computeLogProbs)
-    {
-        EXPECT_TRUE(cumLogProbs.has_value()) << "bid: " << batchId;
-        EXPECT_TRUE(logProbs.has_value()) << "bid: " << batchId;
-        EXPECT_EQ(cumLogProbs.value().size(), numReturnBeams) << "bid: " << batchId;
-        EXPECT_EQ(logProbs.value().size(), numReturnBeams) << "bid: " << batchId;
-
-        bool removeInput = !excludeInputFromOutput && !streaming;
-
-        for (SizeType32 beam = 0; beam < numReturnBeams; ++beam)
-        {
-            bool isFlaky = flakyTestInfo.batchIdBeams.count(std::make_pair(batchId, beam));
-            if (isFlaky)
-            {
-                TLLM_LOG_WARNING("Disabling token comparison for batchId %d beam %d, test if flaky", batchId, beam);
-            }
-
-            auto expectedOutputLength = expectedOutputLengths[batchId * beamWidth + beam];
-            expectedOutputLength -= inputLength;
-
-            auto numPredTokens = logProbs.value().at(beam).size();
-            // Check shape
-            EXPECT_EQ(numPredTokens, beamTokens.at(beam).size() - (removeInput ? inputLength : 0))
-                << "bid: " << batchId << " beam: " << beam;
-
-            // If beamWidth == 1, compare log probs against python runtime
-            if (beamWidth == 1)
-            {
-                auto* const reqExpectedCumLogProbs = tr::bufferCast<float>(*expectedCumLogProbs);
-                // Only check cumLogProbs for the last generated token
-                if (numPredTokens == expectedOutputLength && !isFlaky)
-                {
-                    EXPECT_TRUE(almostEqual(reqExpectedCumLogProbs[beam], cumLogProbs.value().at(beam), 2e-1, 5e-2))
-                        << "expectedCumLogProbs : " << reqExpectedCumLogProbs[beam]
-                        << " cumlogProbs : " << cumLogProbs.value().at(beam);
-                }
-
-                auto expectedLogProbsBeam = std::shared_ptr(tr::ITensor::slice(expectedLogProbs, beam, 1));
-                expectedLogProbsBeam->squeeze(0);
-                auto* const reqExpectedLogProbs = tr::bufferCast<float>(*expectedLogProbsBeam);
-                for (auto i = 0; i < numPredTokens; ++i)
-                {
-                    if (!isFlaky)
-                    {
-                        EXPECT_TRUE(
-                            almostEqual(reqExpectedLogProbs[inputLength + i], logProbs.value()[beam][i], 5e-2, 5e-2))
-                            << "expectedLogProbs : " << reqExpectedLogProbs[inputLength + i]
-                            << " logProbs : " << logProbs.value()[beam][i];
-                    }
-                }
-            }
-        }
-    }
-    else
-    {
-        EXPECT_FALSE(cumLogProbs.has_value()) << "bid: " << batchId;
-        EXPECT_FALSE(logProbs.has_value()) << "bid: " << batchId;
-    }
-}
-
-void validateContextLogits(bool getContextLogits, TestData const& testData, SizeType32 inputLength,
-    SizeType32 beamWidth, std::optional<Tensor> const& contextLogits, SizeType32 vocabSizePadded, SizeType32 batchId,
-    BatchingType batchingType)
-{
-    if (getContextLogits)
-    {
-        EXPECT_TRUE(contextLogits.has_value()) << "bid: " << batchId;
-        EXPECT_EQ(contextLogits.value().getShape().size(), 2);
-        EXPECT_EQ(contextLogits.value().getShape()[0], inputLength);
-        EXPECT_EQ(contextLogits.value().getShape()[1], vocabSizePadded);
-        auto const expectedContextLogits = testData.expectedContextLogits[batchId];
-
-        if (batchingType != BatchingType::kSTATIC && beamWidth == 1)
-        {
-            cudaDeviceSynchronize(); // Make sure the logits copy is complete.
-            EXPECT_TRUE(compareLogits(*expectedContextLogits, *(detail::toITensor(contextLogits.value()))));
-        }
-    }
-    else
-    {
-        EXPECT_FALSE(contextLogits.has_value()) << "bid: " << batchId;
-    }
-}
-
-void validateGenerationLogits(bool getGenLogits, TestData const& testData, bool isFinal, bool streaming,
-    bool excludeInputFromOutput, SizeType32 inputLength, SizeType32 maxOutputLen, SizeType32 beamWidth,
-    BeamTokens const& beamTokens, std::optional<Tensor> const& genLogits, SizeType32 vocabSizePadded,
-    SizeType32 batchId, BatchingType batchingType, bool const returnAllGeneratedTokens)
-{
-    auto const numReturnBeams = beamTokens.size();
-
-    if (getGenLogits)
-    {
-        EXPECT_TRUE(genLogits.has_value()) << "bid: " << batchId;
-        EXPECT_EQ(genLogits.value().getShape().size(), 3);
-
-        // Expected generation logits
-        auto const& expectedGenerationLogits
-            = testData.expectedGenerationLogits[batchId]; // [maxOutputLen, vocabSizePadded]
-        // Output generation logits
-        // 1. non-streaming: [beamWidth, maxOutputLen, vocabSizePadded]
-        // 2. streaming: [maxOutputLen (or 1), beamWidth, vocabSizePadded]
-        auto const& outputGenerationLogits = detail::toITensor(genLogits.value());
-
-        if (streaming && batchingType != BatchingType::kSTATIC)
-        {
-            EXPECT_EQ(genLogits.value().getShape()[1], numReturnBeams);
-            EXPECT_EQ(beamWidth, 1); // Only support streaming && beamWidth == 1
-
-            SizeType32 const beamIdx = 0;
-            bool removeInput = !excludeInputFromOutput && !streaming;
-            // If returnAllGeneratedTokens, will contain duplicate tokens
-            auto const& numPredTokens = beamTokens.at(beamIdx).size() - (removeInput ? inputLength : 0);
-
-            SizeType32 numGeneratedToken = genLogits.value().getShape()[0];
-            if (returnAllGeneratedTokens)
-            {
-                EXPECT_EQ((numGeneratedToken + 1) * numGeneratedToken / 2, numPredTokens);
-            }
-            else
-            {
-                EXPECT_EQ(numGeneratedToken, 1);
-            }
-            SizeType32 sliceOffset = returnAllGeneratedTokens ? 0 : numPredTokens - 1;
-
-            auto const& expectedGenerationLogitsSlice
-                = std::shared_ptr(ITensor::slice(expectedGenerationLogits, sliceOffset,
-                    numGeneratedToken)); // [numGeneratedToken, vocabSizePadded]
-
-            cudaDeviceSynchronize();     // Make sure the logits copy is complete.
-            EXPECT_TRUE(compareLogits(*expectedGenerationLogitsSlice, *outputGenerationLogits));
-        }
-        else
-        {
-            // Non-streaming
-            EXPECT_EQ(genLogits.value().getShape()[0], numReturnBeams);
-            EXPECT_EQ(genLogits.value().getShape()[1], maxOutputLen);
-
-            if (isFinal && batchingType != BatchingType::kSTATIC && beamWidth == 1)
-            {
-                cudaDeviceSynchronize(); // Make sure the logits copy is complete.
-                EXPECT_TRUE(compareLogits(*expectedGenerationLogits, *outputGenerationLogits));
-            }
-        }
-        EXPECT_EQ(genLogits.value().getShape()[2], vocabSizePadded);
-    }
-    else
-    {
-        EXPECT_FALSE(genLogits.has_value()) << "bid: " << batchId;
-    }
-}
-
-void verifyGenerateDistStats(std::deque<RequestStatsPerIteration> const& iterationStats)
-{
-    for (auto const& iteration : iterationStats)
-    {
-        for (auto const& requestStats : iteration.requestStats)
-        {
-            if (requestStats.stage == RequestStage::kGENERATION_COMPLETE)
-            {
-                EXPECT_TRUE(requestStats.disServingStats.has_value());
-                EXPECT_GT(requestStats.disServingStats.value().kvCacheTransferMS, 0.0);
-            }
-            if (requestStats.stage != RequestStage::kQUEUED)
-            {
-                EXPECT_TRUE(requestStats.disServingStats.has_value());
-            }
-            else
-            {
-                EXPECT_FALSE(requestStats.disServingStats.has_value());
-            }
-        }
-    }
-}
-
-void runDisaggTest(tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorLeader& executor,
-    tensorrt_llm::runtime::BufferManager& manager, ITensor const& givenInput, ModelIds const& modelIds,
-    FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
-    OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
-    bool returnAllGeneratedTokens)
-{
-
-    auto& comm = tensorrt_llm::mpi::MpiComm::world();
-    auto const worldRank = comm.getRank();
-    auto const worldSize = comm.getSize();
-    auto const beamWidth = beamResult.beamWidth;
-
-    std::unordered_map<IdType, SizeType32> reqIdToBatchId;
-    std::unordered_map<SizeType32, std::vector<BeamTokens>> tokens;
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, modelIds.padId);
-    auto const* const givenInputData = tr::bufferCast<TokenIdType const>(givenInput);
-
-    auto const& inputShape = givenInput.getShape();
-    ASSERT_EQ(inputShape.nbDims, 2);
-    ASSERT_GT(inputShape.d[0], 0);
-
-    // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, givenInput, beamWidth, manager, outConfig, modelIds);
-    auto const maxSeqLen = testData.maxSeqLen;
-
-    // Load expected outputs and inputs
-    SizeType32 numRequests = static_cast<SizeType32>(givenInputLengths.size());
-    SizeType32 maxRequests = numRequests;
-    std::vector<Request> requests;
-    std::vector<SizeType32> reqMaxNewTokens;
-    SizeType32 const numReturnSequences = 1;
-
-    for (SizeType32 req = 0; req < maxRequests; ++req)
-    {
-        SizeType32 inputLen = givenInputLengths.at(req);
-        auto maxNewTokens = maxSeqLen - maxInputLength;
-        reqMaxNewTokens.push_back(maxNewTokens);
-        SizeType32 endId = -1;
-        auto const* const seqBegin = givenInputData + req * maxInputLength;
-        VecTokens tokens(seqBegin, seqBegin + inputLen);
-        auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
-        samplingConfig.setNumReturnSequences(numReturnSequences);
-        auto request = Request(
-            VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming, samplingConfig, outConfig, endId);
-        request.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
-        request.setRequestType(RequestType::REQUEST_TYPE_CONTEXT_ONLY);
-        requests.emplace_back(std::move(request));
-    }
-
-    if (executor.isController())
-    {
-        std::vector<IdType> reqIds;
-
-        for (int i = 0; i < requests.size(); ++i)
-        {
-            std::vector<BeamTokens> resultTokens;
-            resultTokens.reserve(numReturnSequences);
-            for (SizeType32 seqIdx = 0; seqIdx < numReturnSequences; ++seqIdx)
-            {
-                resultTokens.emplace_back(beamWidth);
-            }
-            auto retReqId = executor.enqueueRequests({requests[i]});
-            reqIds.push_back(retReqId.front());
-            tokens[i] = std::move(resultTokens);
-            reqIdToBatchId[retReqId.front()] = i;
-        }
-
-        // Get the new tokens for each requests
-        int32_t numFinished = 0;
-        int iter = 0;
-        SizeType32 numResponses = 0;
-        while (numFinished < maxRequests && iter < maxWaitMs)
-        {
-            std::chrono::milliseconds waitTime(1);
-            auto responses = executor.awaitResponses(waitTime);
-            for (auto& response : responses)
-            {
-                numResponses++;
-                if (!response.hasError())
-                {
-                    auto result = response.getResult();
-                    numFinished += result.isFinal;
-                    auto batchId = reqIdToBatchId.at(response.getRequestId());
-                    auto seqIdx = result.sequenceIndex;
-
-                    auto& contextLogits = result.contextLogits;
-                    auto& genLogits = result.generationLogits;
-                    auto& outputTokenIds = result.outputTokenIds;
-
-                    EXPECT_EQ(result.finishReasons.size(), beamWidth);
-                    for (SizeType32 beam = 0; beam < beamWidth; ++beam)
-                    {
-                        auto& newTokens = outputTokenIds.at(beam);
-                        auto& reqTokens = tokens.at(batchId).at(seqIdx).at(beam);
-
-                        reqTokens.insert(reqTokens.end(), newTokens.begin(), newTokens.end());
-                        // FinishReason is only supported for bw=1 and inflight batching.
-                        if (beamWidth == 1 && batchingType == BatchingType::kINFLIGHT)
-                        {
-                            EXPECT_EQ(result.finishReasons.at(beam),
-                                result.isFinal ? FinishReason::kLENGTH : FinishReason::kNOT_FINISHED);
-                        }
-                    }
-
-                    auto& cumLogProbs = result.cumLogProbs;
-                    auto& logProbs = result.logProbs;
-                    auto& beamTokens = tokens.at(batchId).at(seqIdx);
-                    verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
-                        givenInputLengths.at(batchId), beamWidth, beamTokens, cumLogProbs, logProbs, batchId,
-                        flakyTestInfo);
-
-                    validateContextLogits(outConfig.returnContextLogits, testData, givenInputLengths.at(batchId),
-                        beamWidth, contextLogits, vocabSizePadded, batchId, batchingType);
-                    validateGenerationLogits(outConfig.returnGenerationLogits, testData, result.isFinal, streaming,
-                        outConfig.excludeInputFromOutput, givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId),
-                        beamWidth, beamTokens, genLogits, vocabSizePadded, batchId, batchingType,
-                        returnAllGeneratedTokens);
-                }
-                else
-                {
-                    // Allow response with error only if awaitResponse processed a terminated request id
-                    std::string err = "ReqId " + std::to_string(response.getRequestId())
-                        + " has already been processed and was terminated.";
-                    EXPECT_EQ(response.getErrorMsg(), err);
-                }
-            }
-            ++iter;
-        }
-        EXPECT_LT(iter, maxWaitMs);
-        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
-            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, beamWidth, numReturnSequences, false);
-    }
-    comm.barrier();
-    if (executor.isGenerationRank())
-    {
-        verifyGenerateDistStats(executor.getLatestRequestStats());
-    }
-}
-
-void runDisaggTest(DisaggExecutorOrchestrator& executor, tensorrt_llm::runtime::BufferManager& manager,
-    ITensor const& givenInput, ModelIds const& modelIds, FlakyTestInfo const& flakyTestInfo, bool streaming,
-    SizeType32 const vocabSizePadded, BeamResult const& beamResult, OutputConfig const& outConfig,
-    bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType, bool returnAllGeneratedTokens)
-{
-
-    auto& comm = tensorrt_llm::mpi::MpiComm::world();
-    auto const worldRank = comm.getRank();
-    auto const worldSize = comm.getSize();
-    auto const beamWidth = beamResult.beamWidth;
-
-    std::unordered_map<IdType, SizeType32> reqIdToBatchId;
-    std::unordered_map<SizeType32, std::vector<BeamTokens>> tokens;
-    // std::unordered_map<IdType, IdType> gGenIdIdTogContextId;
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(givenInput, modelIds.padId);
-    auto const* const givenInputData = tr::bufferCast<TokenIdType const>(givenInput);
-
-    auto const& inputShape = givenInput.getShape();
-    ASSERT_EQ(inputShape.nbDims, 2);
-    ASSERT_GT(inputShape.d[0], 0);
-
-    // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, givenInput, beamWidth, manager, outConfig, modelIds);
-    auto const maxSeqLen = testData.maxSeqLen;
-
-    // Load expected outputs and inputs
-    SizeType32 numRequests = static_cast<SizeType32>(givenInputLengths.size());
-    SizeType32 maxRequests = numRequests;
-    std::vector<Request> requests;
-    std::vector<SizeType32> reqMaxNewTokens;
-    SizeType32 const numReturnSequences = 1;
-
-    for (SizeType32 req = 0; req < maxRequests; ++req)
-    {
-        SizeType32 inputLen = givenInputLengths.at(req);
-        auto maxNewTokens = maxSeqLen - maxInputLength;
-        reqMaxNewTokens.push_back(maxNewTokens);
-        SizeType32 endId = -1;
-        auto const* const seqBegin = givenInputData + req * maxInputLength;
-        VecTokens tokens(seqBegin, seqBegin + inputLen);
-        auto samplingConfig = tensorrt_llm::executor::SamplingConfig(beamWidth);
-        samplingConfig.setNumReturnSequences(numReturnSequences);
-        auto request = Request(
-            VecTokens(seqBegin, seqBegin + inputLen), maxNewTokens, streaming, samplingConfig, outConfig, endId);
-        request.setReturnAllGeneratedTokens(returnAllGeneratedTokens);
-        request.setRequestType(RequestType::REQUEST_TYPE_CONTEXT_ONLY);
-        requests.emplace_back(std::move(request));
-    }
-
-    if (worldRank == 0)
-    {
-        std::vector<IdType> reqIds;
-
-        for (int i = 0; i < requests.size(); ++i)
-        {
-            std::vector<BeamTokens> resultTokens;
-            resultTokens.reserve(numReturnSequences);
-            for (SizeType32 seqIdx = 0; seqIdx < numReturnSequences; ++seqIdx)
-            {
-                resultTokens.emplace_back(beamWidth);
-            }
-            auto retReqId = executor.enqueueContext({requests[i]}, std::nullopt);
-            reqIds.push_back(retReqId.front());
-            tokens[i] = std::move(resultTokens);
-            reqIdToBatchId[retReqId.front()] = i;
-        }
-
-        int32_t numContextFinished = 0;
-        int contextIter = 0;
-        while (numContextFinished < maxRequests && contextIter < maxWaitMs)
-        {
-            std::chrono::milliseconds waitTime(1);
-
-            auto contextResponses = executor.awaitContextResponses(waitTime);
-            contextIter++;
-            numContextFinished += contextResponses.size();
-
-            for (auto&& responseWithId : contextResponses)
-            {
-                auto contextGid = responseWithId.gid;
-                int batchId = reqIdToBatchId[contextGid];
-                auto&& request = requests[batchId];
-                request.setRequestType(RequestType::REQUEST_TYPE_GENERATION_ONLY);
-                request.setContextPhaseParams(responseWithId.response.getResult().contextPhaseParams.value());
-                executor.enqueueGeneration({request}, {responseWithId.gid}, std::nullopt);
-            }
-        }
-        // Get the new tokens for each requests
-        int32_t numFinished = 0;
-        int iter = 0;
-        SizeType32 numResponses = 0;
-        while (numFinished < maxRequests && iter < maxWaitMs)
-        {
-            std::chrono::milliseconds waitTime(1);
-            auto responses = executor.awaitGenerationResponses(waitTime);
-            for (auto& responseWithId : responses)
-            {
-                numResponses++;
-                if (!responseWithId.response.hasError())
-                {
-                    auto result = responseWithId.response.getResult();
-                    numFinished += result.isFinal;
-                    auto batchId = reqIdToBatchId.at(responseWithId.gid);
-                    auto seqIdx = result.sequenceIndex;
-
-                    auto& contextLogits = result.contextLogits;
-                    auto& genLogits = result.generationLogits;
-                    auto& outputTokenIds = result.outputTokenIds;
-
-                    EXPECT_EQ(result.finishReasons.size(), beamWidth);
-                    for (SizeType32 beam = 0; beam < beamWidth; ++beam)
-                    {
-                        auto& newTokens = outputTokenIds.at(beam);
-                        auto& reqTokens = tokens.at(batchId).at(seqIdx).at(beam);
-
-                        reqTokens.insert(reqTokens.end(), newTokens.begin(), newTokens.end());
-                        // FinishReason is only supported for bw=1 and inflight batching.
-                        if (beamWidth == 1 && batchingType == BatchingType::kINFLIGHT)
-                        {
-                            EXPECT_EQ(result.finishReasons.at(beam),
-                                result.isFinal ? FinishReason::kLENGTH : FinishReason::kNOT_FINISHED);
-                        }
-                    }
-
-                    auto& cumLogProbs = result.cumLogProbs;
-                    auto& logProbs = result.logProbs;
-                    auto& beamTokens = tokens.at(batchId).at(seqIdx);
-                    verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
-                        givenInputLengths.at(batchId), beamWidth, beamTokens, cumLogProbs, logProbs, batchId,
-                        flakyTestInfo);
-
-                    validateContextLogits(outConfig.returnContextLogits, testData, givenInputLengths.at(batchId),
-                        beamWidth, contextLogits, vocabSizePadded, batchId, batchingType);
-                    validateGenerationLogits(outConfig.returnGenerationLogits, testData, result.isFinal, streaming,
-                        outConfig.excludeInputFromOutput, givenInputLengths.at(batchId), reqMaxNewTokens.at(batchId),
-                        beamWidth, beamTokens, genLogits, vocabSizePadded, batchId, batchingType,
-                        returnAllGeneratedTokens);
-                }
-                else
-                {
-                    // Allow response with error only if awaitResponse processed a terminated request id
-                    std::string err = "ReqId " + std::to_string(responseWithId.gid)
-                        + " has already been processed and was terminated.";
-                    EXPECT_EQ(responseWithId.response.getErrorMsg(), err);
-                }
-            }
-            ++iter;
-        }
-        EXPECT_LT(iter, maxWaitMs);
-        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
-            flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, beamWidth, numReturnSequences, false);
-    }
-    comm.barrier();
-}
-
 void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& modelIds,
     FlakyTestInfo const& flakyTestInfo, bool streaming, SizeType32 const vocabSizePadded, BeamResult const& beamResult,
     OutputConfig const& outConfig, bool isSpeculativeDecoding, int maxWaitMs, BatchingType batchingType,
@@ -2775,7 +1922,7 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
     ASSERT_GT(inputShape.d[0], 0);
 
     // Load expected outputs for each beam width value
-    auto testData = loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
+    auto testData = TestData::loadTestData(beamResult, *givenInput, beamWidth, manager, outConfig, modelIds);
     auto const maxSeqLen = testData.maxSeqLen;
 
     // Load expected outputs and inputs
@@ -2875,15 +2022,27 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
 
                     if (!isNonGreedySampling)
                     {
-                        verifyLogProbs(outConfig.returnLogProbs, testData, streaming, outConfig.excludeInputFromOutput,
+                        testData.verifyLogProbs(outConfig.returnLogProbs, streaming, outConfig.excludeInputFromOutput,
                             givenInputLengths.at(batchId), beamWidth, beamTokens, cumLogProbs, logProbs, batchId,
                             flakyTestInfo);
-                        validateContextLogits(outConfig.returnContextLogits, testData, givenInputLengths.at(batchId),
+                        testData.validateContextLogits(outConfig.returnContextLogits, givenInputLengths.at(batchId),
                             beamWidth, contextLogits, vocabSizePadded, batchId, batchingType);
-                        validateGenerationLogits(outConfig.returnGenerationLogits, testData, result.isSequenceFinal,
+                        testData.validateGenerationLogits(outConfig.returnGenerationLogits, result.isSequenceFinal,
                             streaming, outConfig.excludeInputFromOutput, givenInputLengths.at(batchId),
                             reqMaxNewTokens.at(batchId), beamWidth, beamTokens, genLogits, vocabSizePadded, batchId,
                             batchingType, returnAllGeneratedTokens);
+                    }
+
+                    // Ignore first iteration as it doesn't use draft tokens
+                    if (outConfig.returnPerfMetrics && isSpeculativeDecoding
+                        && result.requestPerfMetrics.value().iter > 0)
+                    {
+                        auto& specDecMetrics = result.requestPerfMetrics.value().speculativeDecoding;
+                        // 4 draft tokens are used per step
+                        EXPECT_EQ(specDecMetrics.totalDraftTokens, result.requestPerfMetrics.value().iter.value() * 4);
+                        EXPECT_EQ(specDecMetrics.acceptanceRate,
+                            static_cast<float>(specDecMetrics.totalAcceptedDraftTokens)
+                                / specDecMetrics.totalDraftTokens);
                     }
                 }
                 else
@@ -2897,7 +2056,7 @@ void runTest(Executor& executor, fs::path const& inputPath, ModelIds const& mode
             ++iter;
         }
         EXPECT_LT(iter, maxWaitMs);
-        verifyOutput(tokens, testData, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
+        testData.verifyOutput(tokens, givenInputLengths, nbGivenInputs, streaming, outConfig.excludeInputFromOutput,
             flakyTestInfo, isSpeculativeDecoding, returnAllGeneratedTokens, beamWidth, numSequences,
             isNonGreedySampling);
     }
@@ -2916,7 +2075,7 @@ void runTest(fs::path const& modelPath, ExecutorConfig const& executorConfig, fs
 }
 
 ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBeamWidth, bool useOrchestratorMode,
-    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt,
+    bool gatherGenerationLogits, std::optional<std::vector<SizeType32>> deviceIds = std::nullopt,
     std::optional<std::vector<SizeType32>> participantIds = std::nullopt)
 {
     // Note: we reduce memory fraction for cases that return context/generation logits which require more free
@@ -2927,11 +2086,12 @@ ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBea
     executorConfig.setBatchingType(batchingType);
     executorConfig.setKvCacheConfig(kvCacheConfig);
     executorConfig.setNormalizeLogProbs(false);
+    executorConfig.setGatherGenerationLogits(gatherGenerationLogits);
 
     std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
     if (useOrchestratorMode)
     {
-        orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
     }
     auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
         useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::move(deviceIds),
@@ -2942,477 +2102,6 @@ ExecutorConfig createExecutorConfig(BatchingType batchingType, SizeType32 maxBea
 }
 
 } // namespace
-
-TEST_P(DisaggParamsTest, DisaggTokenComparison)
-{
-
-#if ENABLE_MULTI_DEVICE
-
-    // using DisaggParamsType =
-    // std::tuple<int,std::string,std::string,std::vector<std::vector<int>>,std::vector<std::vector<int>>,std::vector<int>,int>;
-    if (!(tensorrt_llm::common::getEnvUseUCXKvCache()))
-    {
-        setenv("UCX_TLS", "^cuda_ipc", 1); // disable cuda_ipc for testing for mpi
-    }
-    auto const processNum = std::get<0>(GetParam());
-    auto const modelNames = std::get<1>(GetParam());
-    auto const participantIdsEachInstance = std::get<2>(GetParam());       // std::vector<std::vector<int>>
-    auto const participantDeviceIdsEachInstance = std::get<3>(GetParam()); // std::vector<std::vector<int>>;
-    auto const instanceRoles = std::get<4>(GetParam()); // std::vector<int> ; //1 is context , 0 is generation
-    auto const controllerRank = std::get<5>(GetParam());
-
-    // params_check
-    auto const& world_comm = tensorrt_llm::mpi::MpiComm::world();
-    int const commRank = world_comm.getRank();
-    int const commSize = world_comm.getSize();
-    if (commSize != processNum)
-    {
-        GTEST_SKIP() << " need " << processNum << " processes but got " << commSize << " mpi processes, skip test.";
-    }
-    ASSERT_EQ(participantIdsEachInstance.size(), participantDeviceIdsEachInstance.size());
-    SizeType32 instanceNum = participantIdsEachInstance.size();
-    ASSERT_EQ(instanceNum, instanceRoles.size());
-    ASSERT_EQ(instanceNum, modelNames.size());
-    ASSERT_GE(controllerRank, 0);
-    ASSERT_LT(controllerRank, commSize);
-    int ranksNum = 0;
-    std::unordered_map<SizeType32, SizeType32> rankCounter;
-    std::unordered_map<SizeType32, SizeType32> deviceCounter;
-    SizeType32 deviceRuseNum = 1;
-    bool isContext = false;
-    std::vector<int> participatntIds;
-    std::vector<int> deviceIds;
-    std::string modelName;
-    bool isController = (commRank == controllerRank);
-    for (SizeType32 i = 0; i < instanceNum; i++)
-    {
-        auto const& ranksThisInstance = participantIdsEachInstance[i];
-        auto const& devicesThisInstance = participantDeviceIdsEachInstance[i];
-
-        ASSERT_EQ(ranksThisInstance.size(), devicesThisInstance.size());
-        SizeType32 rankNumThisInstance = ranksThisInstance.size();
-        ASSERT_GT(rankNumThisInstance, 0);
-        ranksNum += rankNumThisInstance;
-        for (SizeType32 j = 0; j < rankNumThisInstance; j++)
-        {
-            rankCounter[ranksThisInstance[j]]++;
-            deviceCounter[devicesThisInstance[j]]++;
-            ASSERT_EQ(rankCounter[ranksThisInstance[j]], 1);
-            deviceRuseNum = std::max(deviceCounter[devicesThisInstance[j]], deviceRuseNum);
-            ASSERT_GE(ranksThisInstance[j], 0);
-            ASSERT_LT(ranksThisInstance[j], commSize);
-
-            if (commRank == ranksThisInstance[j])
-            {
-                participatntIds = ranksThisInstance;
-                deviceIds = devicesThisInstance;
-                isContext = (instanceRoles[i] > 0);
-                // modelName = isContext ? contextModel : genModel;
-                modelName = modelNames[i];
-            }
-        }
-    }
-    ASSERT_EQ(ranksNum, commSize);
-
-    OutputConfig outConfig;
-    int const beamWidth = 1;
-    BeamResult beamResult{beamWidth};
-
-    bool streaming = false;
-    int const maxBeamWidth = 1;
-    ASSERT_TRUE(fs::exists(DATA_PATH));
-
-    fs::path modelPath;
-    // set defaults and adjust if needed by different models
-    fs::path inputPath = DATA_PATH / "input_tokens.npy";
-    ModelIds modelIds{50256, 50256};
-    bool isSpeculativeDecoding{false};
-
-    // NOTE: This can be used to disable checks for certain prompt batch entries
-    FlakyTestInfo flakyTestInfo;
-
-    if (modelName == "gpt")
-    {
-        auto const resultsPath
-            = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        if (outConfig.returnContextLogits || outConfig.returnGenerationLogits)
-        {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-            beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-            beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
-            if (outConfig.returnLogProbs)
-            {
-                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE;
-            }
-        }
-        else
-        {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-            if (outConfig.returnLogProbs)
-            {
-                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE;
-            }
-        }
-    }
-    else if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
-        || modelName == "llama_tp1_pp2_cp1" || modelName == "llama_tp2_pp1_cp1" || modelName == "llama_tp1_pp1_cp1")
-    {
-        auto const resultsPath
-            = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        modelIds.padId = 2;
-        modelIds.endId = 2;
-        if (modelName == "llama_tp4_pp1_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp4_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp2_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
-        }
-        else if (modelName == "llama_tp2_pp1_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
-        }
-        else if (modelName == "llama_tp2_pp2_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp1_cp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-        }
-    }
-    else if (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
-    {
-        fs::path resultsPath;
-        if (modelName == "chatglm")
-        {
-            resultsPath = CHATGLM_DATA_PATH;
-            modelPath = CHATGLM_MODEL_PATH;
-        }
-        else if (modelName == "chatglm2")
-        {
-            resultsPath = CHATGLM2_DATA_PATH;
-            modelPath = CHATGLM2_MODEL_PATH;
-        }
-        else if (modelName == "chatglm3")
-        {
-            resultsPath = CHATGLM3_DATA_PATH;
-            modelPath = CHATGLM3_MODEL_PATH;
-        }
-        else if (modelName == "glm")
-        {
-            resultsPath = GLM_DATA_PATH;
-            modelPath = GLM_MODEL_PATH;
-        }
-        resultsPath /= (beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth);
-
-        beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-        modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-
-        char versionChatglm{0};
-        if (size_t index = modelPath.string().find("chatglm"); index != std::string::npos)
-        {
-            versionChatglm = modelPath.string()[index + 7];
-            std::string const vChatglmString
-                = (versionChatglm == '-') ? std::string("") : std::string(1, versionChatglm);
-            inputPath = DATA_PATH / ("input_tokens_chatglm" + vChatglmString + "-6b.npy");
-            modelIds.padId = (versionChatglm == '-') ? 3 : 0;
-            modelIds.endId = (versionChatglm == '-') ? 130005 : 2;
-        }
-        else if (size_t index = modelPath.string().find("glm-10b"); index != std::string::npos)
-        {
-            inputPath = DATA_PATH / "input_tokens_glm-10b.npy";
-            modelIds.padId = 50256;
-            modelIds.endId = 50258;
-        }
-
-        if (versionChatglm != 0)
-        {
-            flakyTestInfo.batchIdBeams.insert(std::make_pair(1, 0));
-        }
-    }
-    else
-    {
-        TLLM_THROW("Unrecognized modelName");
-    }
-
-    // Warning: This should be the last check before running the test.
-    // It will initialize MPI which can take significant time.
-    if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1"
-        || modelName == "llama_tp1_pp2_cp1" || modelName == "llama_tp2_pp1_cp1")
-    {
-        // For llama model, only run for multiple GPUs
-        // This is detected by setting an env variable when running the test
-        char const* val = getenv("RUN_LLAMA_MULTI_GPU");
-        if (val == NULL)
-        {
-            GTEST_SKIP() << "Skipping Llama test";
-        }
-        else
-        {
-            if (outConfig.returnLogProbs || outConfig.returnContextLogits || outConfig.returnGenerationLogits)
-            {
-                GTEST_SKIP() << "Skipping logits and log probs tests for mpi runs";
-            }
-        }
-    }
-
-    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
-
-    // Returning logits will bring higher latency
-    if (streaming && (outConfig.returnContextLogits || outConfig.returnGenerationLogits))
-    {
-        mMaxWaitMs = 20000;
-    }
-
-    auto executorConfig = ExecutorConfig(maxBeamWidth);
-    FloatType freeGpuMemoryFraction = 0.9f / (deviceRuseNum); // context and gen instance run on same device
-    KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
-    executorConfig.setKvCacheConfig(kvCacheConfig);
-    executorConfig.setRequestStatsMaxIterations(1000);
-    auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
-    auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
-    world_comm.barrier();
-    auto disaggExecutor
-        = tensorrt_llm::testing::executor::disaggexecutor::DisaggExecutorLeader(modelPath, ModelType::kDECODER_ONLY,
-            executorConfig, isController, isContext, givenInputLengths.size(), participatntIds, deviceIds, commRank);
-
-    runDisaggTest(disaggExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
-        outConfig, isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false);
-
-#else
-
-    GTEST_SKIP() << "Skipping DisaggExecutor Test";
-
-#endif
-}
-
-TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
-{
-
-#if ENABLE_MULTI_DEVICE
-
-    // using DisaggParamsType =
-    // std::tuple<int,std::string,std::string,std::vector<std::vector<int>>,std::vector<std::vector<int>>,std::vector<int>,int>;
-    if (!(tensorrt_llm::common::getEnvUseUCXKvCache()))
-    {
-        setenv("UCX_TLS", "^cuda_ipc", 1); // disable cuda_ipc for testing for mpi
-    }
-    auto const processNum = std::get<0>(GetParam());
-    auto const modelNames = std::get<1>(GetParam());
-    auto const participantIdsEachInstance = std::get<2>(GetParam());       // std::vector<std::vector<int>>
-    auto const participantDeviceIdsEachInstance = std::get<3>(GetParam()); // std::vector<std::vector<int>>;
-    auto const instanceRoles = std::get<4>(GetParam()); // std::vector<int> ; //1 is context , 0 is generation
-    auto const controllerRank = std::get<5>(GetParam());
-
-    // params_check
-    auto const& world_comm = tensorrt_llm::mpi::MpiComm::world();
-    int const commRank = world_comm.getRank();
-    int const commSize = world_comm.getSize();
-    if (commSize != processNum)
-    {
-        GTEST_SKIP() << " need " << processNum << " processes but got " << commSize << " mpi processes, skip test.";
-    }
-    ASSERT_EQ(participantIdsEachInstance.size(), participantDeviceIdsEachInstance.size());
-    SizeType32 instanceNum = participantIdsEachInstance.size();
-    ASSERT_EQ(instanceNum, instanceRoles.size());
-    ASSERT_EQ(instanceNum, modelNames.size());
-    ASSERT_GE(controllerRank, 0);
-    ASSERT_LT(controllerRank, commSize);
-    std::string modelName = modelNames[0];
-    bool isController = (commRank == controllerRank);
-    std::vector<fs::path> contextModels;
-    std::vector<fs::path> genModels;
-
-    auto getModelPath = [=](std::string modelNN)
-    {
-        fs::path retPath;
-        if (modelNN == "llama_tp4_pp1")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
-        }
-        else if (modelNN == "llama_tp1_pp4")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
-        }
-        else if (modelNN == "llama_tp1_pp2")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
-        }
-        else if (modelNN == "llama_tp2_pp1")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
-        }
-        else if (modelNN == "llama_tp2_pp2")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
-        }
-        else if (modelNN == "llama_tp1_pp1")
-        {
-            retPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-        }
-        return retPath;
-    };
-    for (SizeType32 i = 0; i < instanceNum; i++)
-    {
-        if (instanceRoles[i] == 1)
-        {
-            contextModels.push_back(getModelPath(modelNames[i]));
-        }
-        else
-        {
-            genModels.push_back(getModelPath(modelNames[i]));
-        }
-    }
-
-    OutputConfig outConfig;
-    int const beamWidth = 1;
-    BeamResult beamResult{beamWidth};
-
-    bool streaming = false;
-    int const maxBeamWidth = 1;
-    ASSERT_TRUE(fs::exists(DATA_PATH));
-
-    fs::path modelPath;
-    // set defaults and adjust if needed by different models
-    fs::path inputPath = DATA_PATH / "input_tokens.npy";
-    ModelIds modelIds{50256, 50256};
-    bool isSpeculativeDecoding{false};
-
-    // NOTE: This can be used to disable checks for certain prompt batch entries
-    FlakyTestInfo flakyTestInfo;
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1" || modelName == "llama_tp1_pp1")
-    {
-        auto const resultsPath
-            = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        modelIds.padId = 2;
-        modelIds.endId = 2;
-        if (modelName == "llama_tp4_pp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp4")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp2")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
-        }
-        else if (modelName == "llama_tp2_pp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp1-cp1-gpu";
-        }
-        else if (modelName == "llama_tp2_pp2")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
-        }
-        else if (modelName == "llama_tp1_pp1")
-        {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-        }
-    }
-
-    else
-    {
-        TLLM_THROW("Unrecognized modelName");
-    }
-
-    // Warning: This should be the last check before running the test.
-    // It will initialize MPI which can take significant time.
-    if (modelName == "llama_tp4_pp1" || modelName == "llama_tp1_pp4" || modelName == "llama_tp2_pp2"
-        || modelName == "llama_tp1_pp2" || modelName == "llama_tp2_pp1")
-    {
-        // For llama model, only run for multiple GPUs
-        // This is detected by setting an env variable when running the test
-        char const* val = getenv("RUN_LLAMA_MULTI_GPU");
-        if (val == NULL)
-        {
-            GTEST_SKIP() << "Skipping Llama test";
-        }
-        else
-        {
-            if (outConfig.returnLogProbs || outConfig.returnContextLogits || outConfig.returnGenerationLogits)
-            {
-                GTEST_SKIP() << "Skipping logits and log probs tests for mpi runs";
-            }
-        }
-    }
-
-    SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
-
-    // Returning logits will bring higher latency
-    if (streaming && (outConfig.returnContextLogits || outConfig.returnGenerationLogits))
-    {
-        mMaxWaitMs = 20000;
-    }
-
-    auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
-    auto const& givenInput = tr::utils::loadNpy(manager, inputPath.string(), tr::MemoryType::kCPU);
-    auto [givenInputLengths, nbGivenInputs, maxInputLength] = getGivenInputLengths(*givenInput, modelIds.padId);
-    world_comm.barrier();
-    auto contextNum = contextModels.size();
-    auto genNum = genModels.size();
-    //     int deviceCount = -1;
-    // TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
-    bool isOrchestrator = commRank == 0;
-    std::vector<ExecutorConfig> ctxExecutorConfigs;
-    std::vector<ExecutorConfig> genExecutorConfigs;
-    for (int in = 0; in < instanceNum; in++)
-    {
-        tensorrt_llm::executor::SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kMAX_UTILIZATION);
-        KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, 0.2};
-
-        tensorrt_llm::executor::ExecutorConfig executorConfig(maxBeamWidth, schedulerConfig, kvCacheConfig);
-        tensorrt_llm::executor::OrchestratorConfig orchestratorConfig{isOrchestrator, "", nullptr, false};
-        tensorrt_llm::executor::ParallelConfig parallelConfig{tensorrt_llm::executor::CommunicationType::kMPI,
-            tensorrt_llm::executor::CommunicationMode::kORCHESTRATOR, participantDeviceIdsEachInstance.at(in),
-            participantIdsEachInstance.at(in), orchestratorConfig};
-        executorConfig.setParallelConfig(parallelConfig);
-        if (in < contextNum)
-        {
-            ctxExecutorConfigs.push_back(executorConfig);
-        }
-        else
-        {
-            genExecutorConfigs.push_back(executorConfig);
-        }
-    }
-    auto disaggExecutor
-        = DisaggExecutorOrchestrator(contextModels, genModels, ctxExecutorConfigs, genExecutorConfigs, true, true);
-
-    runDisaggTest(disaggExecutor, manager, *givenInput, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
-        outConfig, isSpeculativeDecoding, mMaxWaitMs, BatchingType::kINFLIGHT, false);
-
-#else
-
-    GTEST_SKIP() << "Skipping DisaggExecutor Test";
-
-#endif
-}
 
 TEST_P(AllParamsTest, TokenComparison)
 {
@@ -3466,24 +2155,25 @@ TEST_P(AllParamsTest, TokenComparison)
             = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         if (outConfig.returnContextLogits || outConfig.returnGenerationLogits)
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-            beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-            beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+            modelPath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE();
+            beamResult.contextLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE();
+            beamResult.genLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE();
             if (outConfig.returnLogProbs)
             {
-                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE;
+                beamResult.cumLogProbsFile
+                    = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_CUM_LOG_PROBS_FILE();
+                beamResult.logProbsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_LOG_PROBS_FILE();
             }
         }
         else
         {
-            modelPath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
+            modelPath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_FILE();
             if (outConfig.returnLogProbs)
             {
-                beamResult.cumLogProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE;
-                beamResult.logProbsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE;
+                beamResult.cumLogProbsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_CUM_LOG_PROBS_FILE();
+                beamResult.logProbsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_LOG_PROBS_FILE();
             }
         }
     }
@@ -3494,31 +2184,33 @@ TEST_P(AllParamsTest, TokenComparison)
             = LLAMA_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
         if (modelName == "llama_tp4_pp1_cp1")
         {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_TP4_PP1_FILE();
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4_cp1")
         {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP4_FILE();
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp2_cp1")
         {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp2-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_TP1_PP2_FILE();
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp2-cp1-gpu";
         }
         else if (modelName == "llama_tp2_pp2_cp1")
         {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE;
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_TP2_PP2_FILE();
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
         }
     }
     else if (modelName == "medusa")
     {
         TLLM_CHECK_WITH_INFO(beamWidth == 1, "Medusa does not support beam search.");
         auto const resultsPath = MEDUSA_DATA_PATH / "sampling";
-        ModelSpec modelSpec
-            = getDefaultModelSpec().useMedusa().setInputFile("input_tokens_long.npy").setMaxOutputLength(128);
+        auto modelSpec = ModelSpec::getDefaultModelSpec()
+                             .useMedusa()
+                             .setInputFile("input_tokens_long.npy")
+                             .setMaxOutputLength(128);
         beamResult.resultsFile = resultsPath / modelSpec.getResultsFile();
         modelPath = MEDUSA_MODEL_PATH / modelSpec.getModelPath() / "tp1-pp1-cp1-gpu";
 
@@ -3526,6 +2218,7 @@ TEST_P(AllParamsTest, TokenComparison)
         modelIds.padId = 2;
         modelIds.endId = 2;
         isSpeculativeDecoding = true;
+        outConfig.returnPerfMetrics = true;
     }
     else if (modelName == "chatglm" || modelName == "chatglm2" || modelName == "chatglm3" || modelName == "glm")
     {
@@ -3560,8 +2253,8 @@ TEST_P(AllParamsTest, TokenComparison)
         }
         else
         {
-            beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_RESULT_FILE;
-            modelPath = modelPath / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+            beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_RESULT_FILE();
+            modelPath = modelPath / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
         }
 
         char versionChatglm{0};
@@ -3626,7 +2319,17 @@ TEST_P(AllParamsTest, TokenComparison)
             FAIL() << "Orchestrator mode and World size is not equal to 1";
         }
     }
+    auto decoderJsonConfig = tensorrt_llm::runtime::GptJsonConfig::parse(modelPath / "config.json");
 
+    auto modelTP = decoderJsonConfig.getTensorParallelism();
+    auto modelPP = decoderJsonConfig.getPipelineParallelism();
+    int deviceCount = -1;
+    TLLM_CUDA_CHECK(cudaGetDeviceCount(&deviceCount));
+    std::optional<std::vector<SizeType32>> deviceIds = std::vector<SizeType32>(modelTP * modelPP);
+    for (auto i = 0; i < deviceIds->size(); i++)
+    {
+        deviceIds->at(i) = i % deviceCount;
+    }
     if (modelName == "llama_tp1_pp2_cp1")
     {
         auto const& session = tensorrt_llm::mpi::MpiComm::world();
@@ -3639,10 +2342,24 @@ TEST_P(AllParamsTest, TokenComparison)
         if (session.getRank() / 2 == 0)
         {
             participantIds = std::vector<SizeType32>{0, 1};
+            deviceIds = std::vector<SizeType32>{0, 1};
         }
         else
         {
             participantIds = std::vector<SizeType32>{2, 3};
+            deviceIds = std::vector<SizeType32>{2, 3};
+        }
+    }
+
+    if (modelPP > 1)
+    {
+        std::reverse(deviceIds->begin(), deviceIds->end());
+        if (modelTP > 1)
+        {
+            for (SizeType32 ppRank = 0; ppRank < modelPP; ppRank++)
+            {
+                std::reverse(deviceIds->begin() + ppRank * modelTP, deviceIds->begin() + (ppRank + 1) * modelPP);
+            }
         }
     }
 
@@ -3653,35 +2370,39 @@ TEST_P(AllParamsTest, TokenComparison)
     {
         mMaxWaitMs = 20000;
     }
-    auto executorConfig
-        = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode, std::nullopt, std::move(participantIds));
+
+    auto executorConfig = createExecutorConfig(batchingType, beamWidth, useOrchestratorMode,
+        outConfig.returnGenerationLogits, std::move(deviceIds), std::move(participantIds));
+
     runTest(modelPath, executorConfig, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult,
         outConfig, isSpeculativeDecoding, mMaxWaitMs, returnAllGeneratedTokens, numReturnSequences, false);
 }
 
-TEST_F(GptExecutorTest, ChangeBwError)
+TEST_F(GptExecutorTest, ChangeBeamWidth)
 {
     SizeType32 constexpr maxBeamWidth{2};
     auto executorConfig = ExecutorConfig(maxBeamWidth);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr beamWidth1{1};
     SizeType32 constexpr beamWidth2{2};
-    SizeType32 constexpr maxNewTokens{5};
+    SizeType32 constexpr maxNewTokens{2};
     VecTokens inputTokens{1, 2, 3, 4};
 
-    // Create two req with different beam width
+    // Create requests with different beam widths
     std::vector<Request> requests;
     requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth1));
+    requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth1));
     requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth2));
+    requests.emplace_back(inputTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth1));
 
     auto requestIds = executor.enqueueRequests(requests);
 
-    bool done = false;
+    int numFinished = 0;
     int iter = 0;
-    while (!done && iter < mMaxWaitMs)
+    while (numFinished < 4 && iter < mMaxWaitMs)
     {
         std::chrono::milliseconds waitTime(1);
         auto responses = executor.awaitResponses(waitTime);
@@ -3691,20 +2412,40 @@ TEST_F(GptExecutorTest, ChangeBwError)
             {
                 auto err = response.getErrorMsg();
                 std::cout << "err:" << err << std::endl;
-                EXPECT_THAT(err, testing::HasSubstr("All active requests must have same beam width"));
-                done = true;
+                FAIL() << "Should not get a response with error";
             }
             else
             {
-                FAIL() << "Should get a response with error";
+                auto result = response.getResult();
+                numFinished += static_cast<int>(result.isFinal);
             }
         }
         ++iter;
     }
     EXPECT_LT(iter, mMaxWaitMs);
+
+    auto stats = executor.getLatestIterationStats();
+    uint64_t currentIter = 0;
+    for (auto const& stat : stats)
+    {
+        // TODO: enable this check when stats are cleaned
+        // EXPECT_EQ(stat.iter, currentIter);
+        if (stat.iter < 2)
+        {
+            // req 1 and 2 run with same beam width
+            EXPECT_EQ(stat.numActiveRequests, 2);
+        }
+        else if (stat.numActiveRequests != 0) // TODO: remove this check when stats are cleaned
+        {
+            // req 3 or 4 run width different beam width
+            EXPECT_EQ(stat.numActiveRequests, 1);
+        }
+
+        ++currentIter;
+    }
 }
 
-void doTokenComparisonChangeBw(bool enableReuse, SizeType32 maxWaitMs)
+void doTokenComparisonChangeBeamWidth(bool enableReuse, SizeType32 maxWaitMs)
 {
     SizeType32 constexpr maxBeamWidth{2};
     SizeType32 constexpr vocabSizePadded{50257}; // gpt vocabSizePadded
@@ -3715,7 +2456,7 @@ void doTokenComparisonChangeBw(bool enableReuse, SizeType32 maxWaitMs)
     auto executorConfig = ExecutorConfig(maxBeamWidth, SchedulerConfig(), kvCacheConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -3730,23 +2471,23 @@ void doTokenComparisonChangeBw(bool enableReuse, SizeType32 maxWaitMs)
         BeamResult beamResult{beamWidth};
         auto const resultsPath
             = GPT_DATA_PATH / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
-        beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-        beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-        beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+        beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE();
+        beamResult.contextLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE();
+        beamResult.genLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE();
 
         runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
             isSpeculativeDecoding, maxWaitMs, executorConfig.getBatchingType(), false, 1, false);
     }
 }
 
-TEST_F(GptExecutorTest, TokenComparisonChangeBw)
+TEST_F(GptExecutorTest, TokenComparisonChangeBeamWidth)
 {
-    doTokenComparisonChangeBw(false, mMaxWaitMs);
+    doTokenComparisonChangeBeamWidth(false, mMaxWaitMs);
 }
 
-TEST_F(GptExecutorTest, TokenComparisonChangeBwBlockReuse)
+TEST_F(GptExecutorTest, TokenComparisonChangeBeamWidthBlockReuse)
 {
-    doTokenComparisonChangeBw(true, mMaxWaitMs);
+    doTokenComparisonChangeBeamWidth(true, mMaxWaitMs);
 }
 
 TEST_F(GptExecutorTest, NReturnRandomness)
@@ -3760,7 +2501,7 @@ TEST_F(GptExecutorTest, NReturnRandomness)
     auto executorConfig = ExecutorConfig(maxBeamWidth);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto const inputPath = DATA_PATH / "input_tokens.npy";
@@ -3772,9 +2513,9 @@ TEST_F(GptExecutorTest, NReturnRandomness)
 
     BeamResult beamResult{maxBeamWidth};
     auto const resultsPath = GPT_DATA_PATH / "sampling";
-    beamResult.resultsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE;
-    beamResult.contextLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE;
-    beamResult.genLogitsFile = resultsPath / FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE;
+    beamResult.resultsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GATHER_RESULT_FILE();
+    beamResult.contextLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_CONTEXT_LOGITS_FILE();
+    beamResult.genLogitsFile = resultsPath / PathUtil::FP16_PLUGIN_PACKED_PAGED_GENERATION_LOGITS_FILE();
 
     runTest(executor, inputPath, modelIds, flakyTestInfo, streaming, vocabSizePadded, beamResult, outConfig,
         isSpeculativeDecoding, mMaxWaitMs, executorConfig.getBatchingType(), false, 1, true);
@@ -3784,7 +2525,7 @@ TEST_F(GptExecutorTest, TimedOut)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // No requests enqueued, expect no responses
@@ -3801,7 +2542,7 @@ TEST_F(GptExecutorTest, MaxSeqIdleMicrosecondsError)
     auto executorConfig = ExecutorConfig(1);
     // Request will time out
     executorConfig.setMaxSeqIdleMicroseconds(1);
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     SizeType32 constexpr maxNewTokens{5};
@@ -3837,8 +2578,8 @@ TEST_F(GptExecutorTest, MaxSeqIdleMicrosecondsError)
     EXPECT_LT(iter, mMaxWaitMs);
 }
 
-void logitsProcessorMixedReqsTest(
-    std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs, bool replicated);
+void logitsProcessorMixedReqsTest(std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs,
+    bool replicated, std::optional<std::vector<SizeType32>> deviceIds);
 
 TEST_P(LogitsProcParamsTest, All)
 {
@@ -3848,6 +2589,8 @@ TEST_P(LogitsProcParamsTest, All)
 
     std::string modelDir;
     int tp_size = 1, pp_size = 1, cp_size = 1;
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
+
     if (modelName == "llama_tp1_pp1_cp1")
     {
         modelDir = "tp1-pp1-cp1-gpu";
@@ -3861,17 +2604,19 @@ TEST_P(LogitsProcParamsTest, All)
     {
         modelDir = "tp1-pp4-cp1-gpu";
         pp_size = 4;
+        deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
     }
     else if (modelName == "llama_tp2_pp2_cp1")
     {
         modelDir = "tp2-pp2-cp1-gpu";
         tp_size = pp_size = 2;
+        deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
     }
     else
     {
         TLLM_THROW("Unrecognized modelName");
     }
-    std::filesystem::path modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / modelDir;
+    std::filesystem::path modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / modelDir;
 
     auto& comm = tensorrt_llm::mpi::MpiComm::world();
     auto const worldRank = comm.getRank();
@@ -4071,6 +2816,12 @@ TEST_P(LogitsProcParamsTest, All)
                 {logitsProcessorName, logitsPostProcessorFn}},
             std::nullopt, replicated};
         executorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
+        if (deviceIds.has_value())
+        {
+            auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+            parallelConfig.setDeviceIds(deviceIds.value());
+            executorConfig.setParallelConfig(parallelConfig);
+        }
         auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
         if (worldRank == 0)
@@ -4097,6 +2848,13 @@ TEST_P(LogitsProcParamsTest, All)
     if (batched)
     {
         auto batchedExecutorConfig = ExecutorConfig(beamWidth);
+        if (deviceIds.has_value())
+        {
+            auto parallelConfig = batchedExecutorConfig.getParallelConfig().value_or(ParallelConfig());
+
+            parallelConfig.setDeviceIds(deviceIds.value());
+            batchedExecutorConfig.setParallelConfig(parallelConfig);
+        }
         LogitsPostProcessorConfig logitsProcConfig{std::nullopt, logitsPostProcessorBatchedFn, replicated};
         batchedExecutorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
 
@@ -4112,13 +2870,13 @@ TEST_P(LogitsProcParamsTest, All)
 
     if (!batched)
     {
-        logitsProcessorMixedReqsTest(modelDir, worldRank, mMaxWaitMs, replicated);
+        logitsProcessorMixedReqsTest(modelDir, worldRank, mMaxWaitMs, replicated, std::move(deviceIds));
     }
 }
 
 // Test for mixing requests with and without logits processor.
-void logitsProcessorMixedReqsTest(
-    std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs, bool replicated)
+void logitsProcessorMixedReqsTest(std::string const& modelDir, SizeType32 worldRank, SizeType32 maxWaitMs,
+    bool replicated, std::optional<std::vector<SizeType32>> deviceIds)
 {
     std::string const logitsProcessorName = "dummy";
     auto logitsPostProcessorFn = [&](IdType reqId, Tensor& logits, BeamTokens const& tokens, StreamPtr const& streamPtr,
@@ -4137,7 +2895,14 @@ void logitsProcessorMixedReqsTest(
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
     executorConfig.setLogitsPostProcessorConfig(logitsProcConfig);
-    std::filesystem::path modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / modelDir;
+    if (deviceIds.has_value())
+    {
+        auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+
+        parallelConfig.setDeviceIds(deviceIds.value());
+        executorConfig.setParallelConfig(parallelConfig);
+    }
+    std::filesystem::path modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / modelDir;
     auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
     if (worldRank == 0)
@@ -4189,7 +2954,7 @@ TEST_F(GptExecutorTest, LogitsPostProcessorThrow)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     std::string const logitsProcessorName = "UnExistProcessor";
@@ -4256,9 +3021,10 @@ TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
 {
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtDraftEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR / "tp1-pp1-cp1-gpu";
-    auto trtEnginePath
-        = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR / "tp1-pp1-cp1-gpu";
+    auto trtDraftEnginePath
+        = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR()
+        / "tp1-pp1-cp1-gpu";
 
     FloatType freeGpuMemoryFraction = 0.3;
     auto kvCacheConfig
@@ -4301,6 +3067,7 @@ TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
         parallelConfig.setParticipantIds({1});
         parallelConfig.setDeviceIds({0});
         executorConfig.setParallelConfig(parallelConfig);
+        executorConfig.setGatherGenerationLogits(true);
         draftExecutor = std::make_unique<Executor>(trtDraftEnginePath, ModelType::kDECODER_ONLY, executorConfig);
     }
     else if (myRank == 2) // target model process
@@ -4320,215 +3087,13 @@ TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
     }
 }
 
-class MockedModel : public Model
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-public:
-    MOCK_METHOD(void, forwardSync, (), ());
-    MOCK_METHOD(void, forwardAsync, (RequestList const&), ());
-    MOCK_METHOD(void, terminateRequest, (std::shared_ptr<tb::LlmRequest> const& llmRequest, bool pause), ());
-    MOCK_METHOD(SizeType32, getMaxNumSequences, (), (const));
-    MOCK_METHOD(SizeType32, getMaxInputLen, (), (const));
-    MOCK_METHOD(SizeType32, getHiddenSize, (), (const));
-    MOCK_METHOD(SizeType32, getMaxSequenceLen, (), (const));
-    MOCK_METHOD(SizeType32, getVocabSizePadded, (), (const));
-    MOCK_METHOD(SizeType32, getMaxDraftLen, (), (const));
-    MOCK_METHOD(SizeType32, getNumMicroBatches, (), (const));
-    MOCK_METHOD(nvinfer1::DataType, getLogitDataType, (), (const));
-    MOCK_METHOD(nvinfer1::DataType, getTensorDataType, (std::string const&), (const));
-    MOCK_METHOD(nvinfer1::Dims, getTensorShape, (std::string const&), (const));
-    MOCK_METHOD(void, getCurrentIterationStats, (IterationStats&), (const));
-    MOCK_METHOD(void, getCurrentRequestStats, (RequestStatsPerIteration&), (const));
-    MOCK_METHOD(DebugTensorsPerIteration, getCurrentDebugTensors, (), (const));
-    MOCK_METHOD(tr::WorldConfig const&, getWorldConfig, (), (const));
-    MOCK_METHOD(tr::ModelConfig const&, getModelConfig, (), (const));
-    MOCK_METHOD(tr::BufferManager const&, getBufferManager, (), (const));
-    MOCK_METHOD(tr::BufferManager::CudaStreamPtr, getRuntimeStreamPtr, (), (const));
-    MOCK_METHOD(IterationType, getIterCounter, (), (const, noexcept));
-    MOCK_METHOD(bool, hasSpeculativeDecodingFastLogits, (), (const, noexcept));
-    MOCK_METHOD(void, updatePeftCache, (LlmRequestPtr const& llmReqeust), ());
-    MOCK_METHOD(void, setLogitsPostProcessorBatched, (std::optional<LogitsPostProcessorBatched>), ());
-    MOCK_METHOD(void, setReplicateLogitsPostProcessor, (bool), ());
-    MOCK_METHOD(bool, hasGuidedDecoder, (), (const, noexcept));
-    MOCK_METHOD(void, resetIterationStats, (), ());
-    MOCK_METHOD(
-        std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager>, getKVCacheManager, (), ());
-    MOCK_METHOD(std::shared_ptr<tensorrt_llm::batch_manager::kv_cache_manager::BaseKVCacheManager const>,
-        getKVCacheManager, (), (const));
-    MOCK_METHOD(SizeType32, getMaxCapacityBatchSize, (SizeType32, SizeType32), (const));
-};
-
-TEST_P(ParamTest, MockedModel)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    bool const streaming = std::get<0>(GetParam());
-    bool const excludeInputFromOutput = std::get<1>(GetParam());
-    auto const beamWidth = std::get<2>(GetParam());
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputFromOutput;
-    auto model = std::make_shared<MockedModel>();
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-
-    SizeType32 callCount = 0;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                for (auto const& llmReq : requestList)
-                {
-                    // Don't add any tokens to simulate no output tokens
-                    llmReq->addNewTokens(VecTokens(beamWidth, 1));
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxDraftLen()).WillRepeatedly(Invoke([&]() { return 0; }));
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    ExecutorConfig executorConfig(beamWidth);
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    auto request
-        = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-
-    // Enqueue the request
-    auto requestId = executor.enqueueRequest(std::move(request));
-
-    bool done = false;
-    int iter = 0;
-    while (!done && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(requestId, waitTime);
-        for (auto& response : responses)
-        {
-            auto result = response.getResult();
-            done = result.isFinal;
-        }
-        ++iter;
-    }
-
-    EXPECT_LT(iter, mMaxWaitMs);
-    EXPECT_EQ(callCount, maxNewTokens);
-}
-
-TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    auto model = std::make_shared<MockedModel>();
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-
-    SizeType32 callCount = 0;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                for (auto const& llmReq : requestList)
-                {
-                    // Sleep to allow queue to fill up
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    // Don't add any tokens to simulate no output tokens
-                    llmReq->addNewTokens({1});
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxDraftLen()).WillRepeatedly(Invoke([&]() { return 0; }));
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    SizeType32 maxQueueSize = 6;
-    ExecutorConfig executorConfig;
-    executorConfig.setMaxQueueSize(maxQueueSize);
-
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    auto request = Request(inputTokens, maxNewTokens);
-
-    // Enqueue as many requests as the queue can manage
-    for (int i = 0; i < maxQueueSize; i++)
-    {
-        auto requestId = executor.enqueueRequest(std::move(request));
-    }
-    try
-    {
-        auto requestId = executor.enqueueRequest(std::move(request));
-
-        FAIL() << "Expected TllmException";
-    }
-    catch (std::exception const& e)
-    {
-        EXPECT_THAT(e.what(), testing::HasSubstr("Maximum queue size of 6 has been reached, please try again later"));
-    }
-
-    // Wait for requests to get scheduled to free up space in queue
-    std::this_thread::sleep_for(std::chrono::milliseconds(maxQueueSize * 200));
-    auto requestId = executor.enqueueRequest(std::move(request));
-
-    try
-    {
-        auto samplingConfig = SamplingConfig(1);
-        samplingConfig.setNumReturnSequences(maxQueueSize);
-        auto request = Request(inputTokens, maxNewTokens, false, samplingConfig);
-        auto requestId = executor.enqueueRequest(std::move(request));
-        FAIL() << "Expected TllmException";
-    }
-    catch (std::exception const& e)
-    {
-        EXPECT_THAT(e.what(), testing::HasSubstr("Maximum queue size of 6 has been reached, please try again later"));
-    }
-}
-
 TEST_F(GptExecutorTest, OrchestratorMaxQueueSize)
 {
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     SizeType32 maxQueueSize = 6;
     ExecutorConfig executorConfig;
     executorConfig.setMaxQueueSize(maxQueueSize);
-    auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+    auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
     auto parallelConfig = ParallelConfig(
         CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
@@ -4576,717 +3141,13 @@ TEST_F(GptExecutorTest, OrchestratorMaxQueueSize)
     }
 }
 
-TEST_F(GptExecutorTest, MockedModelReqStatsBug)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    bool streaming = false;
-    bool excludeInputFromOutput = false;
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputFromOutput;
-    auto model = std::make_shared<MockedModel>();
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-    EXPECT_CALL(*model, updatePeftCache(_)).WillRepeatedly(Invoke([&]() { return; }));
-
-    SizeType32 callCount = 0;
-    RequestList currentReq;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                currentReq = requestList;
-                for (auto const& llmReq : requestList)
-                {
-                    // Don't add any tokens to simulate no output tokens
-                    llmReq->addNewTokens({1});
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, forwardSync())
-        .WillRepeatedly(Invoke(
-            [&]()
-            {
-                for (auto const& llmReq : currentReq)
-                {
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                }
-                return;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxDraftLen()).WillRepeatedly(Invoke([&]() { return 0; }));
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    SizeType32 beamWidth = 1;
-    ExecutorConfig executorConfig(beamWidth);
-    executorConfig.setRequestStatsMaxIterations(1000);
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    int numRequests = 10000;
-    auto request
-        = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-
-    auto done = std::atomic<bool>{false};
-    auto statsThreadDone = false;
-    // Spawn a thread that continuously get stats
-    auto statsThread = std::thread(
-        [&executor, &done, &statsThreadDone]()
-        {
-            while (!done)
-            {
-                auto reqStats = executor.getLatestRequestStats();
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-            }
-            statsThreadDone = true;
-        });
-
-    // Spawn a thread that enqueues the requests
-    std::vector<IdType> requestIds;
-    auto enqueueThread = std::thread(
-        [&executor, &requestIds, &request, &done, numRequests]()
-        {
-            for (int i = 0; i < numRequests; ++i)
-            {
-                requestIds.push_back(executor.enqueueRequest(request));
-            }
-            done = true;
-        });
-    enqueueThread.join();
-    ASSERT_EQ(requestIds.size(), numRequests);
-
-    // Wait for stats thread to be done, fail otherwise
-    int iter = 0;
-    while (!statsThreadDone && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        std::this_thread::sleep_for(std::chrono::milliseconds(waitTime));
-        iter++;
-    }
-    ASSERT_TRUE(statsThreadDone);
-    statsThread.join();
-}
-
-TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    bool excludeInputFromOutput = false;
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputFromOutput;
-    auto model = std::make_shared<MockedModel>();
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-    EXPECT_CALL(*model, updatePeftCache(_)).WillRepeatedly(Invoke([&]() { return; }));
-
-    SizeType32 callCount = 0;
-    RequestList currentReq;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                currentReq = requestList;
-                for (auto const& llmReq : requestList)
-                {
-                    // Don't add any tokens to simulate no output tokens
-                    llmReq->addNewTokens({1});
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, forwardSync())
-        .WillRepeatedly(Invoke(
-            [&]()
-            {
-                for (auto const& llmReq : currentReq)
-                {
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                }
-                return;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 6; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxDraftLen()).WillRepeatedly(Invoke([&]() { return 0; }));
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    SizeType32 beamWidth = 1;
-    ExecutorConfig executorConfig(beamWidth,
-        SchedulerConfig(CapacitySchedulerPolicy::kMAX_UTILIZATION)); // Condition 1 : MAX_UTILIZATION scheduling policy
-    executorConfig.setEnableChunkedContext(false);                   // Condition 2 : Chunked context disabled
-    executorConfig.setRequestStatsMaxIterations(1000);
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    bool streaming = true;                       // Condition 3 : Streaming enabled
-    SizeType32 maxNewTokens = 5;
-    VecTokens tooLongInputTokens{1, 2, 3, 4, 5}; // Condition 4 : prompt input len + maxNewTokens > MaxInputLen
-    auto tooLongRequest = Request(
-        tooLongInputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-
-    // Enqueue the request
-    auto longRequestId = executor.enqueueRequest(std::move(tooLongRequest));
-    bool done = false;
-    int iter = 0;
-    while (!done && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(longRequestId, waitTime);
-        for (auto& response : responses)
-        {
-            EXPECT_EQ(response.hasError(), true);
-            EXPECT_THAT(response.getErrorMsg(),
-                testing::HasSubstr("sequence length is potentially greater than max input length"));
-            done = true;
-        }
-        ++iter;
-    }
-}
-
-#if ENABLE_MULTI_DEVICE
-// This test can be run manually to test multiGPU execution
-// mpirun --allow-run-as-root -n 5 ./executorTest --gtest_filter="*MockedModelMultiGpu/ExecutorTest"
-// Number of MPI ranks can be greater than tp
-
-TEST_P(ParamTest, MockedModelMultiGpu)
-{
-    auto& world = tensorrt_llm::mpi::MpiComm::world();
-    auto const worldRank = world.getRank();
-    auto const worldSize = world.getSize();
-
-    // In this test, allow worldSize to be greater than tp = 4
-    // If so, set participant ids to be the last 4 ranks
-    SizeType32 tp = std::min(4, worldSize);
-
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    bool const streaming = std::get<0>(GetParam());
-    bool const excludeInputFromOutput = std::get<1>(GetParam());
-    auto const beamWidth = std::get<2>(GetParam());
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = excludeInputFromOutput;
-    auto model = std::make_shared<MockedModel>();
-
-    // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    auto request
-        = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-
-    SizeType32 callCount = 0;
-    SizeType32 reqCallCount = 0;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                for (auto const& llmReq : requestList)
-                {
-                    EXPECT_EQ(llmReq->getTokens().size(), beamWidth);
-                    // Verify that all MPI ranks get the expected request, even though only rank 0 actually gets the
-                    // request
-                    if (reqCallCount == 0)
-                    {
-                        EXPECT_EQ(llmReq->getOrigPromptLen(), request.getInputTokenIds().size());
-                        for (int i = 0; i < llmReq->getOrigPromptLen(); ++i)
-                        {
-                            EXPECT_EQ(llmReq->getTokens(beamWidth - 1).at(i), request.getInputTokenIds().at(i));
-                        }
-                    }
-                    EXPECT_EQ(llmReq->isStreaming(), request.getStreaming());
-                    EXPECT_EQ(llmReq->mMaxNewTokens, request.getMaxTokens());
-                    EXPECT_EQ(
-                        llmReq->getTokens(beamWidth - 1).size(), request.getInputTokenIds().size() + reqCallCount);
-
-                    SizeType32 tokenId = 1;
-                    COMM_SESSION.bcastValue(tokenId, 0);
-                    // Don't add any tokens to simulate no output tokens
-                    // Simulate leader rank communicating with comm session
-                    VecTokens newTokens(beamWidth, tokenId);
-                    llmReq->addNewTokens(newTokens);
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                    reqCallCount++;
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    tr::WorldConfig dummyWorldConfig = tr::WorldConfig(tp, 1, 1, worldRank, tp);
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-
-    ParallelConfig parallelConfig;
-
-    // Set participant ids to be of size tp, starting at worldSize - 1
-    std::vector<SizeType32> participantIds;
-    for (int i = 0; i < tp; ++i)
-    {
-        participantIds.push_back(worldSize - tp + i);
-    }
-    bool isLeader = (worldRank == participantIds.front());
-    parallelConfig.setParticipantIds(participantIds);
-
-    bool isWorker = (std::find(participantIds.begin(), participantIds.end(), worldRank) != participantIds.end());
-
-    // Set device ids
-    std::vector<SizeType32> deviceIds(tp);
-    std::iota(deviceIds.begin(), deviceIds.end(), 0);
-    parallelConfig.setDeviceIds(deviceIds);
-
-    ExecutorConfig executorConfig(beamWidth);
-    executorConfig.setParallelConfig(parallelConfig);
-    auto executor = Executor(model, executorConfig);
-
-    EXPECT_EQ(isWorker, executor.isParticipant());
-
-    // Enqueue the request
-    IdType requestId = 0;
-    if (isLeader)
-    {
-        requestId = executor.enqueueRequest(request);
-
-        SizeType32 numResponses{0};
-        bool done = false;
-        int iter = 0;
-        while (!done && iter < mMaxWaitMs)
-        {
-            std::chrono::milliseconds waitTime(1);
-            auto responses = executor.awaitResponses(waitTime);
-            for (auto& response : responses)
-            {
-                ++numResponses;
-                auto result = response.getResult();
-                EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
-                auto expectedSize = streaming ? (beamWidth > 1 ? numResponses : 1)
-                                              : (maxNewTokens + (excludeInputFromOutput ? 0 : inputTokens.size()));
-                EXPECT_EQ(result.outputTokenIds.at(beamWidth - 1).size(), expectedSize);
-                done = result.isFinal;
-            }
-            ++iter;
-        }
-
-        EXPECT_LT(iter, mMaxWaitMs);
-        EXPECT_EQ(numResponses, streaming ? maxNewTokens : 1);
-        EXPECT_EQ(callCount, maxNewTokens);
-    }
-}
-#endif // ENABLE_MULTI_DEVICE
-
-TEST_F(GptExecutorTest, MockedModelWithError)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    struct MockedModelParams
-    {
-        SizeType32 maxInputLen;
-        SizeType32 maxSeqLen;
-        SizeType32 expectedTerminateCnt;
-        SizeType32 expectedForwardCnt;
-        bool computeGenLogits;
-        bool computeContextLogits;
-        std::string expectedError;
-    };
-
-    std::vector<MockedModelParams> mockedModelParams;
-    // Mocked error in forward call
-    mockedModelParams.emplace_back(MockedModelParams{10, 20, 1, 1, true, true, "mocked error"});
-    // prompt longer than maxInputLen
-    mockedModelParams.emplace_back(MockedModelParams{1, 20, 0, 0, true, true, "exceeds maximum input length"});
-    // Model doesn't support context logits output
-    mockedModelParams.emplace_back(
-        MockedModelParams{10, 20, 0, 0, false, true, "need to build engine with gather_generation"});
-    // Model doesn't support gen logits output
-    mockedModelParams.emplace_back(
-        MockedModelParams{10, 20, 0, 0, true, false, "need to build engine with gather_context"});
-
-    for (auto const& mockedModelParam : mockedModelParams)
-    {
-        auto model = std::make_shared<MockedModel>();
-        SizeType32 beamWidth = 1;
-
-        // One request should be terminated
-        EXPECT_CALL(*model, terminateRequest(_, _)).Times(mockedModelParam.expectedTerminateCnt);
-        EXPECT_CALL(*model, getVocabSizePadded()).WillRepeatedly(Invoke([&]() { return 1024; }));
-        EXPECT_CALL(*model, getLogitDataType()).WillRepeatedly(Invoke([&]() { return nvinfer1::DataType::kFLOAT; }));
-        EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-        EXPECT_CALL(*model, getCurrentRequestStats(_))
-            .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-        SizeType32 callCount = 0;
-        EXPECT_CALL(*model, forwardAsync(_))
-            .WillRepeatedly(Invoke(
-                [&](RequestList const&)
-                {
-                    callCount++;
-                    // There was a bug where we were missing a notify call when errors were encountered
-                    // and this test was not catching it, probably because the error was reported
-                    // before the first call to awaitResponses. So we add a sleep here to make sure
-                    // the awaitResponses is called before the error is thrown
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    throw std::runtime_error("mocked error");
-                }));
-
-        EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-        EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return mockedModelParam.maxInputLen; }));
-        EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return mockedModelParam.maxSeqLen; }));
-        tr::WorldConfig const dummyWorldConfig;
-        EXPECT_CALL(*model, getWorldConfig())
-            .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-        tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
-        dummyModelConfig.computeContextLogits(mockedModelParam.computeContextLogits);
-        dummyModelConfig.computeGenerationLogits(mockedModelParam.computeGenLogits);
-        EXPECT_CALL(*model, getModelConfig())
-            .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
-        EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-        EXPECT_CALL(*model, getCurrentRequestStats(_))
-            .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-        ExecutorConfig executorConfig(beamWidth);
-        auto executor = Executor(model, executorConfig);
-
-        // Create the request
-        SizeType32 maxNewTokens = 5;
-        VecTokens inputTokens{1, 2, 3, 4};
-
-        OutputConfig outConfig;
-        outConfig.returnContextLogits = true;
-        outConfig.returnGenerationLogits = true;
-
-        auto streaming = false;
-        auto request = Request(
-            inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
-
-        // Enqueue the request
-        auto requestId = executor.enqueueRequest(std::move(request));
-
-        bool done = false;
-        auto responses = executor.awaitResponses(requestId);
-        for (auto& response : responses)
-        {
-            if (!response.hasError())
-            {
-                FAIL() << "Expecting an error to be received";
-            }
-            else
-            {
-                auto err = response.getErrorMsg();
-                EXPECT_THAT(err, testing::HasSubstr(mockedModelParam.expectedError));
-                done = true;
-            }
-        }
-
-        EXPECT_TRUE(done);
-        EXPECT_EQ(callCount, mockedModelParam.expectedForwardCnt);
-    }
-}
-
-TEST_F(GptExecutorTest, MockedModelCancelRequest)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    bool streaming = true;
-    auto model = std::make_shared<MockedModel>();
-
-    // Two requests with one child request (3 in total) should be terminated
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(3);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    SizeType32 callCount = 0;
-    std::unordered_map<IdType, SizeType32> callCountPerSeq;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-                for (auto const& llmReq : requestList)
-                {
-                    if (llmReq->mState == tb::LlmRequestState::kGENERATION_COMPLETE)
-                    {
-                        continue;
-                    }
-                    // Don't add any tokens to simulate no output tokens
-                    llmReq->addNewTokens({1});
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                    if (callCountPerSeq.find(llmReq->mRequestId) != callCountPerSeq.end())
-                    {
-                        callCountPerSeq[llmReq->mRequestId]++;
-                    }
-                    else
-                    {
-                        callCountPerSeq[llmReq->mRequestId] = 1;
-                    }
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 100; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 200; }));
-
-    SizeType32 beamWidth = 1;
-    ExecutorConfig executorConfig(beamWidth);
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    SizeType32 maxNewTokens = 150;
-    VecTokens inputTokens{1, 2, 3, 4};
-    auto request = Request(inputTokens, maxNewTokens, streaming);
-
-    // Enqueue the request
-    auto requestId = executor.enqueueRequest(std::move(request));
-
-    // Cancel the request
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    executor.cancelRequest(requestId);
-
-    bool done = false;
-    int iter = 0;
-    while (!done && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(requestId, waitTime);
-        for (auto& response : responses)
-        {
-
-            if (response.hasError())
-            {
-                FAIL() << "Not expecting an error to be received";
-            }
-            else
-            {
-                auto result = response.getResult();
-                done = result.isFinal;
-                if (done)
-                {
-                    for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
-                    {
-                        EXPECT_EQ(result.finishReasons[beamIdx], FinishReason::kCANCELLED);
-                    }
-                }
-            }
-        }
-        ++iter;
-    }
-
-    EXPECT_LT(iter, mMaxWaitMs);
-    // Expecting to receiving fewer tokens than maxNewTokens
-    EXPECT_LT(callCount, maxNewTokens);
-
-    // Create the request having child requests.
-    auto samplingConfig2 = SamplingConfig(1);
-    samplingConfig2.setNumReturnSequences(2);
-    auto request2 = Request(inputTokens, maxNewTokens, streaming, samplingConfig2);
-
-    // Reset call count.
-    callCount = 0;
-    callCountPerSeq.clear();
-
-    // Enqueue the request
-    auto requestId2 = executor.enqueueRequest(std::move(request2));
-
-    // Cancel the request
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    executor.cancelRequest(requestId2);
-
-    done = false;
-    iter = 0;
-    while (!done && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(requestId2, waitTime);
-        for (auto& response : responses)
-        {
-
-            if (response.hasError())
-            {
-                FAIL() << "Not expecting an error to be received";
-            }
-            else
-            {
-                auto result = response.getResult();
-                done = result.isFinal;
-                if (done)
-                {
-                    EXPECT_EQ(result.finishReasons[0], FinishReason::kCANCELLED);
-                }
-            }
-        }
-        ++iter;
-    }
-
-    EXPECT_LT(iter, mMaxWaitMs);
-    for (auto& [reqId, count] : callCountPerSeq)
-    {
-        // Expecting to receiving fewer tokens than maxNewTokens
-        EXPECT_LT(count, maxNewTokens) << "Failed at request id: " << reqId;
-    }
-}
-
-TEST_F(GptExecutorTest, MockedModelNumReturns)
-{
-    using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
-    using RequestList = std::list<LlmRequestPtr>;
-
-    SizeType32 const maxBeamWidth = 4;
-    OutputConfig outConfig;
-    auto model = std::make_shared<MockedModel>();
-
-    EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
-    EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
-    EXPECT_CALL(*model, getLogitDataType()).Times(0);
-    tr::WorldConfig const dummyWorldConfig;
-    EXPECT_CALL(*model, getWorldConfig())
-        .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
-    EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
-    SizeType32 callCount = 0;
-    EXPECT_CALL(*model, forwardAsync(_))
-        .WillRepeatedly(Invoke(
-            [&](RequestList const& requestList)
-            {
-                for (auto const& llmReq : requestList)
-                {
-                    // Don't add any tokens to simulate no output tokens
-                    auto numBeams = llmReq->mSamplingConfig.getNumReturnBeams();
-                    llmReq->addNewTokens(VecTokens(numBeams, 1));
-                    llmReq->mState = tb::LlmRequestState::kGENERATION_IN_PROGRESS;
-                    if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
-                    {
-                        llmReq->mState = tb::LlmRequestState::kGENERATION_COMPLETE;
-                    }
-                }
-                callCount++;
-            }));
-
-    EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 20; }));
-
-    ExecutorConfig executorConfig(maxBeamWidth);
-    auto executor = Executor(model, executorConfig);
-
-    // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    bool streaming = false;
-
-    auto samplingConfig1 = SamplingConfig(1);
-    samplingConfig1.setNumReturnSequences(3);
-    auto request1 = Request(inputTokens, maxNewTokens, streaming, samplingConfig1, outConfig);
-    auto samplingConfig2 = SamplingConfig(4);
-    auto request2 = Request(inputTokens, maxNewTokens, streaming, samplingConfig2, outConfig);
-    auto samplingConfig3 = SamplingConfig(4);
-    samplingConfig3.setNumReturnSequences(2);
-    auto request3 = Request(inputTokens, maxNewTokens, streaming, samplingConfig3, outConfig);
-
-    // Enqueue the request
-    auto requestId1 = executor.enqueueRequest(std::move(request1));
-    auto requestId2 = executor.enqueueRequest(std::move(request2));
-    auto requestId3 = executor.enqueueRequest(std::move(request3));
-
-    // Expecting one response in beam search. Instead, numReturnSequences limits the number of beams to return.
-    std::unordered_map<IdType, SizeType32> expectedNumResponses{{requestId1, 3}, {requestId2, 1}, {requestId3, 1}};
-    std::unordered_map<IdType, SizeType32> expectedNumBeams{{requestId1, 1}, {requestId2, 4}, {requestId3, 2}};
-
-    std::unordered_map<IdType, SizeType32> numResponses{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
-    std::unordered_map<IdType, SizeType32> numBeams{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
-    int numFinished = 0;
-    int iter = 0;
-    while (numFinished < 3 && iter < mMaxWaitMs)
-    {
-        std::chrono::milliseconds waitTime(1);
-        auto responses = executor.awaitResponses(waitTime);
-        for (auto& response : responses)
-        {
-            auto result = response.getResult();
-            auto reqId = response.getRequestId();
-            numFinished += result.isFinal;
-            numResponses[reqId]++;
-            numBeams[reqId] = result.outputTokenIds.size();
-        }
-        ++iter;
-    }
-
-    EXPECT_LT(iter, mMaxWaitMs);
-    EXPECT_EQ(numFinished, 3);
-    for (auto& [reqId, numResp] : numResponses)
-    {
-        EXPECT_EQ(numResp, expectedNumResponses[reqId]);
-    }
-    for (auto& [reqId, numResp] : numResponses)
-    {
-        EXPECT_EQ(numResp, expectedNumResponses[reqId]);
-    }
-}
-
 TEST_F(GptExecutorTest, SingleRequestInvalidInputs)
 {
     bool streaming = true;
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -5347,11 +3208,11 @@ TEST_F(GptExecutorTest, ExecutorKVCacheManager)
     SizeType32 beamWidth = 1;
     SizeType32 maxNewTokens = 5;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto kvCacheConfig = KvCacheConfig(true, 256);
+    auto kvCacheConfig = KvCacheConfig(true, 128);
     kvCacheConfig.setEventBufferMaxSize(1024);
     executorConfig.setKvCacheConfig(kvCacheConfig);
 
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     auto kvCacheManager = *executor.getKVCacheEventManager();
@@ -5366,7 +3227,7 @@ TEST_F(GptExecutorTest, ExecutorKVCacheManager)
     for (int request = 0; request < 3; request++)
     {
         VecTokens inputTokens;
-        for (int i = 0; i < 127; i++)
+        for (int i = 0; i < 63; i++)
         {
             inputTokens.emplace_back(i + request);
         }
@@ -5447,7 +3308,7 @@ TEST_F(GptExecutorTest, SingleRequestLora)
 
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Load lora weights, config
@@ -5506,34 +3367,38 @@ TEST_P(GuidedDecodingParamsTest, All)
     std::filesystem::path enginePath;
     std::filesystem::path tokenizerInfoPath;
     int tp_size = 1, pp_size = 1, cp_size = 1;
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
+
     if (modelName == "gpt")
     {
-        enginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        enginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
         tokenizerInfoPath = GPT_XGRAMMAR_TOKENIZER_INFO_PATH;
     }
     else if (modelName == "llama_tp1_pp1_cp1")
     {
-        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        enginePath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
         tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
     }
     else if (modelName == "llama_tp4_pp1_cp1")
     {
-        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+        enginePath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
         tp_size = 4;
     }
     else if (modelName == "llama_tp1_pp4_cp1")
     {
-        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+        enginePath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
         tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
         pp_size = 4;
+        deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
     }
     else if (modelName == "llama_tp2_pp2_cp1")
     {
-        enginePath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+        enginePath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
         tokenizerInfoPath = LLAMA_XGRAMMAR_TOKENIZER_INFO_PATH;
         tp_size = 2;
         pp_size = 2;
+        deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
     }
     else
     {
@@ -5574,6 +3439,13 @@ TEST_P(GuidedDecodingParamsTest, All)
         GuidedDecodingConfig::GuidedDecodingBackend::kXGRAMMAR, encodedVocab, tokenizerStr, stopTokenIds);
     executorConfig.setGuidedDecodingConfig(guidedDecodingConfig);
 
+    if (deviceIds.has_value())
+    {
+        auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+
+        parallelConfig.setDeviceIds(deviceIds.value());
+        executorConfig.setParallelConfig(parallelConfig);
+    }
     auto executor = Executor(enginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
@@ -5588,8 +3460,8 @@ TEST_P(GuidedDecodingParamsTest, All)
             1, 1724, 338, 29871, 29896, 29974, 29896, 29973, 673, 20917, 297, 263, 9657, 297, 4390, 3402, 29901, 29871};
     }
     SizeType32 maxNewTokens = 10;
-    texec::SamplingConfig samplingConfig{};
-    texec::OutputConfig outputConfig{false, false, false, true};
+    SamplingConfig samplingConfig{};
+    OutputConfig outputConfig{false, false, false, true};
 
     std::vector<Request> requests;
     requests.emplace_back(inputTokens, maxNewTokens, streaming, samplingConfig, outputConfig, stopTokenIds[0]);
@@ -5679,13 +3551,13 @@ TEST_F(GptExecutorTest, GuidedDecodingFailure)
     auto executorConfig = ExecutorConfig(beamWidth);
 
     std::vector<int> stopTokenIds{50256};
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the requests
     SizeType32 maxNewTokens = 10;
-    texec::SamplingConfig samplingConfig{};
-    texec::OutputConfig outputConfig{false, false, false, true};
+    SamplingConfig samplingConfig{};
+    OutputConfig outputConfig{false, false, false, true};
     VecTokens inputTokens{2061, 318, 352, 10, 16, 30, 23998, 39559, 287, 257, 8633, 287, 33918, 5794, 25, 220};
 
     std::vector<Request> requests;
@@ -5731,7 +3603,7 @@ TEST_P(ParamTest, SingleRequestCancelRequest)
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
 
     auto executorConfig = ExecutorConfig(beamWidth);
-    auto trtEnginePath = GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create the request
@@ -5798,12 +3670,12 @@ TEST_F(GptExecutorTest, orchModeFetchNewReqErr)
     SizeType32 beamWidth = 1;
     auto executorConfig = ExecutorConfig(beamWidth);
 
-    auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+    auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
     auto parallelConfig = ParallelConfig(
         CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create a req with invalid parameters
@@ -5845,12 +3717,12 @@ TEST_F(GptExecutorTest, orchModeForwardError)
     SizeType32 constexpr maxBeamWidth{1};
     auto executorConfig = ExecutorConfig(maxBeamWidth);
 
-    auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+    auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
     auto parallelConfig = ParallelConfig(
         CommunicationType::kMPI, CommunicationMode::kORCHESTRATOR, std::nullopt, std::nullopt, orchestratorConfig);
     executorConfig.setParallelConfig(parallelConfig);
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Setting request beam width to 2 which should cause failure
@@ -5896,6 +3768,8 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
     auto const numReturnSequences = std::get<3>(GetParam());
     auto const modelName = std::get<4>(GetParam());
 
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
+
     OutputConfig outConfig;
 
     auto executorConfig = ExecutorConfig(beamWidth);
@@ -5904,15 +3778,17 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
     {
         if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
         }
         else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
         }
     }
 
@@ -5940,11 +3816,24 @@ TEST_P(ParamCancelReqTest, MultipleRequestsMultiGpuCancelRequest)
 
     if (useOrchestratorMode)
     {
-        auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
         auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
             useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt,
             std::nullopt, orchestratorConfig);
+        if (deviceIds.has_value())
+        {
+            parallelConfig.setDeviceIds(deviceIds.value());
+        }
         executorConfig.setParallelConfig(parallelConfig);
+    }
+    else
+    {
+        if (deviceIds.has_value())
+        {
+            auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+            parallelConfig.setDeviceIds(deviceIds.value());
+            executorConfig.setParallelConfig(parallelConfig);
+        }
     }
 
     auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
@@ -6037,6 +3926,7 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
 
     SizeType32 beamWidth = 32;
     OutputConfig outConfig;
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
 
     auto executorConfig = ExecutorConfig(beamWidth);
     std::filesystem::path modelPath;
@@ -6044,15 +3934,17 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
     {
         if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
         }
         else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
         }
     }
 
@@ -6073,6 +3965,13 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
         }
     }
 
+    if (deviceIds.has_value())
+    {
+        auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+
+        parallelConfig.setDeviceIds(deviceIds.value());
+        executorConfig.setParallelConfig(parallelConfig);
+    }
     auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Since this is leader mode, all ranks should participate
@@ -6131,7 +4030,7 @@ TEST_P(LeaderApiUsageTest, LeaderApiUsageTest)
 TEST_F(GptExecutorTest, validateParallelConfig)
 {
 
-    auto trtEnginePath = (GPT_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu");
     {
         auto executorConfig = ExecutorConfig();
         auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
@@ -6167,25 +4066,29 @@ TEST_P(TimeoutTest, TimeoutStreamingTest)
     auto executorConfig = ExecutorConfig(beamWidth);
     std::filesystem::path modelPath;
     bool isMultiGpu{false};
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
+
     if (modelName == "llama_tp4_pp1_cp1" || modelName == "llama_tp1_pp4_cp1" || modelName == "llama_tp2_pp2_cp1")
     {
         isMultiGpu = true;
         if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
         }
         else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
         }
     }
     if (modelName == "llama_tp1_pp1_cp1")
     {
-        modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     }
     // For llama model, only run for multiple GPUs
     // This is detected by setting an env variable when running the test
@@ -6215,15 +4118,29 @@ TEST_P(TimeoutTest, TimeoutStreamingTest)
 
     if (useOrchestratorMode)
     {
-        auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
         auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
             useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt,
             std::nullopt, orchestratorConfig);
         executorConfig.setParallelConfig(parallelConfig);
+        if (deviceIds.has_value())
+        {
+            parallelConfig.setDeviceIds(deviceIds.value());
+        }
+        executorConfig.setParallelConfig(parallelConfig);
+    }
+    else
+    {
+        if (deviceIds.has_value())
+        {
+            auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+            parallelConfig.setDeviceIds(deviceIds.value());
+            executorConfig.setParallelConfig(parallelConfig);
+        }
     }
     auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
-    SizeType32 constexpr maxNewTokens = 50;
+    SizeType32 constexpr maxNewTokens = 10;
     // create 1 request that times out immediately
     // momentarily we don't cancel requests before forwardAsync so it will get scheduled for at least 1 forward
     VecTokens immediateCancelTokens{1, 2, 3, 4};
@@ -6239,7 +4156,7 @@ TEST_P(TimeoutTest, TimeoutStreamingTest)
     auto oneForwardRequest
         = Request(oneForwardTokens, maxNewTokens, true, tensorrt_llm::executor::SamplingConfig(beamWidth));
     oneForwardRequest.setReturnAllGeneratedTokens(true);
-    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(3));
+    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(1));
     SizeType32 constexpr oneForwardlMinLength = 0;
     SizeType32 constexpr oneForwardlMaxLength = 1;
 
@@ -6249,7 +4166,7 @@ TEST_P(TimeoutTest, TimeoutStreamingTest)
         = Request(finishedTokens, maxNewTokens, true, tensorrt_llm::executor::SamplingConfig(beamWidth));
     finishedRequest.setReturnAllGeneratedTokens(true);
     finishedRequest.setAllottedTimeMs(std::chrono::milliseconds(5000));
-    SizeType32 constexpr finishedMinLength = 30;
+    SizeType32 constexpr finishedMinLength = 5;
     SizeType32 constexpr finishedMaxLength = maxNewTokens + 1;
 
     std::vector<FinishReason> referenceFinishReasons
@@ -6294,6 +4211,7 @@ TEST_P(TimeoutTest, TimeoutStreamingTest)
                     auto const& result = responseIt.getResult();
                     if (result.isFinal)
                     {
+                        requestIds.erase(std::remove(requestIds.begin(), requestIds.end(), reqId), requestIds.end());
                         numFinished++;
                     }
 
@@ -6352,6 +4270,7 @@ TEST_P(TimeoutTest, TimeoutNonstreamingTest)
     auto const modelName = std::get<0>(GetParam());
     auto const useOrchestratorMode = std::get<1>(GetParam());
     SizeType32 constexpr beamWidth = 2;
+    std::optional<std::vector<SizeType32>> deviceIds = std::nullopt;
 
     auto executorConfig = ExecutorConfig(beamWidth);
     std::filesystem::path modelPath;
@@ -6361,20 +4280,22 @@ TEST_P(TimeoutTest, TimeoutNonstreamingTest)
         isMultiGpu = true;
         if (modelName == "llama_tp4_pp1_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp4-pp1-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp4-pp1-cp1-gpu";
         }
         else if (modelName == "llama_tp1_pp4_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp4-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp4-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{3, 2, 1, 0};
         }
         else if (modelName == "llama_tp2_pp2_cp1")
         {
-            modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp2-pp2-cp1-gpu";
+            modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp2-pp2-cp1-gpu";
+            deviceIds = std::vector<SizeType32>{2, 3, 0, 1};
         }
     }
     if (modelName == "llama_tp1_pp1_cp1")
     {
-        modelPath = LLAMA_MODEL_PATH / FP16_GPT_ATTENTION_PACKED_PAGED_DIR / "tp1-pp1-cp1-gpu";
+        modelPath = LLAMA_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DIR() / "tp1-pp1-cp1-gpu";
     }
     // For llama model, only run for multiple GPUs
     // This is detected by setting an env variable when running the test
@@ -6404,11 +4325,25 @@ TEST_P(TimeoutTest, TimeoutNonstreamingTest)
 
     if (useOrchestratorMode)
     {
-        auto orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
+        auto orchestratorConfig = OrchestratorConfig(true, PathUtil::EXECUTOR_WORKER_PATH());
         auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
             useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt,
             std::nullopt, orchestratorConfig);
         executorConfig.setParallelConfig(parallelConfig);
+        if (deviceIds.has_value())
+        {
+            parallelConfig.setDeviceIds(deviceIds.value());
+        }
+        executorConfig.setParallelConfig(parallelConfig);
+    }
+    else
+    {
+        if (deviceIds.has_value())
+        {
+            auto parallelConfig = executorConfig.getParallelConfig().value_or(ParallelConfig());
+            parallelConfig.setDeviceIds(deviceIds.value());
+            executorConfig.setParallelConfig(parallelConfig);
+        }
     }
     auto executor = Executor(modelPath, ModelType::kDECODER_ONLY, executorConfig);
 
@@ -6425,7 +4360,7 @@ TEST_P(TimeoutTest, TimeoutNonstreamingTest)
     VecTokens oneForwardTokens{11, 12, 13, 14};
     auto oneForwardRequest
         = Request(oneForwardTokens, maxNewTokens, false, tensorrt_llm::executor::SamplingConfig(beamWidth));
-    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(3));
+    oneForwardRequest.setAllottedTimeMs(std::chrono::milliseconds(1));
     std::vector<std::vector<int>> oneForwardResponse = {oneForwardTokens, oneForwardTokens};
 
     // Create the request that finishes by the number of tokens
@@ -6505,230 +4440,6 @@ TEST_P(TimeoutTest, TimeoutNonstreamingTest)
                 {
                     EXPECT_EQ(referenceResponse.at(beam).size(), actualResponse.at(beam).size());
                     EXPECT_THAT(actualResponse.at(beam), testing::ElementsAreArray(referenceResponse.at(beam)));
-                }
-            }
-        }
-    }
-}
-
-TEST_P(EncDecParamsTest, validEncDecCtor)
-{
-    auto const modelName = std::get<0>(GetParam());
-    SizeType32 const beamWidth = std::get<1>(GetParam());
-    SizeType32 const maxNewTokens = std::get<2>(GetParam());
-    SizeType32 const tp = std::get<3>(GetParam());
-    SizeType32 const pp = std::get<4>(GetParam());
-    SizeType32 const cp = std::get<5>(GetParam());
-
-    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp, cp);
-    std::filesystem::path encEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "encoder";
-    std::filesystem::path decEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "decoder";
-    ExecutorConfig executorConfig{};
-    FloatType freeGpuMemoryFraction = 0.5f;
-    FloatType crossKvCacheFraction = 0.5f;
-    KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
-    kvCacheConfig.setCrossKvCacheFraction(crossKvCacheFraction);
-    executorConfig.setKvCacheConfig(kvCacheConfig);
-    auto executor = Executor(encEnginePath, decEnginePath, ModelType::kENCODER_DECODER, executorConfig);
-}
-
-TEST_P(EncDecParamsTest, Forward)
-{
-    bool constexpr VERBOSE = false;
-    auto const modelName = std::get<0>(GetParam());
-    SizeType32 const beamWidth = std::get<1>(GetParam());
-    SizeType32 const maxNewTokens = std::get<2>(GetParam());
-    SizeType32 const tp = std::get<3>(GetParam());
-    SizeType32 const pp = std::get<4>(GetParam());
-    SizeType32 const cp = std::get<5>(GetParam());
-    bool const streaming = false;
-
-    auto const enginePathName = getEncDecEnginePath(modelName, tp, pp, cp);
-    std::filesystem::path encEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "encoder";
-    std::filesystem::path decEnginePath = ENC_DEC_ENGINE_BASE / enginePathName / "decoder";
-
-    // load ground truth input & output data
-    auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
-    auto inputsIdsHost
-        = tr::utils::loadNpy(manager, (ENC_DEC_DATA_BASE / "input_ids.npy").string(), tr::MemoryType::kCPU);
-    auto inputsIdsPtr = tr::bufferCast<TokenIdType>(*inputsIdsHost);
-    auto inputLengthsHost
-        = tr::utils::loadNpy(manager, (ENC_DEC_DATA_BASE / "input_lengths.npy").string(), tr::MemoryType::kCPU);
-    auto inputLengthsPtr = tr::bufferCast<SizeType32>(*inputLengthsHost);
-    auto encoderOutputHost
-        = tr::utils::loadNpy(manager, (ENC_DEC_DATA_BASE / "encoder_output.npy").string(), tr::MemoryType::kCPU);
-    auto encoderOutputPtr = tr::bufferCast<half>(*encoderOutputHost);
-    auto decoderOutputHost = tr::utils::loadNpy(manager,
-        (ENC_DEC_DATA_BASE / "output_ids_beam").string() + std::to_string(beamWidth) + ".npy", tr::MemoryType::kCPU);
-    auto decoderOutputPtr = tr::bufferCast<TokenIdType>(*decoderOutputHost);
-
-    // Rank and size info
-    auto& comm = tensorrt_llm::mpi::MpiComm::world();
-    auto const worldRank = comm.getRank();
-    auto const worldSize = comm.getSize();
-
-    // create executor
-    BatchingType const batchingType = BatchingType::kINFLIGHT;
-    FloatType freeGpuMemoryFraction = 0.5f;
-    FloatType crossKvCacheFraction = 0.5f;
-    KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
-    kvCacheConfig.setCrossKvCacheFraction(crossKvCacheFraction);
-
-    ExecutorConfig executorConfig{beamWidth};
-    executorConfig.setBatchingType(batchingType);
-    executorConfig.setKvCacheConfig(kvCacheConfig);
-    executorConfig.setNormalizeLogProbs(false);
-
-    // TODO: OrchestratorMode test does not pass
-    bool const useOrchestratorMode = (tp * pp) > worldSize;
-    std::optional<OrchestratorConfig> orchestratorConfig = std::nullopt;
-    if (useOrchestratorMode)
-    {
-        orchestratorConfig = OrchestratorConfig(true, EXECUTOR_WORKER_PATH.string());
-    }
-    auto parallelConfig = ParallelConfig(CommunicationType::kMPI,
-        useOrchestratorMode ? CommunicationMode::kORCHESTRATOR : CommunicationMode::kLEADER, std::nullopt, std::nullopt,
-        orchestratorConfig);
-    executorConfig.setParallelConfig(parallelConfig);
-
-    auto executor = Executor(encEnginePath, decEnginePath, ModelType::kENCODER_DECODER, executorConfig);
-
-    OutputConfig outConfig;
-    outConfig.excludeInputFromOutput = false;
-    outConfig.returnLogProbs = false;
-    outConfig.returnGenerationLogits = false;
-    outConfig.returnContextLogits = false;
-    outConfig.returnEncoderOutput = false;
-
-    TokenIdType bosId = getDecTokenFromJsonConfig(decEnginePath, "bos_token_id");
-    TokenIdType padId = getDecTokenFromJsonConfig(decEnginePath, "pad_token_id");
-    TokenIdType eosId = getDecTokenFromJsonConfig(decEnginePath, "eos_token_id");
-    TokenIdType decoderStartTokenId = getDecTokenFromJsonConfig(decEnginePath, "decoder_start_token_id");
-
-    // create requests
-    SizeType32 const nbRequests = inputLengthsHost->getShape().d[0];
-    std::vector<Request> requests;
-    for (int i = 0, cumInputLen = 0; i < nbRequests; i++)
-    {
-        auto encoderInput = VecTokens(&inputsIdsPtr[cumInputLen],
-            &inputsIdsPtr[cumInputLen] + inputLengthsPtr[i]); // assume inputIds is flattened / no-padding
-        cumInputLen += inputLengthsPtr[i];
-        auto decoderInput = VecTokens{decoderStartTokenId};
-        Request req(decoderInput, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig,
-            eosId, padId);
-        req.setEncoderInputTokenIds(encoderInput);
-        requests.emplace_back(req);
-    }
-
-    using namespace std::chrono;
-
-    // enqueue requests
-    if (worldRank == 0)
-    {
-        auto tik = high_resolution_clock::now();
-        std::vector<IdType> reqIds = executor.enqueueRequests(std::move(requests));
-
-        // get responses
-        milliseconds waitTime(5000);
-        auto responsesAll = executor.awaitResponses(reqIds, waitTime);
-        auto tok = high_resolution_clock::now();
-        TLLM_LOG_DEBUG("TRT-LLM C++ E2E time %d ms", duration_cast<milliseconds>(tok - tik).count());
-        TLLM_LOG_DEBUG("Number of responses: %d", responsesAll.size());
-
-        int32_t numFinished = 0;
-        int iter = 0;
-        SizeType32 numResponses = 0;
-        std::unordered_map<IdType, std::vector<VecTokens>> outputTokens;
-        for_each(reqIds.begin(), reqIds.end(),
-            [&outputTokens, &beamWidth](auto const& id)
-            {
-                TLLM_LOG_DEBUG("Request IDs: %d", id);
-                outputTokens[id] = {};
-                for (int i = 0; i < beamWidth; i++)
-                {
-                    outputTokens[id].emplace_back(VecTokens{});
-                }
-            });
-        for (int i = 0; i < reqIds.size(); i++)
-        {
-            auto& responses = responsesAll[i];
-            for (auto& response : responses)
-            {
-                numResponses++;
-                if (!response.hasError())
-                {
-                    auto result = response.getResult();
-                    numFinished += result.isFinal;
-                    for (int beam = 0; beam < beamWidth; beam++)
-                    {
-                        auto& resTokens = result.outputTokenIds.at(beam);
-                        auto& outTokens = outputTokens.at(response.getRequestId()).at(beam);
-                        outTokens.insert(outTokens.end(), std::make_move_iterator(resTokens.begin()),
-                            std::make_move_iterator(resTokens.end()));
-                    }
-                }
-                else
-                {
-                    // Allow response with error only if awaitResponse processed a terminated request id
-                    std::string err = "ReqId " + std::to_string(response.getRequestId())
-                        + " has already been processed and was terminated.";
-                    EXPECT_EQ(response.getErrorMsg(), err);
-                }
-            }
-        }
-
-        // print output & check correctness with ground truth
-        for (auto const& [reqId, tokens] : outputTokens)
-        {
-            SizeType32 gtMaxLength = decoderOutputHost->getShape().d[1];
-            auto gtOutput = decoderOutputPtr + (reqId - 1) * gtMaxLength;
-
-            if constexpr (VERBOSE)
-            {
-                std::cout << ">>> Request ID: " << reqId << std::endl;
-                for (int beam = 0; beam < beamWidth; beam++)
-                {
-                    std::cout << "output tokens, beam " << beam << ", output length " << tokens[beam].size() << ": "
-                              << std::endl;
-                    for_each(tokens[beam].begin(), tokens[beam].end(),
-                        [](auto const& token) { std::cout << token << ", "; });
-                    std::cout << std::endl;
-                }
-                std::cout << "ground truth tokens: " << std::endl;
-
-                SizeType32 gtLength = 0;
-                for (int i = 0; i < gtMaxLength; i++)
-                {
-                    if (gtOutput[i] != eosId)
-                    {
-                        std::cout << gtOutput[i] << ", ";
-                        gtLength++;
-                    }
-                }
-                std::cout << std::endl;
-                std::cout << "ground truth length: " << gtLength << std::endl;
-            }
-
-            // check token-by-token match between beam 0 & ground truth
-            ASSERT_TRUE(tokens.size() <= gtMaxLength)
-                << "Request ID " << reqId << "'s generated length is longer than ground truth length" << gtMaxLength;
-            for (int i = 0; i < gtMaxLength; i++)
-            {
-                if (outConfig.excludeInputFromOutput)
-                {
-                    // if results exclude decoder start token, skip it in ground truth too
-                    continue;
-                }
-                if (i < tokens[0].size())
-                {
-                    ASSERT_EQ(tokens[0][i], gtOutput[i])
-                        << "Generated token id: " << tokens[0][i] << " v.s. ground truth: " << gtOutput[i];
-                }
-                else
-                {
-                    ASSERT_EQ(gtOutput[i], eosId)
-                        << "Request ID " << reqId << "'s generated length is shorter than ground truth length"
-                        << gtMaxLength;
                 }
             }
         }
@@ -6822,36 +4533,6 @@ INSTANTIATE_TEST_SUITE_P(ChatGlm3ExecutorTest, AllParamsTest,
         testing::Values("chatglm3"), testing::Values(false), testing::Values(false), testing::Values(1)),
     generateTestNameAllParams);
 
-INSTANTIATE_TEST_SUITE_P(T5BasicTest, EncDecParamsTest,
-    testing::Combine(testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(1),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
-INSTANTIATE_TEST_SUITE_P(T5Beam2Test, EncDecParamsTest,
-    testing::Combine(testing::Values(T5_NAME), testing::Values(2), testing::Values(64), testing::Values(1),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
-INSTANTIATE_TEST_SUITE_P(T5MultiGPUTest, EncDecParamsTest,
-    testing::Combine(testing::Values(T5_NAME), testing::Values(1), testing::Values(64), testing::Values(4),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
-INSTANTIATE_TEST_SUITE_P(BartBasicTest, EncDecParamsTest,
-    testing::Combine(testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(1),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
-INSTANTIATE_TEST_SUITE_P(BartBeam2Test, EncDecParamsTest,
-    testing::Combine(testing::Values(BART_NAME), testing::Values(2), testing::Values(64), testing::Values(1),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
-INSTANTIATE_TEST_SUITE_P(BartMultiGPUTest, EncDecParamsTest,
-    testing::Combine(testing::Values(BART_NAME), testing::Values(1), testing::Values(64), testing::Values(4),
-        testing::Values(1), testing::Values(1)),
-    generateTestNameEncDec);
-
 INSTANTIATE_TEST_SUITE_P(LlamaExecutorTest, LogitsProcParamsTest,
     testing::Combine(
         testing::Values("llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1", "llama_tp1_pp4_cp1"),
@@ -6865,169 +4546,3 @@ INSTANTIATE_TEST_SUITE_P(LlamaExecutorGuidedDecodingTest, GuidedDecodingParamsTe
     testing::Combine(
         testing::Values("llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1", "llama_tp2_pp2_cp1", "llama_tp1_pp4_cp1")),
     generateTestNameGuidedDecoding);
-
-INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(GptDisaggSymmetricExecutorTest2, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(1)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(GptSingleDeviceDisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"gpt", "gpt"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {0}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(ChatGlm2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(2), testing::Values(std::vector<std::string>{"chatglm2", "chatglm2"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaTP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp2_pp1_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-INSTANTIATE_TEST_SUITE_P(LlamaPP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp2_cp1", "llama_tp1_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaTP2PP2DisaggSymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(8),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp2_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5, 6, 7}}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {0, 1, 2, 3}}),
-        testing::Values(std::vector<int>{1, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaConPP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp2_cp1", "llama_tp2_pp1_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (1,0) (2,3)
-        testing::Values(std::vector<std::vector<int>>{{1, 0}, {2, 3}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(4),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp1_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}}), // (0,1), (3,2)
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp1_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1) , (5,4)
-        testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {1, 0}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP2GenTP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp2_cp1", "llama_tp2_pp1_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1, 2, 3}, {4, 5}}), // (2,3,0,1), (4,5)
-        testing::Values(std::vector<std::vector<int>>{{2, 3, 0, 1}, {0, 1}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-INSTANTIATE_TEST_SUITE_P(LlamaConTP2PP1GenTP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp2_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3, 4, 5}}), // (0,1) , (4,5,2,3)%4
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {0, 1, 2, 3}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaConTP2GenPP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp1_cp1", "llama_tp1_pp4_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{4, 5}, {0, 1, 2, 3}}), // (4,5) ,(3,2,1,0)
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {3, 2, 1, 0}}), testing::Values(std::vector<int>{1, 0}),
-        testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP4DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(8),
-        testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp4_pp1_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
-        testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2AndPP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp2_pp1_cp1", "llama_tp1_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
-        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(6),
-        testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp2_cp1", "llama_tp1_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {4, 5}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
-        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon4TP1Gen1TP2PP2DisaggAsymmetricExecutorTest, DisaggParamsTest,
-    testing::Combine(testing::Values(8),
-        testing::Values(std::vector<std::string>{
-            "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp1_pp1_cp1", "llama_tp2_pp2_cp1"}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {4, 5, 6, 7}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2}, {3}, {0, 1, 2, 3}}),
-        testing::Values(std::vector<int>{1, 1, 1, 1, 0}), testing::Values(4)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2TP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
-    testing::Combine(testing::Values(7),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp1", "llama_tp2_pp1"}),
-        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4}, {5, 6}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
-        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP2Gen2TP1DisaaggOrchestrator, DisaggOrchestratorParamsTest,
-    testing::Combine(testing::Values(7),
-        testing::Values(std::vector<std::string>{"llama_tp2_pp1", "llama_tp2_pp1", "llama_tp1_pp1", "llama_tp1_pp1"}),
-        testing::Values(std::vector<std::vector<int>>{{1, 2}, {3, 4}, {5}, {6}}),
-        testing::Values(std::vector<std::vector<int>>{{0, 1}, {2, 3}, {0}, {1}}),
-        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen2PP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
-    testing::Combine(testing::Values(7),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp1_pp2", "llama_tp1_pp2"}),
-        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4}, {5, 6}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3}, {0, 1}}),
-        testing::Values(std::vector<int>{1, 1, 0, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);
-
-INSTANTIATE_TEST_SUITE_P(LlamaCon2TP1Gen1TP2PP2DisaaggOrchestrator, DisaggOrchestratorParamsTest,
-    testing::Combine(testing::Values(7),
-        testing::Values(std::vector<std::string>{"llama_tp1_pp1", "llama_tp1_pp1", "llama_tp2_pp2"}),
-        testing::Values(std::vector<std::vector<int>>{{1}, {2}, {3, 4, 5, 6}}),
-        testing::Values(std::vector<std::vector<int>>{{0}, {1}, {2, 3, 0, 1}}),
-        testing::Values(std::vector<int>{1, 1, 0}), testing::Values(0)),
-    generateTestNameDisaggParams);

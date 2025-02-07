@@ -21,6 +21,7 @@
 #include "../dataTransceiverState.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/mpiUtils.h"
+#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/iTensor.h"
@@ -29,7 +30,14 @@
 
 namespace tensorrt_llm::executor::kv_cache
 {
-std::vector<int> targetIRanks(
+struct TargetRanksInfo
+{
+    int mDomainPPSize;
+    int mDomainTPSize;
+    std::vector<int> mIRanks;
+};
+
+TargetRanksInfo targetIRanks(
     kv_cache::CacheState const& iCacheState, kv_cache::CacheState const& oCacheState, int oRank);
 
 void concatenateKVCacheDispatch(runtime::ITensor::SharedPtr* inputBlocks, int inputBlockNum,
@@ -37,4 +45,12 @@ void concatenateKVCacheDispatch(runtime::ITensor::SharedPtr* inputBlocks, int in
     runtime::ITensor::SharedPtr* outputBlocks, int outputBlockNum, int oRank, kv_cache::CacheState const& oCacheState,
     runtime::BufferManager const& bufferManager);
 nvinfer1::Dims makeShapeFromCacheState(kv_cache::CacheState const& cacheState);
+
+void splitKVCacheDispatch(std::vector<runtime::ITensor::SharedPtr> const& kVCacheBlocks,
+    std::vector<runtime::ITensor::SharedPtr>& ouputSplitBlocks, kv_cache::CacheState const& iCacheState,
+    kv_cache::CacheState const& oCacheState, int selfIdx, runtime::BufferManager const& bufferManager);
+
+void concatenateKvCacheV2Dispatch(std::vector<runtime::ITensor::SharedPtr> const& inputSplitBlocks,
+    std::vector<runtime::ITensor::SharedPtr>& outputKvCacheBlocks, kv_cache::CacheState const& iCacheState,
+    kv_cache::CacheState const& oCacheState, int selfIdx, runtime::BufferManager const& bufferManager);
 } // namespace tensorrt_llm::executor::kv_cache

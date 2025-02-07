@@ -62,6 +62,11 @@ public:
         return mModelConfig;
     }
 
+    [[nodiscard]] bool getGatherGenerationLogits() const override
+    {
+        return getModelConfig().computeGenerationLogits();
+    }
+
     runtime::WorldConfig const& getWorldConfig() const override
     {
         return mWorldConfig;

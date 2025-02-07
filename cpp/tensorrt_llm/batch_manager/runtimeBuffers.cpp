@@ -10,9 +10,14 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "runtimeBuffers.h"
+#include "tensorrt_llm/batch_manager/runtimeBuffers.h"
 
+#include "tensorrt_llm/batch_manager/encoderBuffers.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
+#include "tensorrt_llm/batch_manager/loraBuffers.h"
+#include "tensorrt_llm/batch_manager/medusaBuffers.h"
+#include "tensorrt_llm/batch_manager/promptTuningBuffers.h"
+#include "tensorrt_llm/batch_manager/rnnStateBuffers.h"
 #include "tensorrt_llm/batch_manager/rnnStateManager.h"
 #include "tensorrt_llm/batch_manager/transformerBuffers.h"
 #include "tensorrt_llm/common/assert.h"
@@ -29,6 +34,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <memory>
 #include <numeric>
 #include <vector>
 
@@ -40,18 +46,21 @@ namespace tensorrt_llm::batch_manager
 RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig, std::optional<SizeType32> maxNumTokens,
+    executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits, std::optional<SizeType32> maxNumTokens,
     std::optional<std::vector<std::string>> const& additionalOutputNames)
 {
     create(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen, runtime, modelConfig,
-        worldConfig, decodingConfig, additionalOutputNames);
+        worldConfig, decodingConfig, gatherGenerationLogits, additionalOutputNames);
 
     // pre-allocate
     setMaxBufferSizes(maxBatchSize, maxBeamWidth, modelConfig, maxNumTokens);
-    reshape(runtime, modelConfig, worldConfig);
+    reshape(runtime, modelConfig, worldConfig, gatherGenerationLogits);
 }
 
-void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig)
+RuntimeBuffers::~RuntimeBuffers() = default;
+
+void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+    bool gatherGenerationLogits)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(runtimeBuffersReshape);
@@ -69,7 +78,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
             auto const logitsType = engine.getTensorDataType(kLogitsTensorName);
             logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
         }
-        else if (modelConfig.computeGenerationLogits() && modelConfig.getSpeculativeDecodingMode().isNone())
+        else if (gatherGenerationLogits && modelConfig.getSpeculativeDecodingMode().isNone())
         {
             // If need to return generation logits, re-point the logit buffer to avoid overwrite,
             // so we could write back GENERATION_LOGITS_BUFFER_LENGTH steps' logits together
@@ -90,7 +99,6 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     requestTypes->reshape(numSequencesShape);
     contextLengthsHost->reshape(numSequencesShape);
     contextLengthsDevice->reshape(numSequencesShape);
-    decoderInputLengthsHost->reshape(numSequencesShape);
     sequenceLengthsHost->reshape(numSequencesShape);
     sequenceLengthsDevice->reshape(numSequencesShape);
 
@@ -117,7 +125,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 
     if (modelConfig.useLoraPlugin())
     {
-        loraBuffers.reshape(numSequences);
+        loraBuffers->reshape(numSequences);
     }
 
     if (medusaBuffers)
@@ -184,9 +192,9 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 }
 
 void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
-    std::vector<SizeType32> maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
+    std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
-    executor::DecodingConfig const& decodingConfig,
+    executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits,
     std::optional<std::vector<std::string>> const& additionalOutputNames)
 {
     auto const& manager = runtime.getBufferManager();
@@ -194,12 +202,12 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     if (modelConfig.isTransformerBased())
     {
-        transformerBuffers.emplace(maxBatchSize, maxBeamWidth, maxAttentionWindowVec, maxAttentionWindow, sinkTokenLen,
-            runtime, modelConfig, worldConfig);
+        transformerBuffers = std::make_unique<TransformerBuffers>(maxBatchSize, maxBeamWidth, maxAttentionWindowVec,
+            maxAttentionWindow, sinkTokenLen, runtime, modelConfig, worldConfig);
     }
     if (modelConfig.isRnnBased())
     {
-        rnnStateBuffers.emplace(maxBatchSize, runtime);
+        rnnStateBuffers = std::make_unique<RnnStateBuffers>(maxBatchSize, runtime);
     }
 
     auto constexpr nvTokenIdType = TRTDataType<TokenIdType>::value;
@@ -207,8 +215,6 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     mropeRotaryCosSin = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
     mropePositionDeltas = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
-
-    decoderInputsIds = manager.emptyTensor(MemoryType::kGPU, nvTokenIdType);
 
     if (worldConfig.isLastPipelineParallelRank())
     {
@@ -224,7 +230,6 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     contextLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     contextLengthsDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
-    decoderInputLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     sequenceLengthsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     sequenceLengthsDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
 
@@ -258,7 +263,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     mCacheIndirDecoderIOBatchedCopyCopySizesDevice = manager.gpu(maxBatchSizeShape, nvinfer1::DataType::kINT64);
 
     // Pre-allocate buffer for saving generation logits for model w/o draft tokens
-    if (modelConfig.computeGenerationLogits()
+    if (gatherGenerationLogits
         && (modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal()
             || modelConfig.getSpeculativeDecodingMode().isNone())
         && worldConfig.isLastPipelineParallelRank())
@@ -281,23 +286,24 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     if (modelConfig.useCrossAttention())
     {
-        encoderBuffers.emplace();
+        encoderBuffers = std::make_unique<EncoderBuffers>();
         encoderBuffers->create(maxBatchSize, modelConfig, runtime);
     }
 
     if (modelConfig.usePromptTuning())
     {
-        promptTuningBuffers.create(maxBatchSize, manager, modelConfig, worldConfig);
+        promptTuningBuffers = std::make_unique<PromptTuningBuffers>(maxBatchSize, manager, modelConfig, worldConfig);
     }
 
     if (modelConfig.useLoraPlugin())
     {
-        loraBuffers.create(maxBatchSize, maxBeamWidth, runtime, modelConfig, worldConfig);
+        loraBuffers = std::make_unique<LoraBuffers>(maxBatchSize, maxBeamWidth, runtime, modelConfig, worldConfig);
     }
 
     if (modelConfig.getSpeculativeDecodingMode().isMedusa())
     {
-        medusaBuffers.emplace(maxBatchSize, maxBeamWidth, manager, modelConfig, worldConfig, decodingConfig, runtime);
+        medusaBuffers = std::make_unique<MedusaBuffers>(
+            maxBatchSize, maxBeamWidth, manager, modelConfig, worldConfig, decodingConfig, runtime);
     }
 
     if (modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
@@ -332,6 +338,7 @@ void RuntimeBuffers::setMaxBufferSizes(SizeType32 maxBatchSize, SizeType32 maxBe
 
     // maxNumSequences is reached when all requests are in generation
     numContextRequests = 0;
+    numGenRequests = maxBatchSize;
     numGenSequences = maxBatchSize * maxBeamWidth;
 
     auto const maxDraftTokens = modelConfig.getMaxDecodingDraftTokens();
@@ -403,7 +410,7 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
 void RuntimeBuffers::prepareBuffersForCudaGraph(SizeType32 maxSequenceLength)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    NVTX3_SCOPED_RANGE(runtimeBuffersSetFromInputs);
+    NVTX3_SCOPED_RANGE(prepareBuffersForCudaGraph);
 
     TLLM_CHECK(numContextRequests == 0);
 
@@ -446,14 +453,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
     SizeType32 totalInputSize = 0;
     std::vector<TokenIdType> inputHost;
-    std::vector<TokenIdType> decoderInputHost;
     std::vector<SizeType32> positionIdsHost;
     std::vector<SizeType32> positionIdsHostRow2;
     std::vector<float> mropeRotaryCosSinHost;
     std::vector<SizeType32> mropePositionDeltasHost;
 
     auto* contextLengthsHostPtr = bufferCast<SizeType32>(*contextLengthsHost);
-    auto* decoderInputLengthsHostPtr = bufferCast<SizeType32>(*decoderInputLengthsHost);
     auto* sequenceLengthsHostPtr = bufferCast<SizeType32>(*sequenceLengthsHost);
     auto* pastKeyValueLengthsPtr
         = transformerBuffers ? bufferCast<SizeType32>(*transformerBuffers->pastKeyValueLengths) : nullptr;
@@ -506,7 +511,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             TLLM_CHECK_WITH_INFO(
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
 
-            auto const promptLen = llmReq->mPromptLen;
             auto const& reqTokens = llmReq->getTokens(0);
             auto const& draftTokens = llmReq->getDraftTokens();
             auto const draftLength = llmReq->getNumDraftTokens();
@@ -525,9 +529,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
                 std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
                 totalNumLogits += draftLength;
-
-                decoderInputHost.insert(decoderInputHost.end(), reqTokens.begin(), reqTokens.end());
-                decoderInputLengthsHostPtr[batchIdx] = promptLen;
             }
             auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
             contextLengthsHostPtr[batchIdx] = inputLength;
@@ -602,9 +603,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             totalInputSize += inputLength;
             ++batchIdx;
         }
-
-        decoderInputsIds->reshape(ITensor::makeShape({static_cast<ITensor::DimType64>(decoderInputHost.size())}));
-        manager.copy(decoderInputHost.data(), *decoderInputsIds);
 
         if (rnnStateBuffers)
         {
@@ -778,11 +776,11 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     }
     if (modelConfig.usePromptTuning())
     {
-        promptTuningBuffers.fill(contextRequests, genRequests, manager, modelConfig.usePackedInput());
+        promptTuningBuffers->fill(contextRequests, genRequests, manager, modelConfig.usePackedInput());
     }
     if (modelConfig.useLoraPlugin())
     {
-        loraBuffers.fill(contextRequests, genRequests, peftTable, manager, modelConfig, worldConfig);
+        loraBuffers->fill(contextRequests, genRequests, peftTable, manager, modelConfig, worldConfig);
     }
 
     if (modelConfig.useMrope())
@@ -846,6 +844,18 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             * kKV_CACHE_LEN_CUDA_GRAPH_ROUND_SIZE;
     }
 
+    if (modelConfig.getSpeculativeDecodingMode().needsDecoderPrologue())
+    {
+        if (modelConfig.getSpeculativeDecodingMode().isExplicitDraftTokens())
+        {
+            prepareExplicitDraftTokenBuffers(decoderBuffers, runtime, modelConfig, worldConfig);
+        }
+        if (modelConfig.getSpeculativeDecodingMode().isEagle())
+        {
+            prepareEagleBuffers(contextRequests, genRequests, decoderBuffers, runtime, modelConfig, worldConfig);
+        }
+    }
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -881,13 +891,13 @@ std::tuple<SizeType32, RuntimeBuffers::TensorMap const&, RuntimeBuffers::TensorM
     SizeType32 maxAttentionWindow, DecoderBuffers& decoderBuffers, kv_cache_manager::BaseKVCacheManager* kvCacheManager,
     kv_cache_manager::BaseKVCacheManager* crossKvCacheManager, rnn_state_manager::RnnStateManager* rnnStateManager,
     PeftTable const& peftTable, TllmRuntime const& runtime, ModelConfig const& modelConfig,
-    WorldConfig const& worldConfig)
+    WorldConfig const& worldConfig, bool gatherGenerationLogits)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(runtimeBuffersPrepareStep);
 
     setBufferSizes(contextRequests, genRequests);
-    reshape(runtime, modelConfig, worldConfig);
+    reshape(runtime, modelConfig, worldConfig, gatherGenerationLogits);
 
     setFromInputs(contextRequests, genRequests, maxBeamWidth, maxAttentionWindow, decoderBuffers, kvCacheManager,
         crossKvCacheManager, rnnStateManager, peftTable, runtime, modelConfig, worldConfig);
@@ -913,7 +923,7 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
 
     if (transformerBuffers)
     {
-        transformerBuffers->getBuffers(inputMap);
+        transformerBuffers->getBuffers(inputMap, outputMap, modelConfig);
     }
     if (rnnStateBuffers)
     {
@@ -954,7 +964,7 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
 
     if (modelConfig.usePromptTuning())
     {
-        auto const& promptTuningParams = promptTuningBuffers.mPromptTuningParams;
+        auto const& promptTuningParams = promptTuningBuffers->mPromptTuningParams;
         inputMap.insert_or_assign(kPromptEmbeddingTableTensorName, promptTuningParams.embeddingTable);
         inputMap.insert_or_assign(kTasksTensorName, promptTuningParams.tasks);
         inputMap.insert_or_assign(kPromptVocabSizeTensorName, promptTuningParams.vocabSize);
@@ -968,8 +978,8 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
 
     if (modelConfig.useLoraPlugin())
     {
-        loraBuffers.insertInputTensors(inputMap, loraBuffers.mLoraWeightsPointersHost,
-            loraBuffers.mLoraAdapterSizesHost, modelConfig, worldConfig);
+        loraBuffers->insertInputTensors(inputMap, loraBuffers->mLoraWeightsPointersHost,
+            loraBuffers->mLoraAdapterSizesHost, modelConfig, worldConfig);
     }
 
     if (medusaBuffers)

@@ -61,6 +61,10 @@ RequestPerfMetrics Serialization::deserializeRequestPerfMetrics(std::istream& is
     auto numMissedBlocks = su::deserialize<SizeType32>(is);
     auto kvCacheHitRate = su::deserialize<SizeType32>(is);
 
+    auto acceptanceRate = su::deserialize<FloatType>(is);
+    auto totalAcceptedDraftTokens = su::deserialize<SizeType32>(is);
+    auto totalDraftTokens = su::deserialize<SizeType32>(is);
+
     auto firstIter = su::deserialize<std::optional<IterationType>>(is);
     auto lastIter = su::deserialize<std::optional<IterationType>>(is);
     auto iter = su::deserialize<std::optional<IterationType>>(is);
@@ -69,7 +73,9 @@ RequestPerfMetrics Serialization::deserializeRequestPerfMetrics(std::istream& is
         arrivalTime, firstScheduledTime, firstTokenTime, lastTokenTime, kvCacheTransferStart, kvCacheTransferEnd};
     RequestPerfMetrics::KvCacheMetrics kvCacheMetrics{
         numTotalAllocatedBlocks, numNewAllocatedBlocks, numReusedBlocks, numMissedBlocks, kvCacheHitRate};
-    return RequestPerfMetrics{timingMetrics, kvCacheMetrics, firstIter, lastIter, iter};
+    RequestPerfMetrics::SpeculativeDecodingMetrics specDecMetrics{
+        acceptanceRate, totalAcceptedDraftTokens, totalDraftTokens};
+    return RequestPerfMetrics{timingMetrics, kvCacheMetrics, specDecMetrics, firstIter, lastIter, iter};
 }
 
 void Serialization::serialize(RequestPerfMetrics const& metrics, std::ostream& os)
@@ -86,6 +92,10 @@ void Serialization::serialize(RequestPerfMetrics const& metrics, std::ostream& o
     su::serialize(metrics.kvCacheMetrics.numReusedBlocks, os);
     su::serialize(metrics.kvCacheMetrics.numMissedBlocks, os);
     su::serialize(metrics.kvCacheMetrics.kvCacheHitRate, os);
+
+    su::serialize(metrics.speculativeDecoding.acceptanceRate, os);
+    su::serialize(metrics.speculativeDecoding.totalAcceptedDraftTokens, os);
+    su::serialize(metrics.speculativeDecoding.totalDraftTokens, os);
 
     su::serialize(metrics.firstIter, os);
     su::serialize(metrics.lastIter, os);
@@ -108,6 +118,10 @@ size_t Serialization::serializedSize(RequestPerfMetrics const& metrics)
     totalSize += su::serializedSize(metrics.kvCacheMetrics.numReusedBlocks);
     totalSize += su::serializedSize(metrics.kvCacheMetrics.numMissedBlocks);
     totalSize += su::serializedSize(metrics.kvCacheMetrics.kvCacheHitRate);
+
+    totalSize += su::serializedSize(metrics.speculativeDecoding.acceptanceRate);
+    totalSize += su::serializedSize(metrics.speculativeDecoding.totalAcceptedDraftTokens);
+    totalSize += su::serializedSize(metrics.speculativeDecoding.totalDraftTokens);
 
     totalSize += su::serializedSize(metrics.firstIter);
     totalSize += su::serializedSize(metrics.lastIter);
@@ -136,10 +150,11 @@ SamplingConfig Serialization::deserializeSamplingConfig(std::istream& is)
     auto earlyStopping = su::deserialize<std::optional<SizeType32>>(is);
     auto noRepeatNgramSize = su::deserialize<std::optional<SizeType32>>(is);
     auto numReturnSequences = su::deserialize<std::optional<SizeType32>>(is);
+    auto minP = su::deserialize<std::optional<FloatType>>(is);
 
     return SamplingConfig{beamWidth, topK, topP, topPMin, topPResetIds, topPDecay, randomSeed, temperature, minLength,
         beamSearchDiversityRate, repetitionPenalty, presencePenalty, frequencyPenalty, lengthPenalty, earlyStopping,
-        noRepeatNgramSize, numReturnSequences};
+        noRepeatNgramSize, numReturnSequences, minP};
 }
 
 void Serialization::serialize(SamplingConfig const& config, std::ostream& os)
@@ -161,6 +176,7 @@ void Serialization::serialize(SamplingConfig const& config, std::ostream& os)
     su::serialize(config.mEarlyStopping, os);
     su::serialize(config.mNoRepeatNgramSize, os);
     su::serialize(config.mNumReturnSequences, os);
+    su::serialize(config.mMinP, os);
 }
 
 size_t Serialization::serializedSize(SamplingConfig const& config)
@@ -183,6 +199,7 @@ size_t Serialization::serializedSize(SamplingConfig const& config)
     totalSize += su::serializedSize(config.mEarlyStopping);
     totalSize += su::serializedSize(config.mNoRepeatNgramSize);
     totalSize += su::serializedSize(config.mNumReturnSequences);
+    totalSize += su::serializedSize(config.mMinP);
     return totalSize;
 }
 
@@ -891,59 +908,40 @@ size_t serializedSize(AdditionalOutput const& additionalOutput)
 // ExecutorConfig
 ExecutorConfig Serialization::deserializeExecutorConfig(std::istream& is)
 {
-    auto maxBeamWidth
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxBeamWidth), ExecutorConfig>>(is);
-    auto maxBatchSize
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxBatchSize), ExecutorConfig>>(is);
-    auto maxNumTokens
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxNumTokens), ExecutorConfig>>(is);
-    auto schedulerConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getSchedulerConfig), ExecutorConfig>>(is);
-    auto kvCacheConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getKvCacheConfig), ExecutorConfig>>(is);
-    auto enableChunkedContext
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getEnableChunkedContext), ExecutorConfig>>(is);
-    auto normalizeLogProbs
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getNormalizeLogProbs), ExecutorConfig>>(is);
+    auto maxBeamWidth = su::deserializeWithGetterType<decltype(&ExecutorConfig::getMaxBeamWidth)>(is);
+    auto maxBatchSize = su::deserializeWithGetterType<decltype(&ExecutorConfig::getMaxBatchSize)>(is);
+    auto maxNumTokens = su::deserializeWithGetterType<decltype(&ExecutorConfig::getMaxNumTokens)>(is);
+    auto schedulerConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getSchedulerConfig)>(is);
+    auto kvCacheConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getKvCacheConfig)>(is);
+    auto enableChunkedContext = su::deserializeWithGetterType<decltype(&ExecutorConfig::getEnableChunkedContext)>(is);
+    auto normalizeLogProbs = su::deserializeWithGetterType<decltype(&ExecutorConfig::getNormalizeLogProbs)>(is);
     auto iterStatsMaxIterations
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getIterStatsMaxIterations), ExecutorConfig>>(
-            is);
-    auto requestStatsMaxIterations = su::deserialize<
-        std::invoke_result_t<decltype(&ExecutorConfig::getRequestStatsMaxIterations), ExecutorConfig>>(is);
-    auto batchingType
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getBatchingType), ExecutorConfig>>(is);
-    auto parallelConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getParallelConfig), ExecutorConfig>>(is);
-    auto peftCacheConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getPeftCacheConfig), ExecutorConfig>>(is);
-    auto decodingConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDecodingConfig), ExecutorConfig>>(is);
-    auto gpuWeightsPercent
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGpuWeightsPercent), ExecutorConfig>>(is);
-    auto maxQueueSize
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxQueueSize), ExecutorConfig>>(is);
-    auto extendedRuntimePerfKnobConfig = su::deserialize<
-        std::invoke_result_t<decltype(&ExecutorConfig::getExtendedRuntimePerfKnobConfig), ExecutorConfig>>(is);
-    auto debugConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getDebugConfig), ExecutorConfig>>(is);
-    auto recvPollPeriodMs
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getRecvPollPeriodMs), ExecutorConfig>>(is);
+        = su::deserializeWithGetterType<decltype(&ExecutorConfig::getIterStatsMaxIterations)>(is);
+    auto requestStatsMaxIterations
+        = su::deserializeWithGetterType<decltype(&ExecutorConfig::getRequestStatsMaxIterations)>(is);
+    auto batchingType = su::deserializeWithGetterType<decltype(&ExecutorConfig::getBatchingType)>(is);
+    auto parallelConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getParallelConfig)>(is);
+    auto peftCacheConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getPeftCacheConfig)>(is);
+    auto decodingConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getDecodingConfig)>(is);
+    auto gpuWeightsPercent = su::deserializeWithGetterType<decltype(&ExecutorConfig::getGpuWeightsPercent)>(is);
+    auto maxQueueSize = su::deserializeWithGetterType<decltype(&ExecutorConfig::getMaxQueueSize)>(is);
+    auto extendedRuntimePerfKnobConfig
+        = su::deserializeWithGetterType<decltype(&ExecutorConfig::getExtendedRuntimePerfKnobConfig)>(is);
+    auto debugConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getDebugConfig)>(is);
+    auto recvPollPeriodMs = su::deserializeWithGetterType<decltype(&ExecutorConfig::getRecvPollPeriodMs)>(is);
     auto maxSeqIdleMicroseconds
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getMaxSeqIdleMicroseconds), ExecutorConfig>>(
-            is);
-    auto specDecConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getSpecDecConfig), ExecutorConfig>>(is);
-    auto guidedDecodingConfig
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getGuidedDecodingConfig), ExecutorConfig>>(is);
-    auto additionalOutputNames
-        = su::deserialize<std::invoke_result_t<decltype(&ExecutorConfig::getAdditionalOutputNames), ExecutorConfig>>(
-            is);
+        = su::deserializeWithGetterType<decltype(&ExecutorConfig::getMaxSeqIdleMicroseconds)>(is);
+    auto specDecConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getSpecDecConfig)>(is);
+    auto guidedDecodingConfig = su::deserializeWithGetterType<decltype(&ExecutorConfig::getGuidedDecodingConfig)>(is);
+    auto additionalOutputNames = su::deserializeWithGetterType<decltype(&ExecutorConfig::getAdditionalOutputNames)>(is);
+    auto gatherGenerationLogits
+        = su::deserializeWithGetterType<decltype(&ExecutorConfig::getGatherGenerationLogits)>(is);
 
     return ExecutorConfig{maxBeamWidth, schedulerConfig, kvCacheConfig, enableChunkedContext, normalizeLogProbs,
         iterStatsMaxIterations, requestStatsMaxIterations, batchingType, maxBatchSize, maxNumTokens, parallelConfig,
         peftCacheConfig, std::nullopt, decodingConfig, gpuWeightsPercent, maxQueueSize, extendedRuntimePerfKnobConfig,
         debugConfig, recvPollPeriodMs, maxSeqIdleMicroseconds, specDecConfig, guidedDecodingConfig,
-        additionalOutputNames};
+        additionalOutputNames, gatherGenerationLogits};
 }
 
 size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
@@ -975,6 +973,7 @@ size_t Serialization::serializedSize(ExecutorConfig const& executorConfig)
     totalSize += su::serializedSize(executorConfig.getSpecDecConfig());
     totalSize += su::serializedSize(executorConfig.getGuidedDecodingConfig());
     totalSize += su::serializedSize(executorConfig.getAdditionalOutputNames());
+    totalSize += su::serializedSize(executorConfig.getGatherGenerationLogits());
 
     return totalSize;
 }
@@ -1006,6 +1005,7 @@ void Serialization::serialize(ExecutorConfig const& executorConfig, std::ostream
     su::serialize(executorConfig.getSpecDecConfig(), os);
     su::serialize(executorConfig.getGuidedDecodingConfig(), os);
     su::serialize(executorConfig.getAdditionalOutputNames(), os);
+    su::serialize(executorConfig.getGatherGenerationLogits(), os);
 }
 
 // KvCacheConfig
@@ -1297,8 +1297,10 @@ EagleConfig Serialization::deserializeEagleConfig(std::istream& is)
     auto eagleChoices = su::deserialize<std::optional<EagleChoices>>(is);
     auto isGreedySampling = su::deserialize<bool>(is);
     auto posteriorThreshold = su::deserialize<std::optional<float>>(is);
+    auto useDynamicTree = su::deserialize<bool>(is);
+    auto dynamicTreeMaxTopK = su::deserialize<std::optional<SizeType32>>(is);
 
-    return EagleConfig{eagleChoices, isGreedySampling, posteriorThreshold};
+    return EagleConfig{eagleChoices, isGreedySampling, posteriorThreshold, useDynamicTree, dynamicTreeMaxTopK};
 }
 
 void Serialization::serialize(EagleConfig const& eagleConfig, std::ostream& os)
@@ -1306,6 +1308,8 @@ void Serialization::serialize(EagleConfig const& eagleConfig, std::ostream& os)
     su::serialize(eagleConfig.getEagleChoices(), os);
     su::serialize(eagleConfig.isGreedySampling(), os);
     su::serialize(eagleConfig.getPosteriorThreshold(), os);
+    su::serialize(eagleConfig.useDynamicTree(), os);
+    su::serialize(eagleConfig.getDynamicTreeMaxTopK(), os);
 }
 
 size_t Serialization::serializedSize(EagleConfig const& eagleConfig)
@@ -1314,6 +1318,9 @@ size_t Serialization::serializedSize(EagleConfig const& eagleConfig)
     totalSize += su::serializedSize(eagleConfig.getEagleChoices());
     totalSize += su::serializedSize(eagleConfig.isGreedySampling());
     totalSize += su::serializedSize(eagleConfig.getPosteriorThreshold());
+    totalSize += su::serializedSize(eagleConfig.useDynamicTree());
+    totalSize += su::serializedSize(eagleConfig.getDynamicTreeMaxTopK());
+
     return totalSize;
 }
 
@@ -1339,17 +1346,10 @@ size_t Serialization::serializedSize(SpeculativeDecodingConfig const& specDecCon
 // GuidedDecodingConfig
 GuidedDecodingConfig Serialization::deserializeGuidedDecodingConfig(std::istream& is)
 {
-    auto backend
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getBackend), GuidedDecodingConfig>>(is);
-    auto encodedVocab
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getEncodedVocab), GuidedDecodingConfig>>(
-            is);
-    auto tokenizerStr
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getTokenizerStr), GuidedDecodingConfig>>(
-            is);
-    auto stopTokenIds
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingConfig::getStopTokenIds), GuidedDecodingConfig>>(
-            is);
+    auto backend = su::deserializeWithGetterType<decltype(&GuidedDecodingConfig::getBackend)>(is);
+    auto encodedVocab = su::deserializeWithGetterType<decltype(&GuidedDecodingConfig::getEncodedVocab)>(is);
+    auto tokenizerStr = su::deserializeWithGetterType<decltype(&GuidedDecodingConfig::getTokenizerStr)>(is);
+    auto stopTokenIds = su::deserializeWithGetterType<decltype(&GuidedDecodingConfig::getStopTokenIds)>(is);
     return GuidedDecodingConfig(backend, encodedVocab, tokenizerStr, stopTokenIds);
 }
 
@@ -1374,12 +1374,8 @@ size_t Serialization::serializedSize(GuidedDecodingConfig const& guidedDecodingC
 // GuidedDecodingParams
 GuidedDecodingParams Serialization::deserializeGuidedDecodingParams(std::istream& is)
 {
-
-    auto guideType
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingParams::getGuideType), GuidedDecodingParams>>(
-            is);
-    auto guide
-        = su::deserialize<std::invoke_result_t<decltype(&GuidedDecodingParams::getGuide), GuidedDecodingParams>>(is);
+    auto guideType = su::deserializeWithGetterType<decltype(&GuidedDecodingParams::getGuideType)>(is);
+    auto guide = su::deserializeWithGetterType<decltype(&GuidedDecodingParams::getGuide)>(is);
     return GuidedDecodingParams(guideType, guide);
 }
 
@@ -1496,14 +1492,12 @@ size_t Serialization::serializedSize(DecodingConfig const& decodingConfig)
 // DebugConfig
 DebugConfig Serialization::deserializeDebugConfig(std::istream& is)
 {
-    auto debugInputTensors
-        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugInputTensors), DebugConfig>>(is);
-    auto debugOutputTensors
-        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugOutputTensors), DebugConfig>>(is);
+    auto debugInputTensors = su::deserializeWithGetterType<decltype(&DebugConfig::getDebugInputTensors)>(is);
+    auto debugOutputTensors = su::deserializeWithGetterType<decltype(&DebugConfig::getDebugOutputTensors)>(is);
     auto debugTensorNames = su::deserialize<std::remove_cv_t<
         std::remove_reference_t<std::invoke_result_t<decltype(&DebugConfig::getDebugTensorNames), DebugConfig>>>>(is);
     auto debugTensorsMaxIterations
-        = su::deserialize<std::invoke_result_t<decltype(&DebugConfig::getDebugTensorsMaxIterations), DebugConfig>>(is);
+        = su::deserializeWithGetterType<decltype(&DebugConfig::getDebugTensorsMaxIterations)>(is);
 
     return DebugConfig{debugInputTensors, debugOutputTensors, debugTensorNames, debugTensorsMaxIterations};
 }

@@ -436,7 +436,6 @@ private:
         if (bias)
         {
             TLLM_CHECK(bias.value().getShape().size() == 1);
-            TLLM_CHECK(bias.value().getDataType() == DataType::kFP32);
         }
         return bias;
     }

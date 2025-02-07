@@ -14,6 +14,7 @@
 
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/batch_manager/logitsPostProcessor.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
@@ -78,6 +79,7 @@ public:
     [[nodiscard]] virtual SizeType32 getVocabSizePadded() const = 0;
     [[nodiscard]] virtual SizeType32 getMaxDraftLen() const = 0;
     [[nodiscard]] virtual SizeType32 getNumMicroBatches() const = 0;
+    [[nodiscard]] virtual SizeType32 getOperatingBeamWidth() const = 0;
     [[nodiscard]] virtual nvinfer1::DataType getLogitDataType() const = 0;
     [[nodiscard]] virtual runtime::WorldConfig const& getWorldConfig() const = 0;
     [[nodiscard]] virtual runtime::ModelConfig const& getModelConfig() const = 0;
@@ -85,6 +87,7 @@ public:
     [[nodiscard]] virtual runtime::BufferManager::CudaStreamPtr getRuntimeStreamPtr() const = 0;
     [[nodiscard]] virtual IterationType getIterCounter() const noexcept = 0;
     [[nodiscard]] virtual bool hasSpeculativeDecodingFastLogits() const noexcept = 0;
+    [[nodiscard]] virtual bool getGatherGenerationLogits() const = 0;
     [[nodiscard]] virtual nvinfer1::DataType getTensorDataType(std::string const& name) const = 0;
     [[nodiscard]] virtual nvinfer1::Dims getTensorShape(std::string const& name) const = 0;
 
@@ -98,11 +101,7 @@ public:
 
     [[nodiscard]] virtual DebugTensorsPerIteration getCurrentDebugTensors() const = 0;
 
-    using LogitsPostProcessorBatched = std::function<void(std::vector<batch_manager::LlmRequest::RequestIdType> const&,
-        std::vector<batch_manager::LlmRequest::TensorPtr>&,
-        std::vector<std::reference_wrapper<batch_manager::LlmRequest::BeamTokens const>> const&,
-        runtime::BufferManager::CudaStreamPtr const&,
-        std::vector<std::optional<batch_manager::LlmRequest::RequestIdType>> const&)>;
+    using LogitsPostProcessorBatched = tensorrt_llm::batch_manager::LogitsPostProcessor::LogitsPostProcessorBatched;
 
     virtual void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched)
         = 0;

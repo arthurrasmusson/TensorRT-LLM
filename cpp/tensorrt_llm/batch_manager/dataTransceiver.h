@@ -34,7 +34,7 @@ public:
     /// @param comm The communicator associated with this data transmission.
     virtual void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
         std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
-        SizeType32 selfIdx, CacheState const& destConfig)
+        SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager)
         = 0;
 
     /// @brief Accept transmitted data with unformatting actions.

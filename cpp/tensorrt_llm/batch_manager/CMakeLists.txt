@@ -20,19 +20,25 @@ set(SRCS
     cacheFormatter.cpp
     cacheTransceiver.cpp
     capacityScheduler.cpp
+    createNewDecoderRequests.cpp
     contextProgress.cpp
     dataTransceiver.cpp
     decoderBuffers.cpp
     encoderBuffers.cpp
+    generateRequestOptions.cpp
     GptManager.cpp
     guidedDecoder.cpp
-    kvCacheUtils.cpp
+    handleContextLogits.cpp
+    handleGenerationLogits.cpp
     inferenceRequest.cpp
     kvCacheManager.cpp
     kvCacheEventManager.cpp
     kvCacheTransferManager.cpp
     kvCacheUtils.cpp
+    llmRequest.cpp
+    logitsPostProcessor.cpp
     loraBuffers.cpp
+    makeDecodingBatchInputOutput.cpp
     medusaBuffers.cpp
     microBatchScheduler.cpp
     mpiDataTransceiver.cpp
@@ -50,6 +56,7 @@ set(SRCS
     trtGptModelV1.cpp
     utils/debugUtils.cpp
     utils/inflightBatchingUtils.cpp
+    utils/logitsThread.cpp
     utils/staticThreadPool.cpp
     evictionPolicy.cpp)
 

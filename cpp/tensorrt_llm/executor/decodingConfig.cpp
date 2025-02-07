@@ -140,18 +140,26 @@ bool LookaheadDecodingConfig::isLE(LookaheadDecodingConfig const& that) const
         && mVerificationSetSize <= that.mVerificationSetSize;
 }
 
-EagleConfig::EagleConfig(
-    std::optional<EagleChoices> eagleChoices, bool greedySampling, std::optional<float> posteriorThreshold)
+EagleConfig::EagleConfig(std::optional<EagleChoices> eagleChoices, bool greedySampling,
+    std::optional<float> posteriorThreshold, bool useDynamicTree, std::optional<SizeType32> dynamicTreeMaxTopK)
     : mEagleChoices(std::move(eagleChoices))
     , mGreedySampling(greedySampling)
     , mPosteriorThreshold(checkPosteriorValue(posteriorThreshold))
+    , mUseDynamicTree(useDynamicTree)
+    , mDynamicTreeMaxTopK(dynamicTreeMaxTopK)
 {
+    if (useDynamicTree)
+    {
+        TLLM_CHECK_WITH_INFO(eagleChoices.has_value() == false,
+            "When dynamic tree is enabled (for Eagle-2), eagle choices should not be set.");
+    }
 }
 
 bool EagleConfig::operator==(EagleConfig const& other) const
 {
     return mEagleChoices == other.mEagleChoices && mGreedySampling == other.mGreedySampling
-        && mPosteriorThreshold == other.mPosteriorThreshold;
+        && mPosteriorThreshold == other.mPosteriorThreshold && mUseDynamicTree == other.mUseDynamicTree
+        && mDynamicTreeMaxTopK == other.mDynamicTreeMaxTopK;
 }
 
 std::optional<EagleChoices> EagleConfig::getEagleChoices() const
@@ -176,6 +184,16 @@ std::optional<float> const& EagleConfig::checkPosteriorValue(std::optional<float
         TLLM_CHECK(0.f <= value.value() && value.value() < 1.f);
     }
     return value;
+}
+
+bool EagleConfig::useDynamicTree() const
+{
+    return mUseDynamicTree;
+}
+
+std::optional<SizeType32> EagleConfig::getDynamicTreeMaxTopK() const
+{
+    return mDynamicTreeMaxTopK;
 }
 
 DecodingConfig::DecodingConfig(std::optional<DecodingMode> decodingMode,

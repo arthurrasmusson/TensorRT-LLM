@@ -10,30 +10,12 @@
  * its affiliates is strictly prohibited.
  */
 #include "modelSpec.h"
+#include "tensorrt_llm/common/dataType.h"
 
 #include <numeric>
 
 namespace tensorrt_llm::testing
 {
-std::string ModelSpec::getDtypeString() const
-{
-    switch (mDataType)
-    {
-    case nvinfer1::DataType::kFLOAT: return "fp32"; break;
-    case nvinfer1::DataType::kHALF: return "fp16"; break;
-    case nvinfer1::DataType::kINT8: return "int8"; break;
-    case nvinfer1::DataType::kINT32: return "int32"; break;
-    case nvinfer1::DataType::kBOOL: return "bool"; break;
-    case nvinfer1::DataType::kUINT8: return "uint8"; break;
-    case nvinfer1::DataType::kFP8: return "fp8"; break;
-    case nvinfer1::DataType::kBF16: return "bf16"; break;
-    case nvinfer1::DataType::kINT64: return "int64"; break;
-    case nvinfer1::DataType::kINT4: return "int4"; break;
-    default: throw std::runtime_error("Unsupported data type"); break;
-    }
-
-    return "";
-}
 
 std::string ModelSpec::getQuantMethodString() const
 {
@@ -310,6 +292,11 @@ std::string ModelSpec::getLogProbsFile() const
 {
     return mOtherModelSpecToCompare ? mOtherModelSpecToCompare->getResultsFileInternal(OutputContentType::kLOG_PROBS)
                                     : getResultsFileInternal(OutputContentType::kLOG_PROBS);
+}
+
+std::string ModelSpec::getDtypeString() const
+{
+    return tensorrt_llm::common::getDtypeString(mDataType);
 }
 
 } // namespace tensorrt_llm::testing

@@ -77,8 +77,10 @@ void GuidedDecoder::build(ScheduledRequests const& scheduledRequests)
                     continue;
                 }
                 auto const seqSlot = llmReq->mSeqSlot.value();
-                if (llmReq->isContextInitState() && llmReq->isFirstContextChunk())
+                if (llmReq->isContextInitState()
+                    && llmReq->getContextCurrentPosition() == llmReq->getPrepopulatedPromptLen())
                 {
+                    // The request is in the first context forward step (considering kv cache reuse).
                     auto const& guideType = guidedDecodingParams->getGuideType();
                     auto const& guide = guidedDecodingParams->getGuide();
                     if (guideType == executor::GuidedDecodingParams::GuideType::kJSON)
@@ -106,8 +108,13 @@ void GuidedDecoder::build(ScheduledRequests const& scheduledRequests)
                 }
                 else if (llmReq->isGenerationInProgressState())
                 {
+                    // The request is in a generation forward step.
                     // Currently, guided decoding does not support with beam search.
                     mXGrammarMatchers.at(seqSlot)->AcceptToken(llmReq->getLastTokens(0));
+                }
+                else
+                {
+                    continue;
                 }
 
                 // Fill the bitmask on host and asynchorously copy to device using mCopyBufferManager.

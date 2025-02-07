@@ -95,6 +95,7 @@ public:
         , mSelfState{std::move(selfCacheState),
               executor::kv_cache::CommState{
                   tensorrt_llm::mpi::getWorldRanks(tensorrt_llm::mpi::MpiComm::session()), selfIndex}}
+        , mBufferManager{std::make_shared<runtime::CudaStream>()}
     {
         mFormatters.emplace_back(std::move(formatters)...);
         TLLM_CHECK(mFormatters.size() == 1);
@@ -135,6 +136,7 @@ private:
     std::vector<TFormatter> mFormatters;
     executor::DataTransceiverState mSelfState;
     std::mutex mMtxForMap;
+    runtime::BufferManager mBufferManager;
 };
 
 class MpiDataReceiver : public DataReceiver

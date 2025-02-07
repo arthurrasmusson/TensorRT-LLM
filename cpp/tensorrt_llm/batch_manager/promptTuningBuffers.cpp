@@ -17,7 +17,7 @@
 namespace tensorrt_llm::batch_manager
 {
 
-void PromptTuningBuffers::create(SizeType32 maxBatchSize, runtime::BufferManager const& manager,
+PromptTuningBuffers::PromptTuningBuffers(SizeType32 maxBatchSize, runtime::BufferManager const& manager,
     runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
 {
     auto maxPromptEmbeddingTableSize = modelConfig.getMaxPromptEmbeddingTableSize();
@@ -133,6 +133,10 @@ void PromptTuningBuffers::fill(RequestVector const& contextRequests, RequestVect
                 auto const promptEmbeddingTableSlice = runtime::ITensor::slice(
                     mPromptTuningParams.embeddingTable, batchIdx * mMaxPromptVocabSize, reqPromptVocabSize);
                 manager.copy(*reqPromptEmbeddingTable, *promptEmbeddingTableSlice);
+                // TODO:       src: 2007040 (llmReq->getPromptEmbeddingTable()) != dst: 1003520 (reqPromptVocabSize)
+                //                                                                      (original shape passed from
+                //                                                                      python == 196 * 5120, fp16)
+                // VILA mode 1 , 2 images in one request
             }
             ++batchIdx;
         }

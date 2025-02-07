@@ -17,7 +17,8 @@ namespace tensorrt_llm::executor
 PeftCacheConfig::PeftCacheConfig(SizeType32 numHostModuleLayer, SizeType32 numDeviceModuleLayer,
     SizeType32 optimalAdapterSize, SizeType32 maxAdapterSize, SizeType32 numPutWorkers, SizeType32 numEnsureWorkers,
     SizeType32 numCopyStreams, SizeType32 maxPagesPerBlockHost, SizeType32 maxPagesPerBlockDevice,
-    std::optional<FloatType> const& deviceCachePercent, std::optional<size_t> const& hostCacheSize)
+    std::optional<FloatType> const& deviceCachePercent, std::optional<size_t> const& hostCacheSize,
+    std::optional<std::string> const& loraPrefetchDir)
     : mNumHostModuleLayer(numHostModuleLayer)
     , mNumDeviceModuleLayer(numDeviceModuleLayer)
     , mOptimalAdapterSize(optimalAdapterSize)
@@ -29,6 +30,7 @@ PeftCacheConfig::PeftCacheConfig(SizeType32 numHostModuleLayer, SizeType32 numDe
     , mMaxPagesPerBlockDevice(maxPagesPerBlockDevice)
     , mDeviceCachePercent(deviceCachePercent)
     , mHostCacheSize(hostCacheSize)
+    , mLoraPrefetchDir(loraPrefetchDir)
 {
 }
 
@@ -39,7 +41,7 @@ bool PeftCacheConfig::operator==(PeftCacheConfig const& other) const
         && mNumPutWorkers == other.mNumPutWorkers && mNumEnsureWorkers == other.mNumEnsureWorkers
         && mNumCopyStreams == other.mNumCopyStreams && mMaxPagesPerBlockHost == other.mMaxPagesPerBlockHost
         && mMaxPagesPerBlockDevice == other.mMaxPagesPerBlockDevice && mDeviceCachePercent == other.mDeviceCachePercent
-        && mHostCacheSize == other.mHostCacheSize;
+        && mHostCacheSize == other.mHostCacheSize && mLoraPrefetchDir == other.mLoraPrefetchDir;
 }
 
 SizeType32 PeftCacheConfig::getNumHostModuleLayer() const
@@ -96,4 +98,10 @@ std::optional<size_t> PeftCacheConfig::getHostCacheSize() const
 {
     return mHostCacheSize;
 }
+
+std::optional<std::string> PeftCacheConfig::getLoraPrefetchDir() const
+{
+    return mLoraPrefetchDir;
+}
+
 } // namespace tensorrt_llm::executor

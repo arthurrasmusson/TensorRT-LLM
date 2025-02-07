@@ -72,7 +72,8 @@ void MpiComm::sendRequestInfo(RequestInfo const& info, executor::kv_cache::Proce
                              mSelfState.getCacheState().value(), info.getTransState().getCacheState().value()),
         "Disagg server does not currently support these cacheState.");
     auto peerRelativeRanks = executor::kv_cache::targetIRanks(info.getTransState().getCacheState().value(),
-        mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx());
+        mSelfState.getCacheState().value(), mSelfState.getCommState().value().getSelfIdx())
+                                 .mIRanks;
     int peerIdx = std::distance(peerRelativeRanks.begin(),
         std::find(
             peerRelativeRanks.begin(), peerRelativeRanks.end(), info.getTransState().getCommState()->getSelfIdx()));
@@ -107,7 +108,7 @@ void MpiDataSender::sendSync(LlmRequest const& llmRequest)
     }
     auto&& dataTransceiverState = reqToComm.at(0).second;
     formatter->formatOutput(mComm, llmRequest, std::move(processInfos), mSelfState.getCacheState().value(),
-        mSelfState.getCommState().value().getSelfIdx(), dataTransceiverState.getCacheState().value());
+        mSelfState.getCommState().value().getSelfIdx(), dataTransceiverState.getCacheState().value(), mBufferManager);
 }
 
 void MpiDataReceiver::sendRequestInfo(LlmRequest const& llmRequest)

@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+#ifndef TOP_LEVEL_DIR
+#error "Define TOP_LEVEL_DIR"
+#endif
 
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
 #include "tensorrt_llm/executor/executor.h"
@@ -26,6 +27,9 @@
 #include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include <filesystem>
 #include <vector>
@@ -189,7 +193,7 @@ void runEncoderTest(std::unique_ptr<BufferManager>& bufferManager, ModelConfig c
             for (auto const& req : requestList)
             {
                 ASSERT_TRUE(req->getEncoderOutputHost()) << "Encoder output is empty!";
-                EXPECT_EQ(req->mState, LlmRequestState::kCONTEXT_INIT);
+                EXPECT_EQ(req->getState(), LlmRequestState::kCONTEXT_INIT);
                 auto actualOut = bufferCast<half>(*(req->getEncoderOutputHost()));
                 auto unequalFraction = arrayEqual(curOutPtr, actualOut, *curLengthPtr);
                 EXPECT_TRUE(unequalFraction == 0)

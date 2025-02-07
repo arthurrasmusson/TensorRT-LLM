@@ -547,4 +547,23 @@ T deserialize(std::istream& is)
     }
 }
 
+// https://stackoverflow.com/a/75741832
+template <typename T>
+struct method_return_type;
+
+template <typename ReturnT, typename ClassT, typename... Args>
+struct method_return_type<ReturnT (ClassT::*)(Args...) const>
+{
+    using type = ReturnT;
+};
+
+template <typename MethodT>
+using method_return_type_t = typename method_return_type<MethodT>::type;
+
+template <typename ObjectMethodT>
+auto deserializeWithGetterType(std::istream& is)
+{
+    return deserialize<method_return_type_t<ObjectMethodT>>(is);
+}
+
 } // namespace tensorrt_llm::executor::serialize_utils

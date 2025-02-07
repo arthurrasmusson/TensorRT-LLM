@@ -135,8 +135,9 @@ private:
             mSender->release(id);
             resp.mPromise.set_value();
         }
-        catch (...)
+        catch (std::exception const& e)
         {
+            TLLM_LOG_ERROR("Exception in sendAndRemoveResponse: %s ", e.what());
             resp.mPromise.set_exception(std::current_exception());
         }
     }
@@ -410,6 +411,11 @@ private:
                         lck, [&resource] { return !resource.mRequestsQueue.empty() || resource.mTerminate; });
                     if (resource.mTerminate)
                     {
+                        if (!resource.mRequestsQueue.empty())
+                        {
+                            TLLM_LOG_WARNING("There still has %ld requests in  mRequestsQueue, but encounter Terminate",
+                                resource.mRequestsQueue.size());
+                        }
                         break;
                     }
                     requestAndPromise = std::move(resource.mRequestsQueue.front());

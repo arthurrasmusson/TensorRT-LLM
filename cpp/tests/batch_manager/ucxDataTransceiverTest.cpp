@@ -312,7 +312,8 @@ public:
     void formatOutput(tle::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
         std::vector<tle::kv_cache::ProcessInfo> const& processInfos,
         tensorrt_llm::executor::kv_cache::CacheState const& selfConfig, SizeType32 selfIdx,
-        tensorrt_llm::executor::kv_cache::CacheState const& destConfig) override
+        tensorrt_llm::executor::kv_cache::CacheState const& destConfig,
+        tensorrt_llm::runtime::BufferManager const&) override
     {
         mockTransfer(llmRequest, comm, std::vector<tle::kv_cache::ProcessInfo>{std::move(processInfos)});
     }

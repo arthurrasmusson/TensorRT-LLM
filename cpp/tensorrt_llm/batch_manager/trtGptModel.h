@@ -36,7 +36,7 @@ class LlmRequest;
 namespace kv_cache_manager
 {
 class BaseKVCacheManager;
-}
+} // namespace kv_cache_manager
 
 class TrtGptModel : public executor::Model
 {
@@ -162,6 +162,18 @@ public:
             TLLM_LOG_INFO("TRTGptModel maxInputLen: %d = max_input_len (in trtllm-build args)", mMaxInputLen);
         }
 
+        // TODO: remove this when XQA JIT can be enabled for fp8 RNN models
+        if ((modelConfig.getQuantMode().hasFp8Qdq() || modelConfig.getQuantMode().hasFp8RowWise())
+            && modelConfig.isRnnBased())
+        {
+#if defined(_WIN32)
+            if (getenv("TRTLLM_ENABLE_XQA_JIT") == nullptr)
+                _putenv_s("TRTLLM_ENABLE_XQA_JIT", "0");
+#else
+            setenv("TRTLLM_ENABLE_XQA_JIT", "0", 0);
+#endif //_WIN32
+        }
+
         using tensorrt_llm::common::stl_utils::toString;
 
         TLLM_LOG_INFO("Capacity Scheduler Policy: %s",
@@ -212,12 +224,17 @@ public:
         return mMaxDraftLen;
     }
 
-    [[nodiscard]] virtual bool hasSpeculativeDecodingFastLogits() const noexcept override
+    [[nodiscard]] SizeType32 getOperatingBeamWidth() const override
+    {
+        return mMaxBeamWidth;
+    }
+
+    [[nodiscard]] bool hasSpeculativeDecodingFastLogits() const noexcept override
     {
         return false;
     }
 
-    [[nodiscard]] virtual bool hasGuidedDecoder() const noexcept override
+    [[nodiscard]] bool hasGuidedDecoder() const noexcept override
     {
         return false;
     }
@@ -283,8 +300,8 @@ protected:
         mMaxInputLen = maxInputLen;
     }
 
-    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::BaseKVCacheManager> getKVCacheManager() = 0;
-    [[nodiscard]] virtual std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> getKVCacheManager() const = 0;
+    [[nodiscard]] std::shared_ptr<kv_cache_manager::BaseKVCacheManager> getKVCacheManager() override = 0;
+    [[nodiscard]] std::shared_ptr<kv_cache_manager::BaseKVCacheManager const> getKVCacheManager() const override = 0;
 
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager> getPeftCacheManager() = 0;
     [[nodiscard]] virtual std::shared_ptr<BasePeftCacheManager const> getPeftCacheManager() const = 0;

@@ -48,12 +48,10 @@ public:
     void requestAndReceiveSync(LlmRequest* llmRequest);
     void requestAndReceiveAsync(LlmRequest* llmRequest);
 
-    void checkTranferStatus(bool blocking = false);
     void checkContextTransferStatus(bool blocking = false);
 
     void checkGenTransferStatus(int atLeastRequestNum = 0);
 
-    void checkGenTranferStatus(bool blocking = false, int atLeastBlockNum = 0);
     [[nodiscard]] bool checkGenTransferComplete() const;
 
 private:

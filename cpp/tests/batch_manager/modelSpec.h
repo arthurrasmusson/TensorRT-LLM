@@ -77,6 +77,12 @@ public:
         return *this;
     }
 
+    ModelSpec& setKVCacheReuse(bool kvCacheReuse)
+    {
+        mKVCacheReuse = kvCacheReuse;
+        return *this;
+    }
+
     ModelSpec& useDecoderPerRequest()
     {
         mDecoderPerRequest = true;
@@ -98,12 +104,6 @@ public:
     ModelSpec& useContextParallelism(int contextParallelism)
     {
         mCPSize = contextParallelism;
-        return *this;
-    }
-
-    ModelSpec& useRandomEndId()
-    {
-        mRandomEndId = true;
         return *this;
     }
 
@@ -299,17 +299,25 @@ public:
 
     [[nodiscard]] std::string getCapacitySchedulerString() const;
 
+    static ModelSpec getDefaultModelSpec()
+    {
+        static ModelSpec modelSpec{"input_tokens.npy", nvinfer1::DataType::kHALF};
+        modelSpec.useGptAttentionPlugin().setKVCacheType(KVCacheType::kPAGED).usePackedInput();
+
+        return modelSpec;
+    }
+
     std::string mInputFile;
     nvinfer1::DataType mDataType;
 
     bool mUseGptAttentionPlugin{false};
     bool mUsePackedInput{false};
     KVCacheType mKVCacheType{KVCacheType::kCONTINUOUS};
+    bool mKVCacheReuse{false};
     bool mDecoderPerRequest{false};
     int mPPSize{1};
     int mTPSize{1};
     int mCPSize{1};
-    bool mRandomEndId{false};
     int mMaxDraftTokens{0};
     bool mAcceptDraftByLogits{false};
     bool mUseMambaPlugin{false};

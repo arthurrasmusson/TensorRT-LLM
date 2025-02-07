@@ -21,6 +21,7 @@
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include <NvInferRuntimeBase.h>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -43,7 +44,7 @@ public:
 
     void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
         std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
-        SizeType32 selfIdx, CacheState const& destConfig) override;
+        SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager) override;
 
     void formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
         std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
@@ -54,11 +55,24 @@ public:
     [[nodiscard]] std::vector<SizeType32> getCounterparts(
         CacheState const& selfConfig, SizeType32 selfIdx, CacheState const& destConfig) const override
     {
-        return executor::kv_cache::targetIRanks(destConfig, selfConfig, selfIdx);
+        return executor::kv_cache::targetIRanks(destConfig, selfConfig, selfIdx).mIRanks;
     }
 
 private:
     BaseKVCacheManager* mCacheManager{};
+
+    struct ConcurrenceSendResource
+    {
+        std::unordered_map<int, runtime::ITensor::SharedPtr> mSendbuffers;
+        std::mutex mSendbuffersMutex;
+        std::condition_variable mSendbuffersCV;
+        std::atomic_int mConcurrence = 0;
+    };
+
+    ConcurrenceSendResource mConcurrenceSendResource;
+
+    std::unordered_map<std::string, runtime::ITensor::SharedPtr> mProcessToRecvBuffer;
+    std::mutex mProcessToRecvBufferMutex;
 };
 
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

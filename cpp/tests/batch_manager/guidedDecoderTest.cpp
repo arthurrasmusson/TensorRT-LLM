@@ -139,9 +139,9 @@ public:
         // Move request to generation phase
         contextRequests.pop_back();
         contextRequests.pop_back();
-        llmReq1->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
+        llmReq1->setState(LlmRequestState::kGENERATION_IN_PROGRESS);
         generationRequests.push_back(llmReq1);
-        llmReq2->mState = LlmRequestState::kGENERATION_IN_PROGRESS;
+        llmReq2->setState(LlmRequestState::kGENERATION_IN_PROGRESS);
         generationRequests.push_back(llmReq2);
         EXPECT_EQ(countRejected(1), mExpectedNumRejected[0]);
         EXPECT_EQ(countRejected(2), 0);

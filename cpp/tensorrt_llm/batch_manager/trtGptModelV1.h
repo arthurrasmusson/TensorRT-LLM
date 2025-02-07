@@ -78,6 +78,8 @@ public:
 
     [[nodiscard]] runtime::ModelConfig const& getModelConfig() const override;
 
+    [[nodiscard]] bool getGatherGenerationLogits() const override;
+
     [[nodiscard]] TrtGptModelType getModelType() const override
     {
         return TrtGptModelType::V1;
@@ -103,6 +105,11 @@ public:
 
     void setLogitsPostProcessorBatched(std::optional<LogitsPostProcessorBatched> logitsPostProcessorBatched) override;
     void setReplicateLogitsPostProcessor(bool replicateLogitsPostProcessor) override;
+
+    [[nodiscard]] static bool optionalParamsAreValid(
+        runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
+    [[nodiscard]] static TrtGptModelOptionalParams fixOptionalParams(
+        runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
 
     void resetIterationStats() override;
 

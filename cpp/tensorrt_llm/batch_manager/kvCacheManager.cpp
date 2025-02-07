@@ -76,7 +76,8 @@ std::vector<BlockKey> buildBlockKeys(
     LoraTaskIdType loraTaskId = hasLora ? llmRequest.getLoraTaskId().value() : 0;
     for (auto& uniqueTokens : blockedUniqueTokens)
     {
-        blockKeys.emplace_back(hasLora, loraTaskId, std::move(uniqueTokens));
+        blockKeys.emplace_back(
+            hasLora, llmRequest.getInputTokensExtraIds().has_value(), loraTaskId, std::move(uniqueTokens));
     }
     return blockKeys;
 }
@@ -210,6 +211,11 @@ void KVCacheBlock::setHash(size_t hash)
     mHash = hash;
 }
 
+void KVCacheBlock::setHash()
+{
+    mHash = BlockKeyHasher()(mBlockKey, mPrevBlockInSeq ? mPrevBlockInSeq->getHash() : 0);
+}
+
 size_t KVCacheBlock::getHash() const
 {
     return mHash;
@@ -220,7 +226,7 @@ VecUniqueTokens const& KVCacheBlock::getUniqueTokens() const
     return mBlockKey.uniqueTokens;
 }
 
-BlockPtr KVCacheBlock::getPrevBlock() const
+BlockPtr const& KVCacheBlock::getPrevBlock() const
 {
     return mPrevBlock;
 }
@@ -228,6 +234,16 @@ BlockPtr KVCacheBlock::getPrevBlock() const
 void KVCacheBlock::setPrevBlock(BlockPtr prevBlock)
 {
     mPrevBlock = std::move(prevBlock);
+}
+
+BlockPtr const& KVCacheBlock::getPrevBlockInSeq() const
+{
+    return mPrevBlockInSeq;
+}
+
+void KVCacheBlock::setPrevBlockInSeq(BlockPtr prevBlock)
+{
+    mPrevBlockInSeq = std::move(prevBlock);
 }
 
 void KVCacheBlock::addNextBlock(BlockKey const& blockKey, BlockPtr block)
@@ -364,21 +380,71 @@ BlockManager::~BlockManager()
     TLLM_LOG_DEBUG("BlockManager - cache hit rate:                      %.2f ", cacheHitRate);
 }
 
+void BlockManager::createBlockScalePools(SizeType32 quantBlockSize)
+{
+    auto num_pools = mPools.size();
+    for (size_t i = 0; i < num_pools; ++i)
+    {
+        auto& kv_pool = mPools[i];
+        TLLM_CHECK_WITH_INFO(kv_pool.blockSize % quantBlockSize == 0,
+            "Cannot use FP4 quantization since kv_pool.blockSize is not divisible by FP4 quantBlockSize.");
+
+        mPools.emplace_back(kv_pool.numKvHeads, kv_pool.numLayers, kv_pool.blockSize / quantBlockSize,
+            /*primaryPool=*/nullptr,
+            /*secondaryPool=*/nullptr,
+            /*containsBlockScales=*/true);
+    }
+}
+
 void BlockManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
 {
+    // TODO: make the block size configurable. Should we have an additional argument
+    // to specify FP4 related parameters (scale dtypes, etc)? This can also be passed
+    // in the constructor.
+    constexpr SizeType32 kQuantBlockSizeNVFP4 = 16;
+    constexpr nvinfer1::DataType kScaleDtypeNVFP4 = nvinfer1::DataType::kFP8;
+
+#ifdef ENABLE_FP4
+    if (dtype == nvinfer1::DataType::kFP4)
+    {
+        // It would be slightly better to move construction of these objects to the BlockManager
+        // constructor for consistency. We would have to do a bit of refactoring to pass
+        // the dtype in earlier.
+        createBlockScalePools(kQuantBlockSizeNVFP4);
+    }
+#endif
+
     // Allocate a memory pool backing the blocks for each numKvHeads
     // TODO(oargov): allocate pools in a single buffer and split it, to avoid fragmentation
     for (auto& pool : mPools)
     {
-        auto const blockSize = pool.numKvHeads * mSizePerHead * mTokensPerBlock;
+        auto blockSize = pool.blockSize;
+        auto poolDtype = pool.containsBlockScales ? kScaleDtypeNVFP4 : dtype;
+
+#ifdef ENABLE_FP4
+        auto const poolIsFP4 = poolDtype == nvinfer1::DataType::kFP4;
+#else
+        auto const poolIsFP4 = false;
+#endif
+
+        if (poolIsFP4)
+        {
+            TLLM_CHECK_WITH_INFO(blockSize % 2 == 0, "Block size must be divisible by 2 for FP4 KV cache.");
+            // Divide by 2. We can't create FP4 buffers directly, so we'll have to create a uint8 buffer with
+            // half the expected number of elements.
+            blockSize /= 2;
+            poolDtype = nvinfer1::DataType::kINT8;
+        }
+
         nvinfer1::Dims const cacheShape = ITensor::makeShape({mNumPrimaryBlocks, pool.numLayers, 2, blockSize});
 
         TLLM_LOG_DEBUG("[BlockManager] Allocating primary pool with %d blocks for %d layers with %d kv heads",
             mNumPrimaryBlocks, pool.numLayers, pool.numKvHeads);
+
         if (useUvm)
-            pool.primaryPtr = BufferManager::managed(cacheShape, dtype);
+            pool.primaryPtr = BufferManager::managed(cacheShape, poolDtype);
         else
-            pool.primaryPtr = mBufferManager.gpu(cacheShape, dtype);
+            pool.primaryPtr = mBufferManager.gpu(cacheShape, poolDtype);
 
         if (mNumSecondaryBlocks > 0)
         {
@@ -386,9 +452,26 @@ void BlockManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
                 = ITensor::makeShape({mNumSecondaryBlocks, pool.numLayers, 2, blockSize});
             TLLM_LOG_DEBUG("[BlockManager] Allocating secondary pool with %d blocks for %d layers with %d kv heads",
                 mNumSecondaryBlocks, pool.numLayers, pool.numKvHeads);
-            pool.secondaryPtr = BufferManager::pinned(cacheShapeOffload, dtype);
+            pool.secondaryPtr = BufferManager::pinned(cacheShapeOffload, poolDtype);
         }
     }
+}
+
+void BlockManager::releasePools()
+{
+    for (auto& pool : mPools)
+    {
+        if (pool.primaryPtr)
+        {
+            pool.primaryPtr->release();
+        }
+        if (pool.secondaryPtr)
+        {
+            pool.secondaryPtr->release();
+        }
+    }
+    mBufferManager.getStream().synchronize();
+    mBufferManager.memoryPoolTrimTo(0);
 }
 
 void BlockManager::startScheduling()
@@ -478,6 +561,45 @@ void KVCacheManager::setOffsets(tk::KVCacheIndex* offsetsPtr, nvinfer1::Dims con
             offsetsPtr[offsetIndex] = mBlockManager.getKOrVBlockIndex(blockId, xIdx, poolIdx);
         }
     }
+}
+
+void BlockManager::addBlockToHashMap(BlockPtr block)
+{
+    auto range = mContextBlocksByHash.equal_range(block->getHash());
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        if (it->second == block)
+        {
+            // TODO: change to assert when reused block is added only once
+            TLLM_LOG_DEBUG(
+                "Block %d by %zx exists", block->getBlockId(), block->getHash(), mContextBlocksByHash.size());
+            return;
+        }
+    }
+    TLLM_LOG_DEBUG(
+        "Add block %d by %zx, block n = %zu", block->getBlockId(), block->getHash(), mContextBlocksByHash.size());
+    mContextBlocksByHash.emplace(block->getHash(), std::move(block));
+}
+
+void BlockManager::removeBlockFromHashMap(BlockPtr block)
+{
+    if (mContextBlocksByHash.empty())
+    {
+        // Hash key not enabled
+        return;
+    }
+    auto range = mContextBlocksByHash.equal_range(block->getHash());
+    TLLM_LOG_DEBUG(
+        "Remove block %d by %zx, block n = %zu", block->getBlockId(), block->getHash(), mContextBlocksByHash.size());
+    for (auto it = range.first; it != range.second; ++it)
+    {
+        if (it->second == block)
+        {
+            mContextBlocksByHash.erase(it);
+            return;
+        }
+    }
+    TLLM_LOG_DEBUG("Trying to remove block %d by %zx that is not in hash map", block->getBlockId(), block->getHash());
 }
 
 void BlockManager::onboardBlock(BlockPtr offloadBlock)
@@ -574,6 +696,8 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
             }
             onboardBlock(matchingBlock);
             addBlockToAllBeams(matchingBlock, sequence);
+            // TODO: only add once for reused blocks
+            addBlockToHashMap(matchingBlock);
             searchRoot = matchingBlock;
             ++mReusedBlocks;
             if (!reusedBlockIds.count(matchingBlockId))
@@ -593,6 +717,14 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
             TLLM_LOG_DEBUG(
                 "BlockManager::loadOrAllocateBlocks - No match, allocated new block %d", freeBlock->getBlockId());
             searchRoot = nullptr; // no matching needed for following blocks
+            if (blockItr != blockKeys.end())
+            {
+                freeBlock->setBlockKey(
+                    *blockItr, blockItr->uniqueTokens.size() == static_cast<size_t>(mTokensPerBlock));
+                ++blockItr;
+            }
+            freeBlock->setHash();
+            addBlockToHashMap(freeBlock);
             ++mMissedBlocks;
         }
     }
@@ -609,10 +741,22 @@ SizeType32 BlockManager::loadOrAllocateBlocks(std::vector<BlockKey> const& block
                                               executor::KvCacheRetentionConfig::kDefaultRetentionPriority),
                 perBlockRetentions[bi].durationMs);
             addBlockToBeam(freeBlock, sequence, beamIdx);
+            if (blockItr != blockKeys.end())
+            {
+                freeBlock->setBlockKey(
+                    *blockItr, blockItr->uniqueTokens.size() == static_cast<size_t>(mTokensPerBlock));
+                ++blockItr;
+            }
+            freeBlock->setHash();
+            addBlockToHashMap(freeBlock);
             TLLM_LOG_DEBUG("BlockManager::loadOrAllocateBlocks - Beam %d. Allocated non-shared block %d for bi %d",
                 beamIdx, freeBlock->getBlockId(), bi);
         }
         ++mMissedBlocks;
+        if (blockItr != blockKeys.end())
+        {
+            ++blockItr;
+        }
     }
 
     return numMatchedTokens;
@@ -676,6 +820,14 @@ void BlockManager::addBlockToBeam(BlockPtr& block, GenerationRequest& sequence, 
 {
     auto const requestId = sequence.getRequestId();
     block->incRefCount();
+    if (sequence.getCacheBlockIds().at(beamIdx).size() == 0)
+    {
+        block->setPrevBlockInSeq(nullptr);
+    }
+    else
+    {
+        block->setPrevBlockInSeq(mAllBlocksById.at(sequence.getCacheBlockIds()[beamIdx].back()));
+    }
     sequence.addCacheBlock(beamIdx, block->getBlockId());
     mAllocatedBlocksPerSeq.at(requestId).push_back(block);
 }
@@ -755,15 +907,24 @@ void BlockManager::storeBlocks(std::vector<BlockKey> blockKeys, std::vector<KVCa
             needMatch = false; // no matching needed for following blocks
             block->setBlockKey(blockKey, static_cast<SizeType32>(blockKey.uniqueTokens.size()) == mTokensPerBlock);
             block->setPrevBlock(searchRoot);
+            block->setPrevBlockInSeq(searchRoot);
             searchRoot->addNextBlock(blockKey, block);
 
             // Sanity check. The list of stored blocks should be connected.
             TLLM_CHECK(storedBlocks.empty() || block->getPrevBlock() == storedBlocks.back());
 
             storedBlocks.push_back(block);
-
-            block->setHash(BlockKeyHasher()(blockKey, searchRoot->getHash()));
-
+            TLLM_CHECK(block->getPrevBlockInSeq() == nullptr
+                || block->getPrevBlockInSeq()->getHash() == searchRoot->getHash());
+            auto oldHash = block->getHash();
+            auto newHash = BlockKeyHasher()(blockKey, searchRoot->getHash());
+            if (oldHash != newHash)
+            {
+                TLLM_LOG_DEBUG("#%d block hash %zx -> %zx", block->getBlockId(), oldHash, newHash);
+                removeBlockFromHashMap(block);
+                block->setHash(newHash);
+                addBlockToHashMap(block);
+            }
             searchRoot = block;
         }
     }
@@ -792,6 +953,7 @@ void BlockManager::replaceSharedBlock(GenerationRequest& sequence, SizeType32 bl
         if (!block->hasRefs())
         {
             mEvictionPolicy->releaseBlock(block);
+            removeBlockFromHashMap(block);
         }
     }
 
@@ -801,6 +963,14 @@ void BlockManager::replaceSharedBlock(GenerationRequest& sequence, SizeType32 bl
     {
         auto block = getFreeBlock();
         block->incRefCount();
+        if (sequence.getCacheBlockIds().at(beamIdx).size() == 0)
+        {
+            block->setPrevBlockInSeq(nullptr);
+        }
+        else
+        {
+            block->setPrevBlockInSeq(mAllBlocksById.at(sequence.getCacheBlockIds()[beamIdx].back()));
+        }
         sequence.changeCacheBlock(beamIdx, blockIdx, block->getBlockId());
         allocatedBlocks.at(blockIdx * beamWidth + beamIdx) = block;
     }
@@ -818,6 +988,7 @@ void BlockManager::releaseLastBlock(GenerationRequest& sequence)
     if (!block->hasRefs())
     {
         mEvictionPolicy->releaseBlock(block, true);
+        removeBlockFromHashMap(block);
     }
     // Remove block from allocated blocks
     allocatedBlocks.pop_back();
@@ -871,6 +1042,7 @@ void BlockManager::releaseBlocks(GenerationRequest& sequence, OptionalRef<LlmReq
         if (!block->hasRefs())
         {
             mEvictionPolicy->releaseBlock(block);
+            removeBlockFromHashMap(block);
         }
     }
     // Remove stored block ids in sequence
@@ -925,7 +1097,7 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     SizeType32 temporaryAttentionWindow, SizeType32 sinkTokenLength, CudaStreamPtr stream,
     std::optional<runtime::SizeType32> maxSequenceLength, bool enableBlockReuse, bool onboardBlocks,
     CacheType cacheType, std::optional<executor::RetentionPriority> secondaryOffloadMinPriority,
-    std::shared_ptr<KVCacheEventManager> eventManager)
+    std::shared_ptr<KVCacheEventManager> eventManager, bool enableHashKey)
     : mMaxBeamWidth(maxBeamWidth)
     , mMaxAttentionWindow(maxAttentionWindow)
     , mTemporaryAttentionWindow(temporaryAttentionWindow)
@@ -936,6 +1108,7 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
           maxNumSequences, std::move(stream), onboardBlocks, cacheType, secondaryOffloadMinPriority,
           std::move(eventManager))
     , mEnableBlockReuse{enableBlockReuse}
+    , mEnableHashKey{enableHashKey}
 {
     // The sink tokens are stored in blocks separate from other tokens.
     // If the last block of sink tokens is only partially filled,
@@ -959,6 +1132,7 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     // Consider the mTemporaryAttentionWindow when allocating blocks.
     mMaxBlocksPerSeq = tc::ceilDiv(mMaxTokenNum + mTemporaryAttentionWindow, tokensPerBlock);
 
+    TLLM_LOG_INFO("KV cache block reuse is %s", mEnableBlockReuse ? "enabled" : "disabled");
     TLLM_LOG_INFO("Max KV cache pages per sequence: %d", mMaxBlocksPerSeq);
     mSequences.reserve(maxNumSequences);
 }
@@ -989,8 +1163,21 @@ void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
         {
             auto const cacheShape = mBlockManager.getPrimaryPool(poolIdx)->getShape();
             auto const cacheVolume = ITensor::volume(cacheShape);
-            cacheSizeBytes += cacheVolume * BufferDataType(dtype).getSize();
+#ifdef ENABLE_FP4
+            auto const isFp4 = dtype == nvinfer1::DataType::kFP4;
+#else
+            auto const isFp4 = false;
+#endif
+            if (!isFp4)
+            {
+                cacheSizeBytes += cacheVolume * BufferDataType(dtype).getSize();
+            }
+            else
+            {
+                cacheSizeBytes += (cacheVolume * 4) / 8;
+            }
         }
+
         TLLM_LOG_INFO("Number of tokens per block: %d.", mBlockManager.getTokensPerBlock());
         auto const maxNumTokens = mBlockManager.getNumPrimaryBlocks() * mBlockManager.getTokensPerBlock();
         TLLM_LOG_INFO("[MemUsageChange] Allocated %0.2f GiB for max tokens in paged KV cache (%d).",
@@ -998,13 +1185,29 @@ void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
     }
 
     auto const numPools = mBlockManager.getNumPools();
-    mBlockPoolPointers = BufferManager::cpu(ITensor::makeShape({numPools, 2}), TRTDataType<void*>::value);
+    auto const numKVPools = mBlockManager.getNumPools(/*include_block_scalar_pools=*/false);
+    auto const numBlockScalePools = numPools - numKVPools;
+
+    // Code in the attention kernels is cleaner if we can access the KV values and block scales separately.
+    mBlockPoolPointers = BufferManager::cpu(ITensor::makeShape({numKVPools, 2}), TRTDataType<void*>::value);
+    mBlockScalePoolPointers
+        = BufferManager::cpu(ITensor::makeShape({numBlockScalePools, 2}), TRTDataType<void*>::value);
+
     auto poolPtrsRange = BufferRange<void*>(*mBlockPoolPointers);
+    auto blockScalePtrsRange = BufferRange<void*>(*mBlockScalePoolPointers);
+    SizeType32 kvPoolIdx = 0;
+    SizeType32 blockScalePoolIdx = 0;
+
     for (SizeType32 poolIdx = 0; poolIdx < numPools; poolIdx++)
     {
-        poolPtrsRange[poolIdx * 2] = mBlockManager.getPrimaryPool(poolIdx)->data();
+        auto const isBlockScale = mBlockManager.containsBlockScales(poolIdx);
+        auto& outIdx = isBlockScale ? blockScalePoolIdx : kvPoolIdx;
+        auto& outRange = isBlockScale ? blockScalePtrsRange : poolPtrsRange;
+
+        outRange[outIdx * 2] = mBlockManager.getPrimaryPool(poolIdx)->data();
         auto secondaryPool = mBlockManager.getSecondaryPool(poolIdx);
-        poolPtrsRange[poolIdx * 2 + 1] = secondaryPool ? secondaryPool->data() : nullptr;
+        outRange[outIdx * 2 + 1] = secondaryPool ? secondaryPool->data() : nullptr;
+        ++outIdx;
     }
 
     auto const numLayers = mBlockManager.getNumLayers();
@@ -1014,6 +1217,11 @@ void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
     {
         poolMappingRange[layerIdx] = mBlockManager.getLayerPoolIdx(layerIdx);
     }
+}
+
+void KVCacheManager::releasePools()
+{
+    mBlockManager.releasePools();
 }
 
 void KVCacheManager::startScheduling()
@@ -1303,6 +1511,30 @@ void KVCacheManager::addSequence(
                 llmRequest->mRequestId);
         }
         mBlockManager.addSequence(sequence, numContextBlocks, unsharedBlockIdx);
+        if (mEnableHashKey && llmRequest.has_value() && beamWidth == 1)
+        {
+            constexpr SizeType32 beamIdx = 0;
+            auto& blockIds = sequence.getCacheBlockIds().at(beamIdx);
+            auto& uniqueTokens = llmRequest->getUniqueTokens(beamIdx);
+            auto blockedUniqueTokens
+                = chopVectorIntoBlocks<UniqueToken>(uniqueTokens, uniqueTokens.size() - 1, getTokensPerBlock(), true);
+            auto blockKeys = buildBlockKeys(blockedUniqueTokens, *llmRequest);
+            auto tokensPerBlock = static_cast<size_t>(getTokensPerBlock());
+            for (size_t i = 0; i < blockIds.size(); i++)
+            {
+                auto& block = mBlockManager.getBlockById(blockIds[i]);
+                if (i < blockKeys.size())
+                {
+                    block->setBlockKey(blockKeys[i], blockKeys[i].uniqueTokens.size() == tokensPerBlock);
+                }
+                else
+                {
+                    block->setBlockKey({}, false);
+                }
+                block->setHash();
+                mBlockManager.addBlockToHashMap(block);
+            }
+        }
     }
     cacheBlockOffsets(sequence);
 

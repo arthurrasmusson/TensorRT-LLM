@@ -206,7 +206,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
             {
                 break;
             }
-            TLLM_LOG_DEBUG("encoder request ID scheduled: %u", llmReq->mRequestId);
+            TLLM_LOG_DEBUG("encoder request scheduled: ID %u", llmReq->mRequestId);
             contextRequests.emplace_back(llmReq);
             batchNumTokens += reqNumTokens;
         }
@@ -224,7 +224,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
                 {
                     break;
                 }
-                TLLM_LOG_DEBUG("context request ID scheduled: %u", llmReq->mRequestId);
+                TLLM_LOG_DEBUG("context request scheduled: ID %u", llmReq->mRequestId);
                 contextRequests.emplace_back(llmReq);
                 batchNumTokens += reqNumTokens;
             }
@@ -246,7 +246,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
                 }
                 contextsToBeChunked.emplace_back(llmReq);
                 numChunkedTokens += reqNumTokens;
-                TLLM_LOG_DEBUG("contexts-to-be-chunked request ID scheduled: %u", llmReq->mRequestId);
+                TLLM_LOG_DEBUG("contexts-to-be-chunked request scheduled: ID %u", llmReq->mRequestId);
             }
         }
         else // (llmReq->isGenerationInProgressState())
@@ -256,7 +256,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
             {
                 break;
             }
-            TLLM_LOG_DEBUG("generation request ID scheduled: %u", llmReq->mRequestId);
+            TLLM_LOG_DEBUG("generation request scheduled: ID %u", llmReq->mRequestId);
             generationRequests.emplace_back(llmReq);
             batchNumTokens += reqNumTokens;
         }
@@ -288,7 +288,7 @@ std::tuple<RequestVector, RequestVector> MicroBatchScheduler::operator()(Request
             contextRequests.emplace_back(llmReq);
             batchNumTokens += llmReq->getContextChunkSize();
             TLLM_LOG_DEBUG(
-                "context scheduled: id %lu, chunk size %d", llmReq->mRequestId, llmReq->getContextChunkSize());
+                "context request scheduled: ID %lu, chunk size %d", llmReq->mRequestId, llmReq->getContextChunkSize());
         }
     }
 

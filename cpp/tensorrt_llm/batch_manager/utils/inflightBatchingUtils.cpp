@@ -11,7 +11,6 @@
  */
 
 #include "inflightBatchingUtils.h"
-#include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
 namespace tensorrt_llm::batch_manager::utils
@@ -33,31 +32,6 @@ TensorPtr collectRequestIds(RequestVector const& contextRequests, RequestVector 
         }
     }
     return requestIds;
-}
-
-void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr& medusaLogitsDevice, SizeType32 medusaHeads,
-    SizeType32 logitsIndex, SizeType32 numLogits)
-{
-    for (SizeType32 hi = 0; hi < medusaHeads; ++hi)
-    {
-        TensorPtr logitsHead = ITensor::slice(medusaLogitsDevice, hi, 1);
-        logitsHead->squeeze(0);
-        medusaLogitsHeads[hi] = ITensor::slice(logitsHead, logitsIndex, numLogits);
-    }
-}
-
-void copyLastContextLogits(
-    TensorPtr const& contextLogits, LlmRequest& llmReq, runtime::BufferManager const& bufferManager)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    auto const numLogits = contextLogits->getShape().d[0];
-    for (int beam = 0; beam < llmReq.mSamplingConfig.beamWidth; beam++)
-    {
-        // [beamWidth, mMaxNewTokens, vocabSizePadded] -> [numLogits, vocabSizePadded]
-        auto beamHostTensorPtr = ITensor::slice(llmReq.getGenerationLogitsHost(), {beam, 0}, numLogits);
-        bufferManager.copy(*contextLogits, *beamHostTensorPtr);
-    }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::BufferManager const& bufferManager,
@@ -106,26 +80,6 @@ void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::Buff
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void copyStreamingGenerationLogits(runtime::BufferManager const& bufferManager, LlmRequest& llmReq)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    // If llmRequest is streaming, directly copy to host.
-    // Only one token's logits needs to be copied each time.
-    TLLM_CHECK(llmReq.getGenerationLogitsFragmentsSize() == 1);
-
-    SizeType32 numGenerationToken = llmReq.getMaxBeamNumTokens() - llmReq.mPromptLen;
-    TensorPtr const& generationLogitsHost
-        = llmReq.getGenerationLogitsHost(); // [mMaxNewTokens (or 1), beamWidth, vocabSizePadded]
-
-    TensorPtr hostTensorPtr
-        = ITensor::slice(generationLogitsHost, numGenerationToken, 1); // [1, beamWidth, vocabSizePadded]
-    TensorPtr deviceTensorPtr = *(llmReq.getGenerationLogitsFragments().begin());
-
-    bufferManager.copy(*deviceTensorPtr, *hostTensorPtr);
-    llmReq.clearGenerationLogitsFragments();
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, SizeType32 maxInputLen,
     OptionalRef<kv_cache_manager::BaseKVCacheManager> kvCacheManager,
     OptionalRef<kv_cache_manager::BaseKVCacheManager> crossKvCacheManager,
@@ -150,7 +104,7 @@ void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, S
     }
     else
     {
-        TLLM_LOG_DEBUG("terminated: request %lu, paused: %d", requestId, pause);
+        TLLM_LOG_DEBUG("terminated: request ID %lu, paused: %d", requestId, pause);
     }
 
     if (peftCacheManager)

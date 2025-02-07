@@ -1,6 +1,7 @@
 Checks: '*,
          -altera-id-dependent-backward-branch,
          -altera-unroll-loops,
+         -boost-use-ranges,
          -cppcoreguidelines-avoid-do-while,
          -cppcoreguidelines-pro-bounds-pointer-arithmetic,
          -cppcoreguidelines-pro-type-reinterpret-cast,

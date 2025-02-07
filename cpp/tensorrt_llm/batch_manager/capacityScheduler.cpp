@@ -333,12 +333,12 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(
     for (auto reqIt = std::begin(activeRequests); reqIt != reqItEnd;)
     {
         auto const& req = *reqIt;
-        TLLM_LOG_DEBUG("MaxUtilizationScheduler: scheduling req %lu", req->mRequestId);
+        TLLM_LOG_DEBUG("MaxUtilizationScheduler: scheduling request ID %lu", req->mRequestId);
 
         // if request cannot be scheduled yet or request should no longer be scheduled, skip
         if (!req->hasReachedState(getNoScheduleUntilState()) || req->hasReachedState(getNoScheduleAfterState()))
         {
-            TLLM_LOG_DEBUG("MaxUtilizationScheduler: req %lu cannot / should not be scheduled", req->mRequestId);
+            TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu cannot / should not be scheduled", req->mRequestId);
             reqIt++;
             continue;
         }
@@ -355,7 +355,7 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(
             req, scheduledRequests, numScheduledBlocks, numScheduledPeftPages, seenTaskIds);
         if (fitsKvCache && fitsPeftCache)
         {
-            TLLM_LOG_DEBUG("MaxUtilizationScheduler: req %lu -> start", req->mRequestId);
+            TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu -> start", req->mRequestId);
             reqIt++;
         }
         else
@@ -370,7 +370,7 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(
                 // Here we simulate freeing the kvCache blocks associated with that sequence
                 kvCacheManager.schedulingRemoveSequence((*lastStartedReqIt)->mRequestId);
                 pausedRequests.emplace_back(*lastStartedReqIt);
-                TLLM_LOG_DEBUG("MaxUtilizationScheduler: req %lu -> pause", (*lastStartedReqIt)->mRequestId);
+                TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu -> pause", (*lastStartedReqIt)->mRequestId);
                 reqItEnd = std::next(lastStartedReqIt).base();
             }
             else
@@ -392,14 +392,15 @@ std::pair<bool, bool> MaxUtilizationScheduler::trySchedulingRequestMaxUtilizatio
     if (scheduledRequests.size() < static_cast<std::size_t>(mMaxNumRequests))
     {
         SizeType32 numRequiredBlocks = kvCacheManager.getNeededBlocksOneStep(*req, mManyMicroBatches);
-        TLLM_LOG_DEBUG("MaxUtilizationScheduler: req %lu required blocks: %i", req->mRequestId, numRequiredBlocks);
+        TLLM_LOG_DEBUG(
+            "MaxUtilizationScheduler: request ID %lu required blocks: %i", req->mRequestId, numRequiredBlocks);
 
         bool reqHasLora = req->getLoraTaskId().has_value();
         bool isNewTask = reqHasLora && !seenTaskIds.count(req->getLoraTaskId().value());
         SizeType32 numRequiredPeftPages
             = isNewTask && (peftCacheManager ? peftCacheManager->determineNumPages(req) : 0);
         TLLM_LOG_DEBUG(
-            "MaxUtilizationScheduler: req %lu required peft pages: %i", req->mRequestId, numRequiredPeftPages);
+            "MaxUtilizationScheduler: request ID %lu required peft pages: %i", req->mRequestId, numRequiredPeftPages);
         bool fitsKvCache
             = kvCacheManager.getBlockManager().schedulingHasFreeBlocks(numScheduledBlocks + numRequiredBlocks);
         bool fitsPeft

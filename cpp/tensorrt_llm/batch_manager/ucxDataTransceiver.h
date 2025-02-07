@@ -22,6 +22,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/cache_transmission/cacheConcatenate.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include <condition_variable>
 #include <map>
@@ -144,6 +145,7 @@ public:
         SizeType32 selfIndex, TFormatter formatter, uint16_t listenerPort = 0)
         : mFactory{std::move(factory)}
         , mFormatter{std::move(formatter)}
+        , mbufferManager{std::make_shared<runtime::CudaStream>()}
     {
         mSelfState.setCommState(
             executor::kv_cache::CommState{std::vector<executor::kv_cache::SocketState>{}, selfIndex});
@@ -182,7 +184,8 @@ public:
         std::unique_lock<std::mutex> lk(mMtxForMap);
         auto peerTargetRanks
             = tensorrt_llm::executor::kv_cache::targetIRanks(info.getTransState().getCacheState().value(),
-                mSelfState.getCacheState().value(), getCommState().getSelfIdx());
+                mSelfState.getCacheState().value(), getCommState().getSelfIdx())
+                  .mIRanks;
         auto const requestId = info.getRequestId();
         if (mRequestToComms.find(requestId) == mRequestToComms.end())
         {
@@ -215,7 +218,7 @@ public:
 
         // TODO: fake destCacheState
         mFormatter->formatOutput(mComm, llmRequest, std::move(comms), mSelfState.getCacheState().value(),
-            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value());
+            mSelfState.getCommState().value().getSelfIdx(), mSelfState.getCacheState().value(), mbufferManager);
 
         {
             // For now, the connection will be dropped once the transfer is completed
@@ -405,6 +408,8 @@ private:
 
     executor::DataTransceiverState mSelfState;
     std::deque<std::pair<decltype(std::chrono::steady_clock::now()), std::unique_ptr<UcxEndpoint>>> mReapingComm;
+
+    runtime::BufferManager mbufferManager;
 };
 
 class UcxDataReceiver final : public DataReceiver
@@ -555,19 +560,24 @@ private:
 // modification to implement the data responder against UCX directly, instead of UCXX
 // (a C++ wrapper of UCX picked to simplify implementation). Implementing against UCXX
 // adds one layer of indirection and makes dynamically loading the below functions a simpler WAR.
-#if __cplusplus
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+#endif
+
 extern "C"
 {
-#endif
 
     std::unique_ptr<DataResponder> makeUcxCacheResponder(executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
 
     std::unique_ptr<DataRequester> makeUcxCacheRequester(executor::kv_cache::CacheState selfCacheState,
         SizeType32 selfIndex, kv_cache_manager::KVCacheManager* cacheManager);
-
-#if __cplusplus
 }
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
 #endif
 
 } // namespace tensorrt_llm::batch_manager

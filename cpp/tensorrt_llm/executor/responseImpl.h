@@ -65,7 +65,8 @@ public:
             return std::get<Result>(mErrOrResult);
         }
 
-        TLLM_THROW("Cannot get the result for a response with an error");
+        TLLM_THROW(
+            "Cannot get the result for a response with an error: %s", std::get<std::string>(mErrOrResult).c_str());
     }
 
     [[nodiscard]] std::string const& getErrorMsg() const

@@ -26,7 +26,7 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
     std::optional<FloatType> const& repetitionPenalty, std::optional<FloatType> const& presencePenalty,
     std::optional<FloatType> const& frequencyPenalty, std::optional<FloatType> const& lengthPenalty,
     std::optional<SizeType32> const& earlyStopping, std::optional<SizeType32> const& noRepeatNgramSize,
-    std::optional<SizeType32> const& numReturnSequences)
+    std::optional<SizeType32> const& numReturnSequences, std::optional<FloatType> const& minP)
     : mBeamWidth(checkBeamWidth(beamWidth))
     , mTopK(checkTopK(topK))
     , mTopP(checkTopP(topP))
@@ -44,6 +44,7 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, std::optional<SizeType32> c
     , mEarlyStopping(earlyStopping)
     , mNoRepeatNgramSize(checkNoRepeatNgramSize(noRepeatNgramSize))
     , mNumReturnSequences(checkNumReturnSequences(numReturnSequences, beamWidth))
+    , mMinP(checkMinP(minP))
 {
     updateNumReturnBeams();
 }
@@ -56,7 +57,8 @@ bool SamplingConfig::operator==(SamplingConfig const& other) const
         && mBeamSearchDiversityRate == other.mBeamSearchDiversityRate && mRepetitionPenalty == other.mRepetitionPenalty
         && mPresencePenalty == other.mPresencePenalty && mFrequencyPenalty == other.mFrequencyPenalty
         && mLengthPenalty == other.mLengthPenalty && mEarlyStopping == other.mEarlyStopping
-        && mNoRepeatNgramSize == other.mNoRepeatNgramSize && mNumReturnSequences == other.mNumReturnSequences;
+        && mNoRepeatNgramSize == other.mNoRepeatNgramSize && mNumReturnSequences == other.mNumReturnSequences
+        && mMinP == other.mMinP;
 }
 
 SizeType32 SamplingConfig::getBeamWidth() const
@@ -161,6 +163,11 @@ std::optional<SizeType32> SamplingConfig::getNumReturnSequences() const
     return mNumReturnSequences;
 }
 
+std::optional<FloatType> SamplingConfig::getMinP() const
+{
+    return mMinP;
+}
+
 // the setters
 
 void SamplingConfig::setBeamWidth(SizeType32 beamWidth)
@@ -260,6 +267,11 @@ void SamplingConfig::setNumReturnSequences(std::optional<SizeType32> const& numR
 {
     mNumReturnSequences = checkNumReturnSequences(numReturnSequences, mBeamWidth);
     updateNumReturnBeams();
+}
+
+void SamplingConfig::setMinP(std::optional<FloatType> const& minP)
+{
+    mMinP = checkMinP(minP);
 }
 
 SizeType32 SamplingConfig::checkBeamWidth(SizeType32 beamWidth)
@@ -373,6 +385,15 @@ std::optional<SizeType32> const& SamplingConfig::checkNumReturnSequences(
         TLLM_CHECK(beamWidth == 1 || numReturnSequences.value() <= beamWidth);
     }
     return numReturnSequences;
+}
+
+std::optional<FloatType> const& SamplingConfig::checkMinP(std::optional<FloatType> const& minP)
+{
+    if (minP.has_value())
+    {
+        TLLM_CHECK(minP.value() >= 0.f && minP.value() <= 1.0f);
+    }
+    return minP;
 }
 
 void SamplingConfig::updateNumReturnBeams()

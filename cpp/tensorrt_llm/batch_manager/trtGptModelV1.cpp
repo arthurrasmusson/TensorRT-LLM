@@ -32,6 +32,46 @@ namespace tc = tensorrt_llm::common;
 namespace tensorrt_llm::batch_manager
 {
 
+bool TrtGptModelV1::optionalParamsAreValid(
+    runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
+{
+    // Make sure logic in this function matches fixOptionalParams
+    if (optionalParams.kvCacheConfig.enableBlockReuse)
+    {
+        return false;
+    }
+    if (optionalParams.schedulerConfig.getCapacitySchedulerPolicy()
+        != executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+    {
+        return false;
+    }
+    return true;
+}
+
+TrtGptModelOptionalParams TrtGptModelV1::fixOptionalParams(
+    runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams)
+{
+    // Make sure logic in this function matches optionalParamsAreValid
+    auto fixedOptionalParams = TrtGptModelOptionalParams(optionalParams);
+    if (fixedOptionalParams.kvCacheConfig.enableBlockReuse)
+    {
+        TLLM_LOG_WARNING("Fix optionalParams : KV cache reuse disabled because V1 does not support it");
+        fixedOptionalParams.kvCacheConfig.enableBlockReuse = false;
+    }
+    if (fixedOptionalParams.schedulerConfig.getCapacitySchedulerPolicy()
+        != executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
+    {
+        TLLM_LOG_WARNING(
+            "Fix optionalParams : Changed scheduler policy to GUARANTEED_NO_EVICT because it is the only one supported "
+            "by V1");
+        fixedOptionalParams.schedulerConfig
+            = executor::SchedulerConfig(executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT,
+                optionalParams.schedulerConfig.getContextChunkingPolicy(),
+                optionalParams.schedulerConfig.getDynamicBatchConfig());
+    }
+    return fixedOptionalParams;
+}
+
 namespace
 {
 SamplingConfig initBatchSamplingConfig(SamplingConfig const& baseSamplingConfig)
@@ -229,14 +269,9 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
     sessionConfig.normalizeLogProbs = optionalParams.normalizeLogProbs;
     sessionConfig.gpuWeightsPercent = optionalParams.gpuWeightsPercent;
     sessionConfig.cudaGraphMode = true;
+    sessionConfig.gatherGenerationLogits = optionalParams.gatherGenerationLogits;
 
     mSession = std::make_shared<GptSession>(sessionConfig, modelConfig, worldConfig, rawEngine, logger);
-
-    if (optionalParams.schedulerConfig.getCapacitySchedulerPolicy()
-        != executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT)
-    {
-        TLLM_THROW("V1 only supports GUARANTEED_NO_EVICT scheduling policy");
-    }
 
     // Here we use the microBatchScheduler but we don't need any microBatching capabilities
     // Since micro batches are created in gptSession
@@ -252,6 +287,11 @@ TrtGptModelV1::TrtGptModelV1(std::shared_ptr<nvinfer1::ILogger> logger, ModelCon
 runtime::ModelConfig const& TrtGptModelV1::getModelConfig() const
 {
     return mSession->getModelConfig();
+}
+
+[[nodiscard]] bool TrtGptModelV1::getGatherGenerationLogits() const
+{
+    return mSession->getGatherGenerationLogits();
 }
 
 [[nodiscard]] TrtGptModelV1::IterationStatsV1 TrtGptModelV1::getLastIterationStats() const
@@ -407,9 +447,8 @@ std::tuple<runtime::GenerationInput, runtime::SamplingConfig> TrtGptModelV1::fil
     // Create a prompt embedding table from the request embedding tables
     if (modelConfig.usePromptTuning())
     {
-        PromptTuningBuffers promptTuningBuffers;
         // Create the prompt table from the requests individual prompt tables
-        promptTuningBuffers.create(maxBatchSize, bufferManager, modelConfig, worldConfig);
+        auto promptTuningBuffers = PromptTuningBuffers(maxBatchSize, bufferManager, modelConfig, worldConfig);
         promptTuningBuffers.fill(scheduledRequests, {}, bufferManager, false);
 
         generationInput.promptTuningParams = promptTuningBuffers.mPromptTuningParams;
@@ -530,7 +569,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
         }
 
         llmReq->setGeneratedTokens(generatedTokens);
-        llmReq->mState = LlmRequestState::kGENERATION_COMPLETE;
+        llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
         bid++;
     }
     outputIds->release();
@@ -557,7 +596,7 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     }
 
     // Save generation logits
-    if (mSession->getModelConfig().computeGenerationLogits())
+    if (mSession->getGatherGenerationLogits())
     {
         auto const& generationLogitsShape = generationOutput.generationLogits->getShape();
         TLLM_CHECK_WITH_INFO(generationOutput.generationLogits->getShape().d[0] == int(scheduledRequests.size()),

@@ -216,7 +216,8 @@ private:
     ///        Active requests that have completed are erased from activeRequests
     ///        and returned for bookkeeping.
     /// @return A list of requests that have completed.
-    RequestList populateNewResponses(RequestList& activeRequests, RequestList& inTransmissionRequests);
+    RequestList populateNewResponses(
+        RequestList& activeRequests, RequestList& inTransmissionRequests, std::vector<Response>& newResponses);
 
     void executionLoop();
 
@@ -318,7 +319,6 @@ private:
 
     std::unordered_map<std::string, LogitsPostProcessor> mLogitsPostProcessorMap;
     std::optional<Model::LogitsPostProcessorBatched> mLogitsPostProcessorBatched;
-    bool mReplicateLogitsPostProcessor;
 
     bool mIsOrchestrator = false;
     std::shared_ptr<tensorrt_llm::mpi::MpiComm> mOrchLeaderComm;

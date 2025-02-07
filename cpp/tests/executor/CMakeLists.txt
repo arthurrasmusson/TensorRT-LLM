@@ -8,23 +8,11 @@
 # distribution of this material and related documentation without an express
 # license agreement from NVIDIA CORPORATION or its affiliates is strictly
 # prohibited.
-add_gtest(execSamplingConfigTest samplingConfigTest.cpp)
-add_gtest(kvCacheConfigTest kvCacheConfigTest.cpp)
-add_gtest(decodingConfigTest decodingConfigTest.cpp)
-add_gtest(requestTest requestTest.cpp)
-add_gtest(responseTest responseTest.cpp)
+
+add_gtest(executorMockTest executorMockTest.cpp)
 add_gtest(executorTest executorTest.cpp)
 target_link_libraries(executorTest PRIVATE modelSpecStatic testingUtils)
-add_gtest(executorTestSmall executorTestSmall.cpp)
-target_link_libraries(executorTestSmall PRIVATE modelSpecStatic testingUtils)
-add_gtest(executorTestSmallArbitraryOutputTensors
-          executorTestSmallArbitraryOutputTensors.cpp)
-target_link_libraries(executorTestSmallArbitraryOutputTensors
-                      PRIVATE modelSpecStatic testingUtils)
-add_gtest(executorConfigTest executorConfigTest.cpp)
-add_gtest(executorTensorTest tensorTest.cpp)
-add_gtest(serializeUtilsTest serializeUtilsTest.cpp)
-add_gtest(requestWithIdTest requestWithIdTest.cpp)
-add_gtest(loraConfigTest loraConfigTest.cpp)
-add_gtest(intervalSetTest intervalSetTest.cpp)
-add_gtest(dynamicBatchTunerTest dynamicBatchTunerTest.cpp)
+add_gtest(encDecTest encDecTest.cpp)
+target_link_libraries(encDecTest PRIVATE modelSpecStatic testingUtils)
+add_gtest(disaggExecutorTest disaggExecutorTest.cpp)
+target_link_libraries(disaggExecutorTest PRIVATE modelSpecStatic testingUtils)

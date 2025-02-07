@@ -9,11 +9,8 @@
  * without an express license agreement from NVIDIA CORPORATION or
  * its affiliates is strictly prohibited.
  */
-#pragma once
 
-#ifndef TOP_LEVEL_DIR
-#error "Define TOP_LEVEL_DIR"
-#endif
+#pragma once
 
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
@@ -44,7 +41,7 @@
 using namespace tensorrt_llm::executor;
 using namespace tensorrt_llm::executor::disagg_executor;
 
-namespace tensorrt_llm::testing::executor::disaggexecutor
+namespace tensorrt_llm::testing::disaggexecutor
 {
 
 constexpr int32_t kM_INSTANCE_ID_TAG{12024};
@@ -779,4 +776,4 @@ private:
         }
     }
 };
-} // namespace tensorrt_llm::testing::executor::disaggexecutor
+} // namespace tensorrt_llm::testing::disaggexecutor

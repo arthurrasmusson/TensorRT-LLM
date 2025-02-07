@@ -67,12 +67,15 @@ public:
     void rearrangeOutputs(RequestVector const& requests, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
         TllmRuntime const& runtime);
 
+    //! @brief set shape of individual request's encoder output (Ptuning embedding table if multimodal)
+    void updateReqOutputShape(RequestVector const& requests, TllmRuntime const& runtime, WorldConfig const& worldConfig,
+        ModelConfig const& modelConfig);
+
 private:
     SizeType32 numRequests{};
     SizeType32 encoderInputLen{};
     SizeType32 encoderOutputLen{};
     SizeType32 maxInputLengthInBatch{}; // max input length in a batch
-    SizeType32 contextIndex{};          // TRT context index
 
     // prefilled with deterministic values to avoid runtime creation
     std::vector<SizeType32> positionIdsReserved;

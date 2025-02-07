@@ -107,23 +107,10 @@ void EncoderBuffers::updateBufferSizes(RequestVector const& requests, ModelConfi
     // get buffer shape based on actual batched requests
     for (auto const& req : requests)
     {
-        auto encOutLen = req->getEncoderOutputLen();
         encoderInputLen += req->getEncoderInputLen();
         encoderOutputLen += req->getEncoderOutputLen();
         maxInputLengthInBatch
             = std::max(maxInputLengthInBatch, req->getEncoderInputLen()); // Decoder input is encoder output
-
-        // update request-owned external buffer for each request
-        if (worldConfig.isPipelineParallel())
-        {
-            req->getEncoderHiddenStates()->reshape(
-                ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
-        }
-        if (worldConfig.isLastPipelineParallelRank())
-        {
-            req->getEncoderOutput()->reshape(
-                ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
-        }
     }
 
     // update buffer shapes
@@ -136,10 +123,15 @@ void EncoderBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
+    if (modelConfig.isMultiModal())
+    {
+        return; // multimodal models do not need to set position id, etc. or any output tensors
+    }
+
     inputIds->reshape(ITensor::makeShape({encoderInputLen}));
     if (positionIds)
     {
-        if (modelConfig.getModelName() == "WhisperEncoder")
+        if (modelConfig.isWhisper())
         {
             positionIds->reshape(ITensor::makeShape({encoderOutputLen}));
         }
@@ -193,9 +185,18 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
 
     if (requests.front()->getEncoderInputFeatures())
     {
-        SizeType32 const featureDim = requests.front()->getEncoderInputFeatures()->getShape().d[1];
-        TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - featureDim = %d", featureDim);
-        inputFeatures->reshape(ITensor::makeShape({encoderInputLen, featureDim}));
+        if (modelConfig.isMultiModal())
+        {
+            auto batchedInputShape = requests.front()->getEncoderInputFeatures()->getShape(); // [1, 3, H, W]
+            batchedInputShape.d[0] = encoderInputLen;                                         // [batch_size, 3, H, W]
+            inputFeatures->reshape(batchedInputShape);
+        }
+        else
+        {
+            SizeType32 const featureDim = requests.front()->getEncoderInputFeatures()->getShape().d[1];
+            TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - featureDim = %d", featureDim);
+            inputFeatures->reshape(ITensor::makeShape({encoderInputLen, featureDim}));
+        }
     }
 
     SizeType32 offset = 0;
@@ -206,7 +207,9 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
         SizeType32 const outputLength = llmReq->getEncoderOutputLen();
         if (llmReq->getEncoderInputFeatures())
         {
-            auto const& reqFeatures = llmReq->getEncoderInputFeatures(); // [length, featureDim]
+            auto const& reqFeatures
+                = llmReq
+                      ->getEncoderInputFeatures(); // whisper: [length, featureDim]; Vision: [batch_size, channel, W, H]
             TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - request id = %d, input features length = %d",
                 llmReq->mRequestId, inputLength);
             manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, inputLength));
@@ -224,7 +227,7 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
         }
         if (positionIds)
         {
-            SizeType32 const length = modelConfig.getModelName() == "WhisperEncoder" ? outputLength : inputLength;
+            SizeType32 const length = modelConfig.isWhisper() ? outputLength : inputLength;
             positionIdsAll.insert(
                 positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
         }
@@ -262,7 +265,11 @@ void EncoderBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     outputMap.clear();
 
     // inputs
-    if (modelConfig.getModelName() == "WhisperEncoder")
+    if (modelConfig.isMultiModal())
+    {
+        inputMap.insert_or_assign("input", inputFeatures);
+    }
+    else if (modelConfig.isWhisper())
     {
         inputMap.insert_or_assign("input_features", inputFeatures);
         inputMap.insert_or_assign("input_lengths", inputLengths);
@@ -329,6 +336,9 @@ void EncoderBuffers::rearrangeOutputs(RequestVector const& requests, ModelConfig
     auto const& manager = runtime.getBufferManager();
 
     SizeType32 offset = 0, size = 0;
+
+    updateReqOutputShape(requests, runtime, worldConfig, modelConfig);
+
     for (auto const& req : requests)
     {
         // copy from internal buffer to request-owned external buffers
@@ -343,12 +353,54 @@ void EncoderBuffers::rearrangeOutputs(RequestVector const& requests, ModelConfig
         }
         if (worldConfig.isLastPipelineParallelRank())
         {
-            manager.copy(*ITensor::slice(encoderOutput, offset, size), *req->getEncoderOutput());
+            if (modelConfig.isMultiModal())
+            {
+                manager.copy(
+                    *ITensor::slice(encoderOutput, offset, size), *(req->getPromptEmbeddingTableMutable().value()));
+            }
+            else
+            {
+                manager.copy(*ITensor::slice(encoderOutput, offset, size), *req->getEncoderOutput());
+            }
         }
         offset += size;
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void EncoderBuffers::updateReqOutputShape(RequestVector const& requests, TllmRuntime const& runtime,
+    WorldConfig const& worldConfig, ModelConfig const& modelConfig)
+{
+    auto const& manager = runtime.getBufferManager();
+
+    for (auto const& req : requests)
+    {
+        if (modelConfig.isMultiModal())
+        {
+            auto shape = encoderOutput->getShape(); // [batch_size, prompt_vocab_size, feature_dim]
+            shape.d[0] = req->getEncoderOutputLen();
+            req->getPromptEmbeddingTableMutable() = manager.emptyTensor(MemoryType::kGPU, encoderOutput->getDataType());
+            req->getPromptEmbeddingTableMutable().value()->reshape(shape);
+            req->setPromptVocabSize(shape.d[1]);
+            // TODO: extra ids for kv cache reuse
+        }
+        else
+        {
+            auto encOutLen = req->getEncoderOutputLen();
+            // update request-owned external buffer for each request
+            if (worldConfig.isPipelineParallel())
+            {
+                req->getEncoderHiddenStates()->reshape(
+                    ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+            }
+            if (worldConfig.isLastPipelineParallelRank())
+            {
+                req->getEncoderOutput()->reshape(
+                    ITensor::makeShape({encOutLen, modelConfig.getHiddenSize() * worldConfig.getTensorParallelism()}));
+            }
+        }
+    }
 }
 
 void EncoderBuffers::create(SizeType32 maxBatchSize, ModelConfig const& modelConfig, TllmRuntime const& runtime)
