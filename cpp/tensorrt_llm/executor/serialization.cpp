@@ -59,7 +59,7 @@ RequestPerfMetrics Serialization::deserializeRequestPerfMetrics(std::istream& is
     auto numNewAllocatedBlocks = su::deserialize<SizeType32>(is);
     auto numReusedBlocks = su::deserialize<SizeType32>(is);
     auto numMissedBlocks = su::deserialize<SizeType32>(is);
-    auto kvCacheHitRate = su::deserialize<SizeType32>(is);
+    auto kvCacheHitRate = su::deserialize<FloatType>(is);
 
     auto acceptanceRate = su::deserialize<FloatType>(is);
     auto totalAcceptedDraftTokens = su::deserialize<SizeType32>(is);
@@ -1605,8 +1605,9 @@ InflightBatchingStats Serialization::deserializeInflightBatchingStats(std::istre
     auto numPausedRequests = su::deserialize<SizeType32>(is);
     auto numCtxTokens = su::deserialize<SizeType32>(is);
     auto microBatchId = su::deserialize<SizeType32>(is);
-    return InflightBatchingStats{
-        numScheduledRequests, numContextRequests, numGenRequests, numPausedRequests, numCtxTokens, microBatchId};
+    auto avgNumDecodedTokensPerIter = su::deserialize<float>(is);
+    return InflightBatchingStats{numScheduledRequests, numContextRequests, numGenRequests, numPausedRequests,
+        numCtxTokens, microBatchId, avgNumDecodedTokensPerIter};
 }
 
 void Serialization::serialize(InflightBatchingStats const& inflightBatchingStats, std::ostream& os)
@@ -1617,6 +1618,7 @@ void Serialization::serialize(InflightBatchingStats const& inflightBatchingStats
     su::serialize(inflightBatchingStats.numPausedRequests, os);
     su::serialize(inflightBatchingStats.numCtxTokens, os);
     su::serialize(inflightBatchingStats.microBatchId, os);
+    su::serialize(inflightBatchingStats.avgNumDecodedTokensPerIter, os);
 }
 
 size_t Serialization::serializedSize(InflightBatchingStats const& inflightBatchingStats)
@@ -1628,6 +1630,7 @@ size_t Serialization::serializedSize(InflightBatchingStats const& inflightBatchi
     totalSize += su::serializedSize(inflightBatchingStats.numPausedRequests);
     totalSize += su::serializedSize(inflightBatchingStats.numCtxTokens);
     totalSize += su::serializedSize(inflightBatchingStats.microBatchId);
+    totalSize += su::serializedSize(inflightBatchingStats.avgNumDecodedTokensPerIter);
     return totalSize;
 }
 
@@ -1833,7 +1836,7 @@ RequestStats Serialization::deserializeRequestStats(std::istream& is)
     auto allocNewBlocksPerRequest = su::deserialize<SizeType32>(is);
     auto reusedBlocksPerRequest = su::deserialize<SizeType32>(is);
     auto missedBlocksPerRequest = su::deserialize<SizeType32>(is);
-    auto kvCacheHitRatePerRequest = su::deserialize<SizeType32>(is);
+    auto kvCacheHitRatePerRequest = su::deserialize<FloatType>(is);
 
     return RequestStats{id, stage, contextPrefillPosition, numGeneratedTokens, avgNumDecodedTokensPerIter, scheduled,
         paused, disServingStats, allocTotalBlocksPerRequest, allocNewBlocksPerRequest, reusedBlocksPerRequest,

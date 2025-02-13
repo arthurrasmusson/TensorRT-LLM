@@ -294,7 +294,7 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
     SizeType32 tokensPerBlock, SizeType32 blocksInPrimaryPool, SizeType32 blocksInSecondaryPool,
     SizeType32 maxNumSequences, std::shared_ptr<runtime::CudaStream> stream, bool onboardBlocks, CacheType cacheType,
     std::optional<executor::RetentionPriority> secondaryOffloadMinPriority,
-    std::shared_ptr<KVCacheEventManager> eventManager)
+    std::shared_ptr<KVCacheEventManager> eventManager, bool enableHashKey)
     : mNumPrimaryBlocks{blocksInPrimaryPool}
     , mNumSecondaryBlocks{blocksInSecondaryPool}
     , mOnboardBlocks(onboardBlocks)
@@ -312,6 +312,7 @@ BlockManager::BlockManager(std::vector<SizeType32> const& numKvHeadsPerLayer, Si
     , mReusedBlocks{0}
     , mReusedUniqueBlocks{0}
     , mMissedBlocks{0}
+    , mEnableHashKey{enableHashKey}
 {
     std::map<SizeType32, SizeType32> numLayersPerPool;
 
@@ -565,6 +566,10 @@ void KVCacheManager::setOffsets(tk::KVCacheIndex* offsetsPtr, nvinfer1::Dims con
 
 void BlockManager::addBlockToHashMap(BlockPtr block)
 {
+    if (!mEnableHashKey)
+    {
+        return;
+    }
     auto range = mContextBlocksByHash.equal_range(block->getHash());
     for (auto it = range.first; it != range.second; ++it)
     {
@@ -583,6 +588,10 @@ void BlockManager::addBlockToHashMap(BlockPtr block)
 
 void BlockManager::removeBlockFromHashMap(BlockPtr block)
 {
+    if (!mEnableHashKey)
+    {
+        return;
+    }
     if (mContextBlocksByHash.empty())
     {
         // Hash key not enabled
@@ -1106,7 +1115,7 @@ KVCacheManager::KVCacheManager(std::vector<SizeType32> const& numKvHeadsPerLayer
     , mSinkBlockTokenLength(mSinkBubbleLength + sinkTokenLength)
     , mBlockManager(numKvHeadsPerLayer, sizePerHead, tokensPerBlock, blocksInPrimaryPool, blocksInSecondaryPool,
           maxNumSequences, std::move(stream), onboardBlocks, cacheType, secondaryOffloadMinPriority,
-          std::move(eventManager))
+          std::move(eventManager), enableHashKey)
     , mEnableBlockReuse{enableBlockReuse}
     , mEnableHashKey{enableHashKey}
 {

@@ -128,6 +128,8 @@ std::optional<executor::Response> LlmRequest::createResponse(bool useFastLogits,
 
     if (getReturnPerfMetrics())
     {
+        mPerfMetrics.kvCacheMetrics.kvCacheHitRate = getKVCacheHitRatePerRequest();
+
         auto& specDecMetrics = mPerfMetrics.speculativeDecoding;
         if (specDecMetrics.totalDraftTokens != 0)
         {

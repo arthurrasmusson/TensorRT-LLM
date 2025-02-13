@@ -642,7 +642,7 @@ TEST_P(DisaggParamsTest, DisaggTokenComparison)
 
     auto executorConfig = ExecutorConfig(maxBeamWidth);
     FloatType freeGpuMemoryFraction = 0.9f / (deviceRuseNum); // context and gen instance run on same device
-    KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
+    KvCacheConfig kvCacheConfig{true, std::nullopt, std::nullopt, std::nullopt, freeGpuMemoryFraction};
     executorConfig.setKvCacheConfig(kvCacheConfig);
     executorConfig.setRequestStatsMaxIterations(1000);
     auto manager = tr::BufferManager(std::make_shared<tr::CudaStream>());
@@ -842,7 +842,7 @@ TEST_P(DisaggOrchestratorParamsTest, DisaggTokenComparison)
     for (int in = 0; in < instanceNum; in++)
     {
         tensorrt_llm::executor::SchedulerConfig schedulerConfig(CapacitySchedulerPolicy::kMAX_UTILIZATION);
-        KvCacheConfig kvCacheConfig{false, std::nullopt, std::nullopt, std::nullopt, 0.2};
+        KvCacheConfig kvCacheConfig{true, std::nullopt, std::nullopt, std::nullopt, 0.2};
 
         tensorrt_llm::executor::ExecutorConfig executorConfig(maxBeamWidth, schedulerConfig, kvCacheConfig);
         tensorrt_llm::executor::OrchestratorConfig orchestratorConfig{isOrchestrator, "", nullptr, false};

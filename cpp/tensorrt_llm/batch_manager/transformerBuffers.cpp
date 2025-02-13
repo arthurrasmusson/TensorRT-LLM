@@ -668,8 +668,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
     if (!contextRequests.empty())
     {
         // Set the parameters for creating packed mask for context FMHA.
-        tk::PackedMaskParams<bool> maskParams;
-        memset((void*) &maskParams, 0, sizeof(maskParams));
+        tk::PackedMaskParams<bool> maskParams{};
         maskParams.maskInput = bufferCastOrNull<bool>(crossAttentionMaskDevice);
         maskParams.cuQSeqLens = bufferCastOrNull<SizeType32>(crossAttentionCuQSeqLensDevice);
         maskParams.packedMask = bufferCastOrNull<uint32_t>(crossAttentionPackedMaskDevice);

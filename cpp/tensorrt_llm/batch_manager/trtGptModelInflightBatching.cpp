@@ -155,9 +155,8 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     }
     if (mWorldConfig.isTensorParallel())
     {
-        mRuntime->initializeUserBuffer(mWorldConfig.getTensorParallelism(), mModelConfig.getMaxBatchSize(),
-            mModelConfig.getMaxBeamWidth(), mModelConfig.getMaxSequenceLen(), mModelConfig.getHiddenSize(),
-            getMaxNumTokens());
+        mRuntime->initializeUserBuffer(mWorldConfig, mModelConfig.getMaxBatchSize(), mModelConfig.getMaxBeamWidth(),
+            mModelConfig.getMaxSequenceLen(), mModelConfig.getHiddenSize(), getMaxNumTokens());
     }
     if (mWorldConfig.isPipelineParallel())
     {
