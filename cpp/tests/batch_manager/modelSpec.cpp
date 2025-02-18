@@ -159,11 +159,6 @@ std::string ModelSpec::getModelPath() const
         ret.emplace_back("gather");
     }
 
-    if (mReturnAcceptedTokensLogits)
-    {
-        ret.emplace_back("return-accepted-tokens-logits");
-    }
-
     auto finalRet = std::accumulate(ret.begin(), ret.end(), std::string(),
         [](std::string& a, std::string& b)
         {

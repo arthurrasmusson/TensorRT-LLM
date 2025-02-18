@@ -20,13 +20,15 @@
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
-#include "tensorrt_llm/common/mpiUtils.h"
-#include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
+#include "tensorrt_llm/executor/requestWithId.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
 #include "tensorrt_llm/runtime/gptJsonConfig.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 #include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/tllmLogger.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tests/utils/common.h"
 
@@ -211,8 +213,8 @@ TEST_F(GptExecutorTest, ReturnAcceptedTokenLogits)
     executorConfig.setKvCacheConfig(kvCacheConfig);
 
     // Create executor
-    auto trtEnginePath = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR()
-        / "tp1-pp1-cp1-gpu");
+    auto trtEnginePath
+        = (GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR() / "tp1-pp1-cp1-gpu");
     auto executor = Executor(trtEnginePath, ModelType::kDECODER_ONLY, executorConfig);
 
     // Create request
@@ -3023,8 +3025,8 @@ TEST_F(SpeculativeDecodingTest, SpecDecFastLogits)
     auto executorConfig = ExecutorConfig(beamWidth);
     auto trtDraftEnginePath
         = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_GATHER_DIR() / "tp1-pp1-cp1-gpu";
-    auto trtEnginePath = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_RETURN_ACCEPTED_TOKENS_LOGITS_DIR()
-        / "tp1-pp1-cp1-gpu";
+    auto trtEnginePath
+        = GPT_MODEL_PATH / PathUtil::FP16_GPT_ATTENTION_PACKED_PAGED_DRAFT_TOKENS_DIR() / "tp1-pp1-cp1-gpu";
 
     FloatType freeGpuMemoryFraction = 0.3;
     auto kvCacheConfig

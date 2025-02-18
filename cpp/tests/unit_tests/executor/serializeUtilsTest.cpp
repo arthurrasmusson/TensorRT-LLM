@@ -12,11 +12,10 @@
 
 #include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include <gtest/gtest.h>
 
 #include <optional>

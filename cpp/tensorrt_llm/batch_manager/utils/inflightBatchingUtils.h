@@ -30,11 +30,16 @@ using OptionalRef = common::OptionalRef<T>;
 
 TensorPtr collectRequestIds(RequestVector const& contextRequests, RequestVector const& generationRequests);
 
+void sortByLoraId(ScheduledRequests& scheduledRequests);
+
 //! @param beforeDecoder    Whether the function is called before the decoder. If it is true, correct the output offset.
 //! @param numDroppedTokens The number of dropped tokens for each beam (e.g. when the requests finished early).
 //!                         Generation logits for dropped tokens are ignored.
 void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::BufferManager const& bufferManager,
     LlmRequest& llmReq, std::size_t batchIdx, bool beforeDecoder, std::vector<SizeType32> const& numDroppedTokens = {});
+
+void copyAdditionalOutputs(RequestVector const& contextRequests, RequestVector const& generationRequests,
+    RuntimeBuffers::TensorMap const& outputMap, runtime::BufferManager const& manager);
 
 void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmRequest, SizeType32 maxInputLen,
     OptionalRef<kv_cache_manager::BaseKVCacheManager> kvCacheManager = std::nullopt,

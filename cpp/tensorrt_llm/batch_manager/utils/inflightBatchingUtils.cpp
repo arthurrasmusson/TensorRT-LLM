@@ -34,6 +34,17 @@ TensorPtr collectRequestIds(RequestVector const& contextRequests, RequestVector 
     return requestIds;
 }
 
+void sortByLoraId(ScheduledRequests& scheduledRequests)
+{
+    auto sortRequests = [](RequestVector& requests)
+    {
+        std::sort(requests.begin(), requests.end(),
+            [](auto const& lhs, auto const& rhs) { return lhs->getLoraTaskId() < rhs->getLoraTaskId(); });
+    };
+    sortRequests(scheduledRequests.contextRequests);
+    sortRequests(scheduledRequests.generationRequests);
+}
+
 void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::BufferManager const& bufferManager,
     LlmRequest& llmReq, std::size_t batchIdx, bool beforeDecoder, std::vector<SizeType32> const& numDroppedTokens)
 {
@@ -77,6 +88,52 @@ void copyGenerationLogits(RuntimeBuffers const& genRuntimeBuffers, runtime::Buff
         bufferManager.copy(*beamDeviceTensorPtr, *beamHostTensorPtr);
     }
 
+    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void copyAdditionalOutputs(RequestVector const& contextRequests, RequestVector const& generationRequests,
+    RuntimeBuffers::TensorMap const& outputMap, runtime::BufferManager const& manager)
+{
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    SizeType32 srcTensorIndex{0}; // One index shared across all output tensors
+    for (auto const& llmReq : contextRequests)
+    {
+        auto numContextTokens = llmReq->getContextChunkSize();
+        for (auto const& outputTensor : llmReq->getAdditionalContextOutputs())
+        {
+            auto const& outputTensorName = outputTensor.first;
+            auto tensorIt = outputMap.find(outputTensorName);
+            TLLM_CHECK_WITH_INFO(
+                tensorIt != outputMap.end(), "Additional context output tensor not found %s", outputTensorName.c_str());
+
+            auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex, numContextTokens);
+            auto dstView = ITensor::slice(outputTensor.second, llmReq->getContextCurrentPosition(), numContextTokens);
+            manager.copy(*srcView, *dstView);
+        }
+        srcTensorIndex += numContextTokens;
+    }
+
+    for (auto const& llmReq : generationRequests)
+    {
+        auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+        for (auto const& outputTensor : llmReq->getAdditionalGenerationOutputs())
+        {
+            auto const& outputTensorName = outputTensor.first;
+            auto tensorIt = outputMap.find(outputTensorName);
+            TLLM_CHECK_WITH_INFO(tensorIt != outputMap.end(), "Additional generation output tensor not found %s",
+                outputTensorName.c_str());
+
+            for (SizeType32 beam = 0; beam < reqBeamWidth; beam++)
+            {
+                auto generatedLength = llmReq->getNumTokens(beam) - llmReq->getPromptLen();
+                TLLM_CHECK(generatedLength >= 1);
+                auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex + beam, 1);
+                auto dstView = ITensor::slice(outputTensor.second, {beam, generatedLength - 1}, 1);
+                manager.copy(*srcView, *dstView);
+            }
+        }
+        srcTensorIndex += reqBeamWidth;
+    }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 

@@ -14,13 +14,14 @@
 
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/disaggServerUtil.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestWithId.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/executor/types.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -40,6 +41,7 @@
 
 using namespace tensorrt_llm::executor;
 using namespace tensorrt_llm::executor::disagg_executor;
+namespace su = tensorrt_llm::executor::serialize_utils;
 
 namespace tensorrt_llm::testing::disaggexecutor
 {

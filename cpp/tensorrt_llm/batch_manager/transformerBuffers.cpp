@@ -133,7 +133,7 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
 
         auto outputDims = ITensor::makeShape({modelConfig.getMaxNumTokens().value() * hiddenSize});
 
-        gemmAllReduceOutput = std::make_shared<IpcNvlsTensor>(outputDims, ARType, tpGroupSet);
+        gemmAllReduceOutput = std::make_shared<MulticastTensor>(outputDims, ARType, tpGroupSet);
     }
 }
 
@@ -293,11 +293,13 @@ void TransformerBuffers::getBuffers(
             // 2x RowLinear layers per attention block.
             // This will be fixed soon when I remove coupling between model
             // and runtime.
-            auto gemmARViewUC = gemmAllReduceOutput->getUnicastView();
-            auto gemmARViewMC = gemmAllReduceOutput->getMulticastView();
+            auto gemmARViewUC = gemmAllReduceOutput->getTensorView(MulticastTensorView::ViewType::kUNICAST);
+            auto gemmARViewMC = gemmAllReduceOutput->getTensorView(MulticastTensorView::ViewType::kMULTICAST);
+            auto gemmARViewIpc = gemmAllReduceOutput->getTensorView(MulticastTensorView::ViewType::kIPC_LIST);
 
             outputBuffers.insert_or_assign("gemm_allreduce_uc_out_" + std::to_string(idx), gemmARViewUC);
             outputBuffers.insert_or_assign("gemm_allreduce_mc_out_" + std::to_string(idx), gemmARViewMC);
+            outputBuffers.insert_or_assign("gemm_allreduce_ipc_out_" + std::to_string(idx), gemmARViewIpc);
         }
     }
 

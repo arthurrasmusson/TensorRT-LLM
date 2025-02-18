@@ -17,9 +17,9 @@
 #include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/executor/tensor.h"
 #include "tensorrt_llm/executor/types.h"
-#include <vector>
 
-namespace su = tensorrt_llm::executor::serialize_utils;
+#include <utility>
+#include <vector>
 
 namespace tensorrt_llm::executor
 {
@@ -29,10 +29,10 @@ class Request::Impl
 public:
     // Constructor
     Impl(VecTokens inputTokenIds, SizeType32 maxNewTokens, bool streaming, SamplingConfig const& samplingConfig,
-        OutputConfig const& outputConfig, std::optional<TokenIdType> const& endId,
-        std::optional<TokenIdType> const& padId, std::optional<std::vector<SizeType32>> positionIds,
-        std::optional<std::list<VecTokens>> badWords, std::optional<std::list<VecTokens>> stopWords,
-        std::optional<Tensor> embeddingBias, std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
+        OutputConfig outputConfig, std::optional<TokenIdType> const& endId, std::optional<TokenIdType> const& padId,
+        std::optional<std::vector<SizeType32>> positionIds, std::optional<std::list<VecTokens>> badWords,
+        std::optional<std::list<VecTokens>> stopWords, std::optional<Tensor> embeddingBias,
+        std::optional<ExternalDraftTokensConfig> externalDraftTokensConfig,
         std::optional<PromptTuningConfig> pTuningConfig, std::optional<MropeConfig> mRopeConfig,
         std::optional<LoraConfig> loraConfig, std::optional<LookaheadDecodingConfig> lookaheadConfig,
         std::optional<KvCacheRetentionConfig> kvCacheRetentionConfig,
@@ -47,7 +47,7 @@ public:
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
         , mSamplingConfig(samplingConfig)
-        , mOutputConfig(outputConfig)
+        , mOutputConfig(std::move(outputConfig))
         , mEndId(endId)
         , mPadId(padId)
         , mPositionIds(std::move(positionIds))
@@ -58,7 +58,7 @@ public:
         , mPTuningConfig(std::move(pTuningConfig))
         , mMropeConfig(std::move(mRopeConfig))
         , mLoraConfig(std::move(loraConfig))
-        , mLookaheadConfig(std::move(lookaheadConfig))
+        , mLookaheadConfig(lookaheadConfig)
         , mKvCacheRetentionConfig(std::move(kvCacheRetentionConfig))
         , mLogitsPostProcessorName(std::move(logitsPostProcessorName))
         , mEncoderInputTokenIds(std::move(encoderInputTokenIds))
@@ -66,13 +66,13 @@ public:
         , mReturnAllGeneratedTokens(returnAllGeneratedTokens)
         , mPriority(priority)
         , mType(type)
-        , mContextPhaseParams(contextPhaseParams)
-        , mEncoderInputFeatures(encoderInputFeatures)
+        , mContextPhaseParams(std::move(contextPhaseParams))
+        , mEncoderInputFeatures(std::move(encoderInputFeatures))
         , mEncoderOutputLength(encoderOutputLength)
-        , mCrossAttentionMask(crossAttentionMask)
+        , mCrossAttentionMask(std::move(crossAttentionMask))
         , mNumReturnSequences(numReturnSequences)
-        , mEagleConfig(eagleConfig)
-        , mSkipCrossAttnBlocks(skipCrossAttnBlocks)
+        , mEagleConfig(std::move(eagleConfig))
+        , mSkipCrossAttnBlocks(std::move(skipCrossAttnBlocks))
         , mGuidedDecodingParams(std::move(guidedDecodingParams))
         , mAllottedTimeMs(allottedTimeMs)
     {
@@ -80,120 +80,124 @@ public:
     }
 
     ~Impl() = default;
+    Impl(Impl const& other) = default;
+    Impl(Impl&& other) noexcept = default;
+    Impl& operator=(Impl const& other) = default;
+    Impl& operator=(Impl&& other) noexcept = default;
 
     void serialize(std::ostream& ostream) const
     {
-        visitMembers([&ostream](auto const& member) { su::serialize(member, ostream); });
+        visitMembers([&ostream](auto const& member) { serialize_utils::serialize(member, ostream); });
     }
 
     [[nodiscard]] size_t serializedSize() const
     {
         size_t totalSize = 0;
-        visitMembers([&totalSize](auto const& member) { totalSize += su::serializedSize(member); });
+        visitMembers([&totalSize](auto const& member) { totalSize += serialize_utils::serializedSize(member); });
         return totalSize;
     }
 
-    VecTokens getInputTokenIds() const
+    [[nodiscard]] VecTokens getInputTokenIds() const
     {
         return mInputTokenIds;
     }
 
-    SizeType32 getMaxNewTokens() const
+    [[nodiscard]] SizeType32 getMaxNewTokens() const
     {
         return mMaxNewTokens;
     }
 
-    bool getStreaming() const
+    [[nodiscard]] bool getStreaming() const
     {
         return mStreaming;
     }
 
-    SamplingConfig getSamplingConfig() const
+    [[nodiscard]] SamplingConfig getSamplingConfig() const
     {
         return mSamplingConfig;
     }
 
-    OutputConfig getOutputConfig() const
+    [[nodiscard]] OutputConfig getOutputConfig() const
     {
         return mOutputConfig;
     }
 
-    std::optional<SizeType32> getEndId() const
+    [[nodiscard]] std::optional<SizeType32> getEndId() const
     {
         return mEndId;
     }
 
-    std::optional<SizeType32> getPadId() const
+    [[nodiscard]] std::optional<SizeType32> getPadId() const
     {
         return mPadId;
     }
 
-    std::optional<std::vector<SizeType32>> getPositionIds() const
+    [[nodiscard]] std::optional<std::vector<SizeType32>> getPositionIds() const
     {
         return mPositionIds;
     }
 
-    std::optional<std::list<VecTokens>> getBadWords() const
+    [[nodiscard]] std::optional<std::list<VecTokens>> getBadWords() const
     {
         return mBadWords;
     }
 
-    std::optional<std::list<VecTokens>> getStopWords() const
+    [[nodiscard]] std::optional<std::list<VecTokens>> getStopWords() const
     {
         return mStopWords;
     }
 
-    std::optional<Tensor> getEmbeddingBias() const
+    [[nodiscard]] std::optional<Tensor> getEmbeddingBias() const
     {
         return mEmbeddingBias;
     }
 
-    std::optional<ExternalDraftTokensConfig> getExternalDraftTokensConfig() const
+    [[nodiscard]] std::optional<ExternalDraftTokensConfig> getExternalDraftTokensConfig() const
     {
         return mExternalDraftTokensConfig;
     }
 
-    std::optional<PromptTuningConfig> getPromptTuningConfig() const
+    [[nodiscard]] std::optional<PromptTuningConfig> getPromptTuningConfig() const
     {
         return mPTuningConfig;
     }
 
-    std::optional<MropeConfig> getMropeConfig() const
+    [[nodiscard]] std::optional<MropeConfig> getMropeConfig() const
     {
         return mMropeConfig;
     }
 
-    std::optional<LoraConfig> getLoraConfig() const
+    [[nodiscard]] std::optional<LoraConfig> getLoraConfig() const
     {
         return mLoraConfig;
     }
 
-    std::optional<LookaheadDecodingConfig> getLookaheadConfig() const
+    [[nodiscard]] std::optional<LookaheadDecodingConfig> getLookaheadConfig() const
     {
         return mLookaheadConfig;
     }
 
-    std::optional<KvCacheRetentionConfig> getKvCacheRetentionConfig() const
+    [[nodiscard]] std::optional<KvCacheRetentionConfig> getKvCacheRetentionConfig() const
     {
         return mKvCacheRetentionConfig;
     }
 
-    std::optional<std::string> getLogitsPostProcessorName() const
+    [[nodiscard]] std::optional<std::string> getLogitsPostProcessorName() const
     {
         return mLogitsPostProcessorName;
     }
 
-    std::optional<VecTokens> getEncoderInputTokenIds() const
+    [[nodiscard]] std::optional<VecTokens> getEncoderInputTokenIds() const
     {
         return mEncoderInputTokenIds;
     }
 
-    std::optional<IdType> getClientId() const
+    [[nodiscard]] std::optional<IdType> getClientId() const
     {
         return mClientId;
     }
 
-    PriorityType getPriority() const
+    [[nodiscard]] PriorityType getPriority() const
     {
         return mPriority;
     }
@@ -208,32 +212,32 @@ public:
         return mReturnAllGeneratedTokens;
     }
 
-    RequestType getRequestType() const
+    [[nodiscard]] RequestType getRequestType() const
     {
         return mType;
     }
 
-    std::optional<ContextPhaseParams> const& getContextPhaseParams() const
+    [[nodiscard]] std::optional<ContextPhaseParams> const& getContextPhaseParams() const
     {
         return mContextPhaseParams;
     }
 
-    std::optional<Tensor> getEncoderInputFeatures() const
+    [[nodiscard]] std::optional<Tensor> getEncoderInputFeatures() const
     {
         return mEncoderInputFeatures;
     }
 
-    std::optional<Tensor> getCrossAttentionMask() const
+    [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const
     {
         return mCrossAttentionMask;
     }
 
-    std::optional<SizeType32> getEncoderOutputLength() const
+    [[nodiscard]] std::optional<SizeType32> getEncoderOutputLength() const
     {
         return mEncoderOutputLength;
     }
 
-    std::optional<SizeType32> getNumReturnSequences() const
+    [[nodiscard]] std::optional<SizeType32> getNumReturnSequences() const
     {
         TLLM_LOG_WARNING(
             "The 'getNumReturnSequences' method in the Request class is deprecated and will be removed in a future "
@@ -241,12 +245,12 @@ public:
         return mSamplingConfig.getNumReturnSequences();
     }
 
-    std::optional<EagleConfig> getEagleConfig() const
+    [[nodiscard]] std::optional<EagleConfig> getEagleConfig() const
     {
         return mEagleConfig;
     }
 
-    std::optional<Tensor> getSkipCrossAttnBlocks() const
+    [[nodiscard]] std::optional<Tensor> getSkipCrossAttnBlocks() const
     {
         return mSkipCrossAttnBlocks;
     }
@@ -392,7 +396,7 @@ public:
 
     void setEagleConfig(std::optional<EagleConfig> eagleConfig)
     {
-        mEagleConfig = eagleConfig;
+        mEagleConfig = std::move(eagleConfig);
     }
 
     void setSkipCrossAttnBlocks(Tensor skipCrossAttnBlocks)

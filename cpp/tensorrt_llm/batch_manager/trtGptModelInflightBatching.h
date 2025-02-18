@@ -20,6 +20,7 @@
 #include "tensorrt_llm/runtime/gptDecoderBatched.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 #include "trtGptModel.h"
 
@@ -205,6 +206,11 @@ private:
         return (bufferId + 1) % mNumMicroBatches;
     }
 
+    [[nodiscard]] SizeType32 getPrevMicroBatchId(SizeType32 bufferId) const
+    {
+        return (bufferId + mNumMicroBatches - 1) % mNumMicroBatches;
+    }
+
     //! @brief Store full kv cache blocks contributed by req.
     //! These blocks become reusable from next step.
     void storeContextBlocks(std::shared_ptr<LlmRequest> const& req);
@@ -231,8 +237,6 @@ private:
 
     void debugIOTensors(RequestVector const& contextRequests, RequestVector const& generationRequests,
         TensorMap const& inputMap, TensorMap const& outputMap);
-    void copyAdditionalOutputs(
-        RequestVector const& contextRequests, RequestVector const& generationRequests, TensorMap const& outputMap);
 
     void createRuntimeContexts();
     void createDecoder(std::optional<executor::DecodingMode> const& decodingModeOpt);
@@ -273,9 +277,9 @@ private:
     void setupDecoderStep(RequestVector const& contextRequests, std::shared_ptr<RuntimeBuffers>& buffers);
     DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
-        ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr const& decoderFinishEvent);
+        ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr decoderFinishEvent);
 
-    void updateDecoderBuffers(bool returnLogProbs);
+    DecoderFinishedEventPtr updateDecoderBuffers(bool returnLogProbs, DecoderFinishedEventPtr decoderFinishEvent);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> communicateDecoderBuffers(bool returnLogProbs);
     void updateRequests(ScheduledRequests const& scheduledRequests);
 

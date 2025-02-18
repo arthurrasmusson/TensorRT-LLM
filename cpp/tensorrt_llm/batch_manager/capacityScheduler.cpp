@@ -69,18 +69,16 @@ bool oneManagerBeneficialToSkip(tensorrt_llm::batch_manager::kv_cache_manager::B
     auto newContextBlockOpt = kvCacheManager.findNewContextBlock(uniqueTokens, *llmRequest);
     if (newContextBlockOpt.has_value())
     {
-        auto newContextBlock = newContextBlockOpt.value();
+        auto const& newContextBlock = newContextBlockOpt.value();
         if (newlyContributedContextBlocks.count(newContextBlock) > 0)
         {
             // newContextBlock was contributed by earlier scheduled request.
             // Better to skip this step so we can reuse.
             return true;
         }
-        else
-        {
-            // This request is contributing newContextBlock.
-            newlyContributedContextBlocks.insert(newContextBlock);
-        }
+
+        // This request is contributing newContextBlock.
+        newlyContributedContextBlocks.insert(newContextBlock);
     }
     // Either all context blocks are already in KV cache,
     // or no previously scheduled request has contributed newContextBlock.

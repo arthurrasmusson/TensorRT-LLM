@@ -44,7 +44,6 @@
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/memoryUtils.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/kernels/decodingCommon.h"
@@ -60,6 +59,7 @@
 #include "tensorrt_llm/runtime/tllmLogger.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 
 #include <algorithm>
@@ -164,7 +164,7 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     }
     else
     {
-        mNumMicroBatches = isTtrOverlap() ? 2 : 1;
+        mNumMicroBatches = isTrtOverlap() ? 2 : 1;
     }
 
     mNumBuffers = (mCtxGenFusion ? 1 : 2) * mNumMicroBatches;
@@ -752,7 +752,6 @@ void TrtGptModelInflightBatching::forwardSync()
     }
 
     auto& currRequests = mMicroBatchScheduledRequests.at(mMicroBatchId);
-    auto& decoderWaitEvent = mDecoderFinishedEvents.at(mMicroBatchId);
 
     if (!currRequests.empty())
     {
@@ -763,7 +762,10 @@ void TrtGptModelInflightBatching::forwardSync()
                 TLLM_CHECK_WITH_INFO(hdl.get() == nullptr, "decoderSync handle must be nullptr.");
             }
             // Wait for decoding for requests in flight for the current micro batch
-            mDecStepAsyncSndHdls = decoderSync(currRequests, decoderWaitEvent);
+            auto& decoderWaitEvent = mDecoderFinishedEvents.at(mMicroBatchId);
+            mDecStepAsyncSndHdls = decoderSync(currRequests, std::move(decoderWaitEvent));
+            decoderWaitEvent.reset();
+
             if (!mWorldConfig.isLastPipelineParallelRank())
             {
                 mAsyncSendWaitThread->notifyStart();
@@ -867,7 +869,6 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             prepareDistGenInitRequests(activeRequests);
         }
         auto& currRequests = mMicroBatchScheduledRequests.at(mMicroBatchId);
-        auto& decoderFinishedEvent = mDecoderFinishedEvents.at(mMicroBatchId);
 
         // Get a new set of requests for that context
         // The scheduler will not include any requests that are (i) still in encoder state if encoder-decoder models OR
@@ -915,6 +916,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                 }
             }
 
+            utils::sortByLoraId(currRequests);
+
             (*mAssignReqSeqSlots)(*mSeqSlotManager, currRequests.contextRequests, currRequests.generationRequests);
 
             if (mKvCacheManager)
@@ -954,6 +957,20 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             sync_check_cuda_error();
 
+            if (isTrtOverlap())
+            {
+                // WAR(rkobus): Because the decoder is not stateless (yet) a sync is needed between
+                // decoder execution and next decoder step preparation.
+                auto const prevMicroBatchId = getPrevMicroBatchId(mMicroBatchId);
+                auto& prevDecoderFinishedEvent = mDecoderFinishedEvents.at(prevMicroBatchId);
+                if (prevDecoderFinishedEvent)
+                {
+                    prevDecoderFinishedEvent->event.synchronize();
+                }
+            }
+
+            auto& decoderFinishedEvent = mDecoderFinishedEvents.at(mMicroBatchId);
+            TLLM_CHECK_WITH_INFO(decoderFinishedEvent.get() == nullptr, "decoderFinishedEvent handle must be nullptr.");
             decoderFinishedEvent = mWorldConfig.isLastPipelineParallelRank() ? decoderStepAsync(currRequests)
                                                                              : DecoderFinishedEventPtr();
 
@@ -1003,7 +1020,10 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                     TLLM_CHECK_WITH_INFO(hdl.get() == nullptr, "decoderSync handle must be nullptr.");
                 }
                 // Wait for decoding for requests in flight for the current micro batch
-                mDecStepAsyncSndHdls = decoderSync(currRequests, decoderFinishedEvent);
+                auto& decoderFinishedEvent = mDecoderFinishedEvents.at(mMicroBatchId);
+                mDecStepAsyncSndHdls = decoderSync(currRequests, std::move(decoderFinishedEvent));
+                decoderFinishedEvent.reset();
+
                 mAsyncSendWaitThread->notifyStart();
             }
         }
@@ -1611,53 +1631,6 @@ void TrtGptModelInflightBatching::prepareGraph(SizeType32 bufferId, SizeType32 o
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::copyAdditionalOutputs(
-    RequestVector const& contextRequests, RequestVector const& generationRequests, TensorMap const& outputMap)
-{
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    auto const& manager = mRuntime->getBufferManager();
-    SizeType32 srcTensorIndex{0}; // One index shared across all output tensors
-    for (auto const& llmReq : contextRequests)
-    {
-        auto numContextTokens = llmReq->getContextChunkSize();
-        for (auto const& outputTensor : llmReq->getAdditionalContextOutputs())
-        {
-            auto const& outputTensorName = outputTensor.first;
-            auto tensorIt = outputMap.find(outputTensorName);
-            TLLM_CHECK_WITH_INFO(
-                tensorIt != outputMap.end(), "Additional context output tensor not found %s", outputTensorName.c_str());
-
-            auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex, numContextTokens);
-            auto dstView = ITensor::slice(outputTensor.second, llmReq->getContextCurrentPosition(), numContextTokens);
-            manager.copy(*srcView, *dstView);
-        }
-        srcTensorIndex += numContextTokens;
-    }
-
-    for (auto const& llmReq : generationRequests)
-    {
-        auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-        for (auto const& outputTensor : llmReq->getAdditionalGenerationOutputs())
-        {
-            auto const& outputTensorName = outputTensor.first;
-            auto tensorIt = outputMap.find(outputTensorName);
-            TLLM_CHECK_WITH_INFO(tensorIt != outputMap.end(), "Additional generation output tensor not found %s",
-                outputTensorName.c_str());
-
-            for (SizeType32 beam = 0; beam < reqBeamWidth; beam++)
-            {
-                auto generatedLength = llmReq->getNumTokens(beam) - llmReq->getPromptLen();
-                TLLM_CHECK(generatedLength >= 1);
-                auto srcView = ITensor::slice(tensorIt->second, srcTensorIndex + beam, 1);
-                auto dstView = ITensor::slice(outputTensor.second, {beam, generatedLength - 1}, 1);
-                manager.copy(*srcView, *dstView);
-            }
-        }
-        srcTensorIndex += reqBeamWidth;
-    }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-}
-
 void TrtGptModelInflightBatching::executeStep(
     RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId)
 {
@@ -1677,7 +1650,7 @@ void TrtGptModelInflightBatching::executeStep(
         {
             for (auto const& request : contextRequests)
             {
-                bool enableLayerWise = request->isContextOnlyRequest() && request->isLastContextChunk();
+                bool const enableLayerWise = request->isContextOnlyRequest() && request->isLastContextChunk();
                 if (enableLayerWise)
                 {
                     layerWiseRequests.push_back(request);
@@ -1718,7 +1691,7 @@ void TrtGptModelInflightBatching::executeStep(
 
     if (mAdditionalOutputNames.has_value() && !mAdditionalOutputNames.value().empty())
     {
-        copyAdditionalOutputs(contextRequests, generationRequests, outputMap);
+        utils::copyAdditionalOutputs(contextRequests, generationRequests, outputMap, getBufferManager());
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -1935,6 +1908,17 @@ void TrtGptModelInflightBatching::getDecoderSlotHostOutputs(
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+namespace
+{
+// Check if one of the request needs log probs, need to get from decoder and communicate
+bool batchReturnLogProbs(ScheduledRequests const& scheduledRequests)
+{
+    auto pred = [](auto const& llmReq) { return llmReq->returnLogProbs(); };
+    return std::any_of(scheduledRequests.contextRequests.begin(), scheduledRequests.contextRequests.end(), pred)
+        || std::any_of(scheduledRequests.generationRequests.begin(), scheduledRequests.generationRequests.end(), pred);
+}
+} // namespace
+
 TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching::decoderStepAsync(
     ScheduledRequests const& scheduledRequests)
 {
@@ -1971,6 +1955,10 @@ TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching
             *mDecoderBuffers, *genRuntimeBuffers, mDecoder->getDecodingMode(), mModelConfig, getMaxNumSequences());
 
     DecoderFinishedEventPtr decoderFinishEvent = mDecoder->forwardAsync(*mDecodingOutput, *decodingInput);
+
+    auto const returnLogProbs = batchReturnLogProbs(scheduledRequests);
+    decoderFinishEvent = updateDecoderBuffers(returnLogProbs, std::move(decoderFinishEvent));
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
     return decoderFinishEvent;
 }
@@ -2032,23 +2020,18 @@ void TrtGptModelInflightBatching::copyCacheIndirectionFromOutputsToInputs(
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void TrtGptModelInflightBatching::updateDecoderBuffers(bool returnLogProbs)
+TrtGptModelInflightBatching::DecoderFinishedEventPtr TrtGptModelInflightBatching::updateDecoderBuffers(
+    bool returnLogProbs, DecoderFinishedEventPtr decoderFinishEvent)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(updateDecoderBuffers);
 
-    // Get finished
-    auto const decoderFinished = mDecoder->getFinished();
-    std::copy(decoderFinished.begin(), decoderFinished.end(), bufferCast<std::uint8_t>(*mDecoderBuffers->finished));
+    // Chain copy after decoder event, using a different stream
+    mCopyBufferManager.getStream().wait(decoderFinishEvent->event);
 
     mDecoderBuffers->newOutputTokens = mDecoder->getAllNewTokens();
     auto const finishReasonsDevice = mDecoder->getFinishReasons();
 
-    // Here host is already synchronized with forwardSync event, so can trigger copy
-    // Using a different stream
-    runtime::CudaEvent beforeEvent{};
-    mRuntime->getStreamPtr()->record(beforeEvent);
-    mCopyBufferManager.getStream().wait(beforeEvent);
     mCopyBufferManager.copy(*mDecoderBuffers->newOutputTokens, *mDecoderBuffers->newOutputTokensHost);
     mCopyBufferManager.copy(*mDecoderBuffers->sequenceLengths, *mDecoderBuffers->sequenceLengthsHost);
     mCopyBufferManager.copy(*finishReasonsDevice, *mDecoderBuffers->finishReasonsHost);
@@ -2063,6 +2046,7 @@ void TrtGptModelInflightBatching::updateDecoderBuffers(bool returnLogProbs)
 
     if (mModelConfig.getSpeculativeDecodingMode().predictsDraftTokens())
     {
+        // TODO(rkobus): keep data on device for next iteration
         mDecoderBuffers->draftBuffers.nextDraftTokensDevice = mDecoder->getNextDraftTokens();
         mCopyBufferManager.copy(
             *mDecoderBuffers->draftBuffers.nextDraftTokensDevice, *mDecoderBuffers->draftBuffers.nextDraftTokensHost);
@@ -2084,12 +2068,11 @@ void TrtGptModelInflightBatching::updateDecoderBuffers(bool returnLogProbs)
         mDecoderBuffers->draftBuffers.acceptedPackedPathsDevice = mDecoder->getAcceptedPackedPaths();
     }
 
-    // Make sure host only continues when copy is done
     runtime::CudaEvent copyEvent{};
     mCopyBufferManager.getStream().record(copyEvent);
-    copyEvent.synchronize();
-
+    // Store the event for later sync. Sync stream before calling next decoder. Sync host before updating requests.
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    return std::make_unique<decoder_batch::DecoderFinishedEvent>(std::move(copyEvent), decoderFinishEvent->active);
 }
 
 std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::communicateDecoderBuffers(
@@ -2343,33 +2326,22 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
 }
 
 std::vector<std::unique_ptr<DecoderStepAsyncSend>> TrtGptModelInflightBatching::decoderSync(
-    ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr const& decoderFinishEvent)
+    ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr decoderFinishEvent)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(decoderSync);
-
-    // If one of the request needs log probs, need to get from decoder and communicate
-    bool returnLogProbs{false};
-    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
-    {
-        for (auto const& llmReq : requests)
-        {
-            if (llmReq->returnLogProbs())
-            {
-                returnLogProbs = true;
-                break;
-            }
-        }
-    }
 
     if (mWorldConfig.isLastPipelineParallelRank())
     {
         // Wait for the decoder event for that context
         mDecoder->forwardSync(*decoderFinishEvent);
 
-        updateDecoderBuffers(returnLogProbs);
+        // Get finished
+        auto const decoderFinished = mDecoder->getFinished();
+        std::copy(decoderFinished.begin(), decoderFinished.end(), bufferCast<std::uint8_t>(*mDecoderBuffers->finished));
     }
 
+    auto const returnLogProbs = batchReturnLogProbs(scheduledRequests);
     auto asyncHandles = communicateDecoderBuffers(returnLogProbs);
 
     updateRequests(scheduledRequests);

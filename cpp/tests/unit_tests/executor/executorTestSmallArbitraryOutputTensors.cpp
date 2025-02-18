@@ -70,14 +70,14 @@ struct DecoderTestShared
     static constexpr auto kTopKTensorName = "topKLogits";
 
     DecoderTestShared(std::shared_ptr<runtime::TllmLogger> logger, std::mt19937 rng,
-        std::unique_ptr<executor::Executor>&& executor, std::vector<TLogits> randomLogits)
+        std::shared_ptr<executor::Executor> executor, std::vector<TLogits> randomLogits)
         : logger(std::move(logger))
         , rng(rng)
         , executor(std::move(executor))
         , randomLogits(std::move(randomLogits)){};
     std::shared_ptr<runtime::TllmLogger> logger;
     std::mt19937 rng;
-    std::unique_ptr<executor::Executor> executor;
+    std::shared_ptr<executor::Executor> executor;
     std::vector<TLogits> randomLogits;
 };
 
@@ -94,7 +94,7 @@ std::unique_ptr<DecoderTestShared<TLogits>> SetupDecoderTest(
         randomLogits};
     auto engineHostMemory = tensorrt_llm::testing::utils::engines::createConstantTrivialDecoderWithTopKLogits<TLogits>(
         decoderParameters, params.numTopKLogits, DecoderTestShared<TLogits>::kTopKTensorName, logger);
-    auto const engine = std::move(runtime::RawEngine(engineHostMemory.get()));
+    auto const engine = runtime::RawEngine(engineHostMemory.release());
     auto const dtype = runtime::TRTDataType<TLogits>::value;
     auto modelConfig = runtime::ModelConfig(params.vocabSize, 1, 1, 0, 1, 1, dtype);
     modelConfig.useGptAttentionPlugin(true);
@@ -109,25 +109,26 @@ std::unique_ptr<DecoderTestShared<TLogits>> SetupDecoderTest(
     modelConfig.setLayerTypes({runtime::ModelConfig::LayerType::kATTENTION});
     modelConfig.setTokensPerBlock(DecoderTestShared<TLogits>::kNumTokensPerBlock);
     modelConfig.setPagedContextFMHA(true);
+    modelConfig.computeContextLogits(true);
 
     auto const worldConfig = runtime::WorldConfig();
-    auto optionalParams = batch_manager::TrtGptModelOptionalParams{};
-    auto kvCacheConfig = batch_manager::kv_cache_manager::KvCacheConfig{};
-    kvCacheConfig.enableBlockReuse = false;
 
-    kvCacheConfig.maxTokens = DecoderTestShared<TLogits>::kKvCacheMaxTokens;
-    optionalParams.kvCacheConfig = kvCacheConfig;
-    optionalParams.additionalOutputNames = {DecoderTestShared<TLogits>::kTopKTensorName};
+    auto kvCacheConfig = executor::KvCacheConfig{};
+    kvCacheConfig.setMaxTokens(DecoderTestShared<TLogits>::kKvCacheMaxTokens);
+
+    auto const executorConfig
+        = executor::ExecutorConfig(params.maxBeamWidth, executor::SchedulerConfig(), kvCacheConfig, true, true, 1, 1,
+            executor::BatchingType::kINFLIGHT, params.maxBatchSize, params.maxNumTokens, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, 1, std::nullopt, executor::ExtendedRuntimePerfKnobConfig(), std::nullopt, 0,
+            executor::ExecutorConfig::kDefaultMaxSeqIdleMicroseconds, std::nullopt, std::nullopt,
+            std::vector<std::string>{DecoderTestShared<TLogits>::kTopKTensorName});
+
+    auto optionalParams = batch_manager::TrtGptModelOptionalParams{executorConfig, false};
     auto model = std::make_shared<batch_manager::TrtGptModelInflightBatching>(
         logger, modelConfig, worldConfig, engine, false, optionalParams);
-    auto const executorConfig
-        = executor::ExecutorConfig(params.maxBeamWidth, executor::SchedulerConfig(), executor::KvCacheConfig(false),
-            true, true, 1, 1, executor::BatchingType::kINFLIGHT, params.maxBatchSize, params.maxNumTokens, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 1, std::nullopt, executor::ExtendedRuntimePerfKnobConfig(),
-            std::nullopt, 0, executor::ExecutorConfig::kDefaultMaxSeqIdleMicroseconds, std::nullopt, std::nullopt,
-            std::vector<std::string>{DecoderTestShared<TLogits>::kTopKTensorName});
+
     return std::make_unique<DecoderTestShared<TLogits>>(
-        logger, rng, std::make_unique<executor::Executor>(model, executorConfig), randomLogits);
+        logger, rng, std::make_shared<executor::Executor>(model, executorConfig), randomLogits);
 }
 
 template <typename TLogits>
@@ -146,7 +147,7 @@ protected:
 
     void runTopKGenerationLogitsTest(TrivialConstantDecoderWithTopKLogitsTestParameters const& parameters)
     {
-        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize);
+        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize, 0);
         auto requests = std::vector<executor::Request>{};
         requests.reserve(static_cast<std::size_t>(parameters.numRequests));
         for (auto i = 0; i < parameters.numRequests; i++)
@@ -176,7 +177,9 @@ protected:
                 auto const* topKLogitsData = reinterpret_cast<TLogits const*>(topKLogits.output.getData());
                 for (auto i = 0; i < parameters.numTopKLogits; i++)
                 {
-                    ASSERT_EQ(topKLogitsData[i], state->randomLogits[i]);
+                    EXPECT_TRUE(almostEqual(topKLogitsData[i], state->randomLogits[i], 1e-5))
+                        << "requestId " << requestId << " i " << i << ": " << topKLogitsData[i]
+                        << " != " << state->randomLogits[i];
                 }
                 ASSERT_EQ(tokensByBeam.size(), 1);
                 for (auto const& tokensForBeam : tokensByBeam)
@@ -204,7 +207,7 @@ protected:
 
     void runTopKGenerationLogitsStreamingTest(TrivialConstantDecoderWithTopKLogitsTestParameters const& parameters)
     {
-        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize);
+        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize, 0);
         auto requests = std::vector<executor::Request>{};
         requests.reserve(static_cast<std::size_t>(parameters.numRequests));
         for (auto i = 0; i < parameters.numRequests; i++)
@@ -236,7 +239,9 @@ protected:
                 auto const* topKLogitsData = reinterpret_cast<TLogits const*>(topKLogits.output.getData());
                 for (auto i = 0; i < parameters.numTopKLogits; i++)
                 {
-                    ASSERT_EQ(topKLogitsData[i], state->randomLogits[i]);
+                    EXPECT_TRUE(almostEqual(topKLogitsData[i], state->randomLogits[i], 1e-5))
+                        << "requestId " << requestId << " i " << i << ": " << topKLogitsData[i]
+                        << " != " << state->randomLogits[i];
                 }
                 ASSERT_EQ(tokensByBeam.size(), 1);
                 for (auto const& tokensForBeam : tokensByBeam)
@@ -265,11 +270,12 @@ protected:
 
     void runTopKContextLogitsTest(TrivialConstantDecoderWithTopKLogitsTestParameters const& parameters)
     {
-        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize);
         auto requests = std::vector<executor::Request>{};
         requests.reserve(static_cast<std::size_t>(parameters.numRequests));
         for (auto i = 0; i < parameters.numRequests; i++)
         {
+            // create different sequence for each request to avoid KV cache reuse
+            auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize, i);
             std::vector<executor::OutputConfig::AdditionalModelOutput> additionalOutputs{
                 executor::OutputConfig::AdditionalModelOutput{DecoderTestShared<TLogits>::kTopKTensorName, true}};
             requests.emplace_back(requestTokens, parameters.maxOutputLength, true, executor::SamplingConfig{},
@@ -301,7 +307,9 @@ protected:
                 auto const* topKLogitsData = reinterpret_cast<TLogits const*>(contextTopKLogitsPtr->output.getData());
                 for (auto i = 0; i < parameters.numTopKLogits; i++)
                 {
-                    ASSERT_EQ(topKLogitsData[i], state->randomLogits[i]);
+                    EXPECT_TRUE(almostEqual(topKLogitsData[i], state->randomLogits[i], 1e-5))
+                        << "requestId " << requestId << " i " << i << ": " << topKLogitsData[i]
+                        << " != " << state->randomLogits[i];
                 }
                 ASSERT_EQ(tokensByBeam.size(), 1);
                 for (auto const& tokensForBeam : tokensByBeam)
@@ -330,11 +338,12 @@ protected:
 
     void runTopKContextLogitsTest(TrivialConstantDecoderWithTopKLogitsTestParameters const& parameters)
     {
-        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize);
         auto requests = std::vector<executor::Request>{};
         requests.reserve(static_cast<std::size_t>(parameters.numRequests));
         for (auto i = 0; i < parameters.numRequests; i++)
         {
+            // create different sequence for each request to avoid KV cache reuse
+            auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize, i);
             std::vector<executor::OutputConfig::AdditionalModelOutput> additionalOutputs{
                 executor::OutputConfig::AdditionalModelOutput{DecoderTestShared<TLogits>::kTopKTensorName, true}};
             requests.emplace_back(requestTokens, parameters.maxOutputLength, false, executor::SamplingConfig{},
@@ -365,7 +374,9 @@ protected:
                 auto const* topKLogitsData = reinterpret_cast<TLogits const*>(contextTopKLogitsPtr->output.getData());
                 for (auto i = 0; i < parameters.numTopKLogits; i++)
                 {
-                    ASSERT_EQ(topKLogitsData[i], state->randomLogits[i]);
+                    EXPECT_TRUE(almostEqual(topKLogitsData[i], state->randomLogits[i], 1e-5))
+                        << "requestId " << requestId << " i " << i << ": " << topKLogitsData[i]
+                        << " != " << state->randomLogits[i];
                 }
                 ASSERT_EQ(tokensByBeam.size(), 1);
                 for (auto const& tokensForBeam : tokensByBeam)

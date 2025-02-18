@@ -457,7 +457,8 @@ BatchManagerErrorCode_t GptManager::fetchNewRequests()
 
                 auto const& kvCacheManager = mTrtGptModel->getKVCacheManager();
                 bool enableKVCacheReuse = kvCacheManager ? kvCacheManager->isEnableBlockReuse() : false;
-                r->validate(getMaxInputLen(), getMaxSequenceLen(), getMaxDraftLen(), std::nullopt, enableKVCacheReuse);
+                r->validate(getMaxInputLen(), getMaxSequenceLen(), getMaxDraftLen(), std::nullopt, enableKVCacheReuse,
+                    mTrtGptModel->getModelConfig().computeContextLogits());
 
                 auto const vocabSizePadded
                     = mTrtGptModel->getModelConfig().getVocabSizePadded(mTrtGptModel->getWorldConfig().getSize());

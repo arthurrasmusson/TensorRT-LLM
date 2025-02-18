@@ -275,7 +275,7 @@ protected:
         return mNormalizeLogProbs;
     }
 
-    [[nodiscard]] bool isTtrOverlap() const
+    [[nodiscard]] bool isTrtOverlap() const
     {
         return mEnableTrtOverlap;
     }

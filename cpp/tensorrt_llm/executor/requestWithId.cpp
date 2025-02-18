@@ -11,13 +11,14 @@
  */
 
 #include "requestWithId.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
 
-#include <cstdint>
 #include <istream>
 #include <ostream>
 #include <sstream>
 
 using namespace tensorrt_llm::executor;
+namespace su = tensorrt_llm::executor::serialize_utils;
 
 std::vector<char> tensorrt_llm::executor::RequestWithId::serializeReqWithIds(
     std::vector<RequestWithId> const& reqWithIds)

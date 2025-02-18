@@ -15,10 +15,10 @@
 #include "tensorrt_llm/batch_manager/trtGptModelFactory.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/memoryUtils.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/plugins/api/tllmPlugin.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/tllmLogger.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 #include "tests/utils/common.h"
 
@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <vector>
 
 using namespace tensorrt_llm::testing;
@@ -119,7 +120,7 @@ void verifyOutput(RequestList const& finishedRequestList,
     auto const checkRawLogits = modelSpec.mOtherModelSpecToCompare ? false : modelSpec.mGatherLogits;
     auto const smokeTest = modelSpec.mSmokeTest;
     auto const returnLogProbs = modelSpec.mReturnLogProbs;
-    auto const checkAcceptedTokenLogits = modelSpec.mReturnAcceptedTokensLogits;
+    auto const checkAcceptedTokenLogits = modelSpec.mAcceptDraftByLogits;
 
     if (smokeTest)
     {
@@ -379,7 +380,7 @@ TestData loadTestData(ModelSpec const& modelSpec, TrtGptModelType const& modelTy
     {
         testData.loadContextLogits(contextLogitsFile, givenInputLengths, manager);
     }
-    if (modelSpec.useLogits() || modelSpec.mReturnAcceptedTokensLogits)
+    if (modelSpec.useLogits() || modelSpec.mAcceptDraftByLogits)
     {
         testData.loadGenerationLogits(genLogitsFile, manager);
     }
@@ -451,7 +452,8 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
     std::unordered_map<SizeType32, TestData> const& beamWidthTestData, SizeType32 batchSize, SizeType32 nbGivenInputs,
     SizeType32 maxInputLength, SizeType32 padId, std::vector<SizeType32> const& givenInputLengths,
     TokenIdType const* givenInputData, ModelSpec const& modelSpec, TrtGptModelIfbTestType testType,
-    TrtGptModelType modelType, int maxReqPerStep = 0, bool prepopulateKVCache = false, bool enableStreamingMode = false)
+    TrtGptModelType modelType, int maxReqPerStep, bool prepopulateKVCache, bool enableStreamingMode,
+    bool enableBlockReuse)
 {
     // Fill the requests using givenInput
     // requestList will have batchSize requests
@@ -553,7 +555,8 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
                 maxDraftTokens
                     = trtGptModel->getModelConfig().getSpeculativeDecodingModulePtr()->getMaxDecodingDraftTokens();
             }
-            r->validate(trtGptModel->getMaxInputLen(), trtGptModel->getMaxSequenceLen(), maxDraftTokens);
+            r->validate(trtGptModel->getMaxInputLen(), trtGptModel->getMaxSequenceLen(), maxDraftTokens, std::nullopt,
+                enableBlockReuse, trtGptModel->getModelConfig().computeContextLogits());
 
             if (enableStreamingMode)
             {
@@ -572,7 +575,7 @@ RequestList runGptModelInference(std::shared_ptr<TrtGptModel>& trtGptModel, std:
                 r->allocGenerationLogitsHost(vocabSizePadded, logitDatatype);
             }
 
-            if (!prepopulateKVCache && modelSpec.mReturnAcceptedTokensLogits && !draftTokens.empty())
+            if (!prepopulateKVCache && modelSpec.mAcceptDraftByLogits && !draftTokens.empty())
             {
                 r->allocTargetModelAcceptedTokenLogitsHost(vocabSizePadded, logitDatatype);
                 r->setReturnGenerationLogits(true);
@@ -688,14 +691,14 @@ void runIfbTest(fs::path const& modelPath, ModelSpec const& modelSpec, ModelIds 
         bool const prepopulateKVCache = modelSpec.mMaxDraftTokens > 0;
         auto finishedRequestList = runGptModelInference(trtGptModel, beamWidths, beamWidthTestData, batchSize,
             nbGivenInputs, maxInputLength, padId, givenInputLengths, givenInputData, modelSpec, testType, modelType,
-            maxReqPerStep, prepopulateKVCache, enableStreamingMode);
+            maxReqPerStep, prepopulateKVCache, enableStreamingMode, modelSpec.mKVCacheReuse);
 
         if (prepopulateKVCache)
         {
             // Call the 2nd time with prefilled KV cache
             finishedRequestList = runGptModelInference(trtGptModel, beamWidths, beamWidthTestData, batchSize,
                 nbGivenInputs, maxInputLength, padId, givenInputLengths, givenInputData, modelSpec, testType, modelType,
-                maxReqPerStep, false, enableStreamingMode);
+                maxReqPerStep, false, enableStreamingMode, modelSpec.mKVCacheReuse);
         }
 
         // WAR: disabled verification because of switched beams for different batch composition
@@ -846,11 +849,6 @@ std::string generateTestName(testing::TestParamInfo<ParamType> const& info)
     if (modelSpec.mAcceptDraftByLogits)
     {
         name.append("AcceptByLogits");
-    }
-
-    if (modelSpec.mReturnAcceptedTokensLogits)
-    {
-        name.append("ReturnAcceptedTokenLogits");
     }
 
     if (modelSpec.mCapacitySchedulerPolicy)
@@ -1241,7 +1239,7 @@ INSTANTIATE_TEST_SUITE_P(GptSwitchBwTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false, true),  // enableChunkedContext
+        testing::Values(true),         // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(false),        // enableCudaGraphMode
         testing::Values(std::nullopt), // hostCacheSize
@@ -1397,40 +1395,11 @@ INSTANTIATE_TEST_SUITE_P(GptDraftTests, ParamTest,
         testing::Values(std::nullopt),       // maxTokensInPagedKvCache
         testing::Values(std::nullopt),       // freeGpuMemoryFraction
         testing::Values(false),              // enableTrtOverlap
-        testing::Values(true, false),        // enableChunkedContext
+        testing::Values(true),               // enableChunkedContext
         testing::Values(false),              // enableStreamingMode
         testing::Values(false),              // enableCudaGraphMode
         testing::Values(std::nullopt),       // hostCacheSize
-        testing::Values(true)                // useRandomEndId
-        ),
-    generateTestName);
-
-INSTANTIATE_TEST_SUITE_P(GptReturnAcceptedTokenLogitsTests, ParamTest,
-    testing::Combine(testing::Values(gptModelParams),
-        testing::Values(ModelSpec{INPUT_FILE, nvinfer1::DataType::kHALF, getGptDraftTestsCompareModelSpec()}
-                            .useGptAttentionPlugin()
-                            .usePackedInput()
-                            .setKVCacheType(KVCacheType::kPAGED)
-                            .useDraftTokensExternalDecoding()
-                            .gatherLogits()
-                            .setDraftTokens(5)
-                            .useAcceptByLogits()
-                            .replaceLogits()
-                            .returnAcceptedTokensLogits()
-                            .collectGenerationLogitsFile()
-                            .collectContextLogitsFile()),
-        testing::Values(TrtGptModelType::InflightBatching, TrtGptModelType::InflightFusedBatching),
-        testing::Values(
-            TrtGptModelIfbTestType::BULK, TrtGptModelIfbTestType::WAVEFRONT, TrtGptModelIfbTestType::RANDOM),
-        testing::Values(BeamConfig{1, {1}}), // beamConfig
-        testing::Values(std::nullopt),       // maxTokensInPagedKvCache
-        testing::Values(std::nullopt),       // freeGpuMemoryFraction
-        testing::Values(false),              // enableTrtOverlap
-        testing::Values(false, true),        // enableChunkedContext
-        testing::Values(false),              // enableStreamingMode
-        testing::Values(false),              // enableCudaGraphMode
-        testing::Values(std::nullopt),       // hostCacheSize
-        testing::Values(false)               // useRandomEndId
+        testing::Values(false, true)         // useRandomEndId
         ),
     generateTestName);
 
@@ -1452,7 +1421,7 @@ INSTANTIATE_TEST_SUITE_P(GptLogitsTests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false, true),  // enableChunkedContext
+        testing::Values(true),         // enableChunkedContext
         testing::Values(false, true),  // enableStreamingMode
         testing::Values(false),        // enableCudaGraphMode
         testing::Values(std::nullopt), // hostCacheSize
@@ -1478,7 +1447,7 @@ INSTANTIATE_TEST_SUITE_P(GptLogProbsTests, ParamTest,
         testing::Values(std::nullopt),                           // maxTokensInPagedKvCache
         testing::Values(std::nullopt),                           // freeGpuMemoryFraction
         testing::Values(false),                                  // enableTrtOverlap
-        testing::Values(false, true),                            // enableChunkedContext
+        testing::Values(true),                                   // enableChunkedContext
         testing::Values(false),                                  // enableStreamingMode
         testing::Values(false),                                  // enableCudaGraphMode
         testing::Values(std::nullopt),                           // hostCacheSize
@@ -1783,7 +1752,7 @@ INSTANTIATE_TEST_SUITE_P(GptjFP8Tests, ParamTest,
         testing::Values(std::nullopt), // maxTokensInPagedKvCache
         testing::Values(std::nullopt), // freeGpuMemoryFraction
         testing::Values(false),        // enableTrtOverlap
-        testing::Values(false, true),  // enableChunkedContext
+        testing::Values(true),         // enableChunkedContext
         testing::Values(false),        // enableStreamingMode
         testing::Values(false),        // enableCudaGraphMode
         testing::Values(std::nullopt), // hostCacheSize

@@ -13,6 +13,9 @@
 #include "tensorrt_llm/executor/disaggServerUtil.h"
 #include "tensorrt_llm/common/utils.h"
 #include "tensorrt_llm/executor/types.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
+
+#include <mutex>
 
 namespace tensorrt_llm::executor::disagg_executor
 {

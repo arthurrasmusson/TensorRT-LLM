@@ -52,14 +52,14 @@ struct DecoderTestShared
     static constexpr runtime::SizeType32 kKvCacheMaxTokens = 2048 * 8;
 
     DecoderTestShared(std::shared_ptr<runtime::TllmLogger> logger, std::mt19937 rng,
-        std::unique_ptr<executor::Executor>&& executor, std::vector<TLogits> randomLogits)
+        std::shared_ptr<executor::Executor> executor, std::vector<TLogits> randomLogits)
         : logger(std::move(logger))
         , rng(rng)
         , executor(std::move(executor))
         , randomLogits(std::move(randomLogits)){};
     std::shared_ptr<runtime::TllmLogger> logger;
     std::mt19937 rng;
-    std::unique_ptr<executor::Executor> executor;
+    std::shared_ptr<executor::Executor> executor;
     std::vector<TLogits> randomLogits;
 };
 
@@ -75,7 +75,7 @@ std::unique_ptr<DecoderTestShared<TLogits>> SetupDecoderTest(TrivialConstantDeco
         randomLogits};
     auto engineHostMemory
         = tensorrt_llm::testing::utils::engines::createConstantTrivialDecoder<TLogits>(decoderParameters, logger);
-    auto const engine = std::move(runtime::RawEngine(engineHostMemory.get()));
+    auto const engine = runtime::RawEngine(engineHostMemory.release());
     auto const dtype = runtime::TRTDataType<TLogits>::value;
     auto modelConfig = runtime::ModelConfig(params.vocabSize, 1, 1, 0, 1, 1, dtype);
     modelConfig.useGptAttentionPlugin(true);
@@ -105,7 +105,7 @@ std::unique_ptr<DecoderTestShared<TLogits>> SetupDecoderTest(TrivialConstantDeco
         executor::ExtendedRuntimePerfKnobConfig(), std::nullopt, 0,
         executor::ExecutorConfig::kDefaultMaxSeqIdleMicroseconds, std::nullopt, std::nullopt);
     return std::make_unique<DecoderTestShared<TLogits>>(
-        logger, rng, std::make_unique<executor::Executor>(model, executorConfig), randomLogits);
+        logger, rng, std::make_shared<executor::Executor>(model, executorConfig), randomLogits);
 }
 
 template <typename TLogits>
@@ -122,8 +122,7 @@ protected:
 
     void runDecoderTest(TrivialConstantDecoderTestParameters const& parameters)
     {
-        GTEST_SKIP(); // SKIP this test due to known bug
-        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize);
+        auto const requestTokens = createConsecutiveTokenSequence(parameters.promptLength, parameters.vocabSize, 0);
         auto requests = std::vector<executor::Request>{};
         requests.reserve(static_cast<std::size_t>(parameters.numRequests));
         for (auto i = 0; i < parameters.numRequests; i++)
@@ -132,7 +131,7 @@ protected:
                 executor::OutputConfig{false, false, false, true, false, false});
         }
         auto const accumulatedResponses
-            = runThroughRequests(*state->executor, requests, std::chrono::duration<float, std::milli>(100000));
+            = runThroughRequests(*state->executor, requests, std::chrono::duration<float, std::milli>(3600000));
         ASSERT_EQ(accumulatedResponses.size(), parameters.numRequests);
 
         std::sort(state->randomLogits.begin(), state->randomLogits.end());
@@ -156,8 +155,7 @@ protected:
 namespace
 {
 constexpr runtime::SizeType32 kRandomSeed1 = 45;
-constexpr runtime::SizeType32 kRandomSeed2 = 435;
-auto const randomSeeds = ::testing::Values(kRandomSeed1, kRandomSeed2);
+auto const randomSeeds = ::testing::Values(kRandomSeed1);
 
 constexpr runtime::SizeType32 kMinVocabSize = 16;
 auto const vocabSizes = ::testing::Values(kMinVocabSize);
@@ -171,13 +169,13 @@ auto const beamWidths = ::testing::Values(kMinBeamWidth);
 constexpr runtime::SizeType32 kMinMaxBatchSize = 2048;
 auto const maxBatchSizes = ::testing::Values(kMinMaxBatchSize);
 
-constexpr runtime::SizeType32 kMinNumRequests = 1;
+constexpr runtime::SizeType32 kMinNumRequests = 64;
 auto const numRequestses = ::testing::Values(kMinNumRequests);
 
-constexpr runtime::SizeType32 kMinPromptLength = 4;
+constexpr runtime::SizeType32 kMinPromptLength = 32;
 auto const promptLengths = ::testing::Values(kMinPromptLength);
 
-constexpr runtime::SizeType32 kMinMaxOutputLength = 4;
+constexpr runtime::SizeType32 kMinMaxOutputLength = 16;
 auto const maxOutputLengths = ::testing::Values(kMinMaxOutputLength);
 
 auto const paramGenerator

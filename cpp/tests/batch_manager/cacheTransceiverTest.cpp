@@ -10,31 +10,31 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#include "tensorrt_llm/common/cudaUtils.h"
-#include <cstdio>
-#include <future>
-#include <memory>
 #if ENABLE_UCX
 #include "tensorrt_llm/batch_manager/ucxDataTransceiver.h"
 #endif
 #include "tensorrt_llm/common/assert.h"
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/envUtils.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
-#include "tensorrt_llm/runtime/utils/multiDeviceUtils.h"
-#include "gtest/gtest.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
+#include <tensorrt_llm/batch_manager/cacheFormatter.h>
+#include <tensorrt_llm/batch_manager/mpiDataTransceiver.h>
+
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+#include <future>
+#include <memory>
 #include <random>
-#include <thread>
+
+#include "gtest/gtest.h"
+#include <gmock/gmock.h>
 
 namespace tr = tensorrt_llm::runtime;
 using SizeType32 = tensorrt_llm::runtime::SizeType32;
@@ -50,8 +50,11 @@ using testing::ReturnRef;
 //            RequestInfoTest
 // ---------------------------------------
 
+namespace
+{
+
 template <typename T>
-T serializeDeserialize(T val)
+T serializeDeserialize(T const& val)
 {
     auto size = T::serializedSize(val);
     std::ostringstream oss;
@@ -61,6 +64,8 @@ T serializeDeserialize(T val)
     std::istringstream iss(oss.str());
     return T::deserialize(iss);
 }
+
+} // namespace
 
 class RequestInfoTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
 {
@@ -147,7 +152,7 @@ public:
     MOCK_METHOD(void, sendSync, (LlmRequest const&), (override));
     MOCK_METHOD(texec::kv_cache::CommState const&, getCommState, (), (const));
     MOCK_METHOD(void, setCommState, (texec::kv_cache::CommState), (override));
-    MOCK_METHOD(size_t, getCounterpartsCount, (LlmRequest::RequestIdType), (const override));
+    MOCK_METHOD(size_t, getCounterpartsCount, (LlmRequest::RequestIdType), (const));
     MOCK_METHOD(void, release, (LlmRequest::RequestIdType), (override));
 
 private:

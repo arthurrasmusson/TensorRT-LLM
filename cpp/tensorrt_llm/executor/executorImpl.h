@@ -14,7 +14,6 @@
 
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/arrayView.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dynamicBatchTuner.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/intervalSet.h"
@@ -25,6 +24,7 @@
 #include "tensorrt_llm/runtime/gptJsonConfig.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/rawEngine.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 
 #include <atomic>
@@ -52,7 +52,7 @@ class MpiMessageQueue
 public:
     void push(MpiMessage&& message)
     {
-        std::lock_guard<std::mutex> lock(mMutex);
+        std::lock_guard<std::mutex> const lock(mMutex);
         mQueue.push(std::move(message));
         mCv.notify_one();
     }

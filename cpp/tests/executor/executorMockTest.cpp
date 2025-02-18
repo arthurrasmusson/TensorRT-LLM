@@ -14,9 +14,9 @@
 
 #include "modelSpec.h"
 #include "tensorrt_llm/batch_manager/trtGptModel.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tests/utils/common.h"
 
 #include <gmock/gmock.h>
@@ -123,7 +123,9 @@ TEST_P(ParamTest, MockedModel)
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
-
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
     SizeType32 callCount = 0;
     EXPECT_CALL(*model, forwardAsync(_))
         .WillRepeatedly(Invoke(
@@ -149,21 +151,21 @@ TEST_P(ParamTest, MockedModel)
     tr::WorldConfig const dummyWorldConfig;
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
 
-    ExecutorConfig executorConfig(beamWidth);
+    ExecutorConfig const executorConfig(beamWidth);
     auto executor = Executor(model, executorConfig);
 
     // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
+    constexpr SizeType32 maxNewTokens = 5;
+    VecTokens const inputTokens{1, 2, 3, 4};
     auto request
         = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
 
     // Enqueue the request
-    auto requestId = executor.enqueueRequest(std::move(request));
+    auto requestId = executor.enqueueRequest(request);
 
     bool done = false;
     int iter = 0;
@@ -173,7 +175,7 @@ TEST_P(ParamTest, MockedModel)
         auto responses = executor.awaitResponses(requestId, waitTime);
         for (auto& response : responses)
         {
-            auto result = response.getResult();
+            auto const& result = response.getResult();
             done = result.isFinal;
         }
         ++iter;
@@ -221,10 +223,12 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
     tr::WorldConfig const dummyWorldConfig;
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
     SizeType32 maxQueueSize = 6;
     ExecutorConfig executorConfig;
     executorConfig.setMaxQueueSize(maxQueueSize);
@@ -232,18 +236,18 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
     auto executor = Executor(model, executorConfig);
 
     // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
+    SizeType32 const maxNewTokens = 5;
+    VecTokens const inputTokens{1, 2, 3, 4};
     auto request = Request(inputTokens, maxNewTokens);
 
     // Enqueue as many requests as the queue can manage
     for (int i = 0; i < maxQueueSize; i++)
     {
-        auto requestId = executor.enqueueRequest(std::move(request));
+        auto requestId = executor.enqueueRequest(request);
     }
     try
     {
-        auto requestId = executor.enqueueRequest(std::move(request));
+        auto requestId = executor.enqueueRequest(request);
 
         FAIL() << "Expected TllmException";
     }
@@ -254,14 +258,14 @@ TEST_F(GptExecutorTest, MockedModelMaxQueueSize)
 
     // Wait for requests to get scheduled to free up space in queue
     std::this_thread::sleep_for(std::chrono::milliseconds(maxQueueSize * 200));
-    auto requestId = executor.enqueueRequest(std::move(request));
+    auto requestId = executor.enqueueRequest(request);
 
     try
     {
         auto samplingConfig = SamplingConfig(1);
         samplingConfig.setNumReturnSequences(maxQueueSize);
         auto request = Request(inputTokens, maxNewTokens, false, samplingConfig);
-        auto requestId = executor.enqueueRequest(std::move(request));
+        auto requestId = executor.enqueueRequest(request);
         FAIL() << "Expected TllmException";
     }
     catch (std::exception const& e)
@@ -384,7 +388,7 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
     using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
     using RequestList = std::list<LlmRequestPtr>;
 
-    bool excludeInputFromOutput = false;
+    constexpr bool excludeInputFromOutput = false;
     OutputConfig outConfig;
     outConfig.excludeInputFromOutput = excludeInputFromOutput;
     auto model = std::make_shared<MockedModel>();
@@ -393,7 +397,9 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
     EXPECT_CALL(*model, updatePeftCache(_)).WillRepeatedly(Invoke([&]() { return; }));
-
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
     SizeType32 callCount = 0;
     RequestList currentReq;
     EXPECT_CALL(*model, forwardAsync(_))
@@ -431,11 +437,11 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
     tr::WorldConfig const dummyWorldConfig;
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
 
-    SizeType32 beamWidth = 1;
+    SizeType32 const beamWidth = 1;
     ExecutorConfig executorConfig(beamWidth,
         SchedulerConfig(CapacitySchedulerPolicy::kMAX_UTILIZATION)); // Condition 1 : MAX_UTILIZATION scheduling policy
     executorConfig.setEnableChunkedContext(false);                   // Condition 2 : Chunked context disabled
@@ -443,14 +449,14 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
     auto executor = Executor(model, executorConfig);
 
     // Create the request
-    bool streaming = true;                       // Condition 3 : Streaming enabled
-    SizeType32 maxNewTokens = 5;
-    VecTokens tooLongInputTokens{1, 2, 3, 4, 5}; // Condition 4 : prompt input len + maxNewTokens > MaxInputLen
+    constexpr bool streaming = true;                   // Condition 3 : Streaming enabled
+    SizeType32 const maxNewTokens = 5;
+    VecTokens const tooLongInputTokens{1, 2, 3, 4, 5}; // Condition 4 : prompt input len + maxNewTokens > MaxInputLen
     auto tooLongRequest = Request(
         tooLongInputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
 
     // Enqueue the request
-    auto longRequestId = executor.enqueueRequest(std::move(tooLongRequest));
+    auto longRequestId = executor.enqueueRequest(tooLongRequest);
     bool done = false;
     int iter = 0;
     while (!done && iter < mMaxWaitMs)
@@ -475,13 +481,13 @@ TEST_F(GptExecutorTest, MockedModelEvictRestartValidityTest)
 
 TEST_P(ParamTest, MockedModelMultiGpu)
 {
-    auto& world = tensorrt_llm::mpi::MpiComm::world();
+    auto const& world = tensorrt_llm::mpi::MpiComm::world();
     auto const worldRank = world.getRank();
     auto const worldSize = world.getSize();
 
     // In this test, allow worldSize to be greater than tp = 4
     // If so, set participant ids to be the last 4 ranks
-    SizeType32 tp = std::min(4, worldSize);
+    SizeType32 const tp = std::min(4, worldSize);
 
     using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
     using RequestList = std::list<LlmRequestPtr>;
@@ -494,15 +500,17 @@ TEST_P(ParamTest, MockedModelMultiGpu)
     auto model = std::make_shared<MockedModel>();
 
     // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
+    constexpr SizeType32 maxNewTokens = 5;
+    VecTokens const inputTokens{1, 2, 3, 4};
     auto request
         = Request(inputTokens, maxNewTokens, streaming, tensorrt_llm::executor::SamplingConfig(beamWidth), outConfig);
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
     EXPECT_CALL(*model, getVocabSizePadded()).Times(0);
     EXPECT_CALL(*model, getLogitDataType()).Times(0);
-
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
     SizeType32 callCount = 0;
     SizeType32 reqCallCount = 0;
     EXPECT_CALL(*model, forwardAsync(_))
@@ -531,7 +539,7 @@ TEST_P(ParamTest, MockedModelMultiGpu)
                     COMM_SESSION.bcastValue(tokenId, 0);
                     // Don't add any tokens to simulate no output tokens
                     // Simulate leader rank communicating with comm session
-                    VecTokens newTokens(beamWidth, tokenId);
+                    VecTokens const newTokens(beamWidth, tokenId);
                     llmReq->addNewTokens(newTokens);
                     llmReq->setState(tb::LlmRequestState::kGENERATION_IN_PROGRESS);
                     if (llmReq->getMaxNumGeneratedTokens() >= llmReq->mMaxNewTokens)
@@ -546,9 +554,9 @@ TEST_P(ParamTest, MockedModelMultiGpu)
     EXPECT_CALL(*model, getMaxNumSequences()).WillRepeatedly(Invoke([&]() { return 10; }));
     EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
     EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 10; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
 
     tr::WorldConfig dummyWorldConfig = tr::WorldConfig(tp, 1, 1, worldRank, tp);
     EXPECT_CALL(*model, getWorldConfig())
@@ -558,14 +566,15 @@ TEST_P(ParamTest, MockedModelMultiGpu)
 
     // Set participant ids to be of size tp, starting at worldSize - 1
     std::vector<SizeType32> participantIds;
+    participantIds.reserve(tp);
     for (int i = 0; i < tp; ++i)
     {
         participantIds.push_back(worldSize - tp + i);
     }
-    bool isLeader = (worldRank == participantIds.front());
+    bool const isLeader = (worldRank == participantIds.front());
     parallelConfig.setParticipantIds(participantIds);
 
-    bool isWorker = (std::find(participantIds.begin(), participantIds.end(), worldRank) != participantIds.end());
+    bool const isWorker = (std::find(participantIds.begin(), participantIds.end(), worldRank) != participantIds.end());
 
     // Set device ids
     std::vector<SizeType32> deviceIds(tp);
@@ -594,7 +603,7 @@ TEST_P(ParamTest, MockedModelMultiGpu)
             for (auto& response : responses)
             {
                 ++numResponses;
-                auto result = response.getResult();
+                auto const& result = response.getResult();
                 EXPECT_EQ(result.outputTokenIds.size(), beamWidth);
                 auto expectedSize = streaming ? (beamWidth > 1 ? numResponses : 1)
                                               : (maxNewTokens + (excludeInputFromOutput ? 0 : inputTokens.size()));
@@ -729,7 +738,7 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     using LlmRequestPtr = std::shared_ptr<tb::LlmRequest>;
     using RequestList = std::list<LlmRequestPtr>;
 
-    bool streaming = true;
+    constexpr bool streaming = true;
     auto model = std::make_shared<MockedModel>();
 
     // Two requests with one child request (3 in total) should be terminated
@@ -739,9 +748,12 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     tr::WorldConfig const dummyWorldConfig;
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
 
     SizeType32 callCount = 0;
     std::unordered_map<IdType, SizeType32> callCountPerSeq;
@@ -780,13 +792,13 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 100; }));
     EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 200; }));
 
-    SizeType32 beamWidth = 1;
-    ExecutorConfig executorConfig(beamWidth);
+    SizeType32 const beamWidth = 1;
+    ExecutorConfig const executorConfig(beamWidth);
     auto executor = Executor(model, executorConfig);
 
     // Create the request
-    SizeType32 maxNewTokens = 150;
-    VecTokens inputTokens{1, 2, 3, 4};
+    SizeType32 const maxNewTokens = 150;
+    VecTokens const inputTokens{1, 2, 3, 4};
     auto request = Request(inputTokens, maxNewTokens, streaming);
 
     // Enqueue the request
@@ -809,16 +821,14 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
             {
                 FAIL() << "Not expecting an error to be received";
             }
-            else
+
+            auto const& result = response.getResult();
+            done = result.isFinal;
+            if (done)
             {
-                auto result = response.getResult();
-                done = result.isFinal;
-                if (done)
+                for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
                 {
-                    for (SizeType32 beamIdx = 0; beamIdx < beamWidth; ++beamIdx)
-                    {
-                        EXPECT_EQ(result.finishReasons[beamIdx], FinishReason::kCANCELLED);
-                    }
+                    EXPECT_EQ(result.finishReasons[beamIdx], FinishReason::kCANCELLED);
                 }
             }
         }
@@ -839,7 +849,7 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
     callCountPerSeq.clear();
 
     // Enqueue the request
-    auto requestId2 = executor.enqueueRequest(std::move(request2));
+    auto requestId2 = executor.enqueueRequest(request2);
 
     // Cancel the request
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -858,14 +868,12 @@ TEST_F(GptExecutorTest, MockedModelCancelRequest)
             {
                 FAIL() << "Not expecting an error to be received";
             }
-            else
+
+            auto const& result = response.getResult();
+            done = result.isFinal;
+            if (done)
             {
-                auto result = response.getResult();
-                done = result.isFinal;
-                if (done)
-                {
-                    EXPECT_EQ(result.finishReasons[0], FinishReason::kCANCELLED);
-                }
+                EXPECT_EQ(result.finishReasons[0], FinishReason::kCANCELLED);
             }
         }
         ++iter;
@@ -885,7 +893,7 @@ TEST_F(GptExecutorTest, MockedModelNumReturns)
     using RequestList = std::list<LlmRequestPtr>;
 
     SizeType32 const maxBeamWidth = 4;
-    OutputConfig outConfig;
+    OutputConfig const outConfig;
     auto model = std::make_shared<MockedModel>();
 
     EXPECT_CALL(*model, terminateRequest(_, _)).Times(0);
@@ -894,10 +902,12 @@ TEST_F(GptExecutorTest, MockedModelNumReturns)
     tr::WorldConfig const dummyWorldConfig;
     EXPECT_CALL(*model, getWorldConfig())
         .WillRepeatedly(Invoke([&]() -> tr::WorldConfig const& { return dummyWorldConfig; }));
-    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& stats) { return; }));
+    EXPECT_CALL(*model, getCurrentIterationStats(_)).WillRepeatedly(Invoke([&](IterationStats& /*stats*/) { return; }));
     EXPECT_CALL(*model, getCurrentRequestStats(_))
-        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& stats) { return; }));
-
+        .WillRepeatedly(Invoke([&](RequestStatsPerIteration& /*stats*/) { return; }));
+    tr::ModelConfig dummyModelConfig(0, 0, 0, 0, 1, 0, nvinfer1::DataType::kHALF);
+    EXPECT_CALL(*model, getModelConfig())
+        .WillRepeatedly(Invoke([&]() -> tr::ModelConfig const& { return dummyModelConfig; }));
     SizeType32 callCount = 0;
     EXPECT_CALL(*model, forwardAsync(_))
         .WillRepeatedly(Invoke(
@@ -921,13 +931,13 @@ TEST_F(GptExecutorTest, MockedModelNumReturns)
     EXPECT_CALL(*model, getMaxInputLen()).WillRepeatedly(Invoke([&]() { return 10; }));
     EXPECT_CALL(*model, getMaxSequenceLen()).WillRepeatedly(Invoke([&]() { return 20; }));
 
-    ExecutorConfig executorConfig(maxBeamWidth);
+    ExecutorConfig const executorConfig(maxBeamWidth);
     auto executor = Executor(model, executorConfig);
 
     // Create the request
-    SizeType32 maxNewTokens = 5;
-    VecTokens inputTokens{1, 2, 3, 4};
-    bool streaming = false;
+    SizeType32 const maxNewTokens = 5;
+    VecTokens const inputTokens{1, 2, 3, 4};
+    constexpr bool streaming = false;
 
     auto samplingConfig1 = SamplingConfig(1);
     samplingConfig1.setNumReturnSequences(3);
@@ -939,13 +949,13 @@ TEST_F(GptExecutorTest, MockedModelNumReturns)
     auto request3 = Request(inputTokens, maxNewTokens, streaming, samplingConfig3, outConfig);
 
     // Enqueue the request
-    auto requestId1 = executor.enqueueRequest(std::move(request1));
-    auto requestId2 = executor.enqueueRequest(std::move(request2));
-    auto requestId3 = executor.enqueueRequest(std::move(request3));
+    auto requestId1 = executor.enqueueRequest(request1);
+    auto requestId2 = executor.enqueueRequest(request2);
+    auto requestId3 = executor.enqueueRequest(request3);
 
     // Expecting one response in beam search. Instead, numReturnSequences limits the number of beams to return.
     std::unordered_map<IdType, SizeType32> expectedNumResponses{{requestId1, 3}, {requestId2, 1}, {requestId3, 1}};
-    std::unordered_map<IdType, SizeType32> expectedNumBeams{{requestId1, 1}, {requestId2, 4}, {requestId3, 2}};
+    std::unordered_map<IdType, SizeType32> const expectedNumBeams{{requestId1, 1}, {requestId2, 4}, {requestId3, 2}};
 
     std::unordered_map<IdType, SizeType32> numResponses{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
     std::unordered_map<IdType, SizeType32> numBeams{{requestId1, 0}, {requestId2, 0}, {requestId3, 0}};
@@ -957,7 +967,7 @@ TEST_F(GptExecutorTest, MockedModelNumReturns)
         auto responses = executor.awaitResponses(waitTime);
         for (auto& response : responses)
         {
-            auto result = response.getResult();
+            auto const& result = response.getResult();
             auto reqId = response.getRequestId();
             numFinished += result.isFinal;
             numResponses[reqId]++;

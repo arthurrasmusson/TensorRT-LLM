@@ -13,14 +13,10 @@
 #include "tensorrt_llm/batch_manager/dataTransceiver.h"
 #include "tensorrt_llm/batch_manager/common.h"
 #include "tensorrt_llm/batch_manager/runtimeBuffers.h"
-#include "tensorrt_llm/batch_manager/utils/staticThreadPool.h"
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/utils.h"
-#include "tensorrt_llm/runtime/bufferManager.h"
-#include "tensorrt_llm/runtime/cudaEvent.h"
-#include "tensorrt_llm/runtime/cudaStream.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include <future>
 #include <map>
 #include <memory>

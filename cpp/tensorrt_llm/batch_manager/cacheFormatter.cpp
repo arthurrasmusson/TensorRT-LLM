@@ -20,8 +20,9 @@
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/executor/cache_transmission/cacheConcatenate.h"
 #include "tensorrt_llm/executor/executor.h"
-#include "tensorrt_llm/runtime/cudaEvent.h"
 #include "tensorrt_llm/runtime/iTensor.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <future>

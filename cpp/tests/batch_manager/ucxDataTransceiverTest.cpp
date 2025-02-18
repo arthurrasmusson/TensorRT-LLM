@@ -10,16 +10,17 @@
  * its affiliates is strictly prohibited.
  */
 
+#if ENABLE_UCX
 #include "tensorrt_llm/batch_manager/ucxDataTransceiver.h"
 #include "tensorrt_llm/batch_manager/cacheFormatter.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/modelConfig.h"
 #include "tensorrt_llm/runtime/tllmBuffers.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
 #include <NvInferRuntimeBase.h>
 #include <chrono>
@@ -697,3 +698,4 @@ TEST_F(UcxSymmetricalCacheTest, MultiProcessTest)
         }
     }
 }
+#endif

@@ -131,12 +131,6 @@ public:
         return *this;
     }
 
-    ModelSpec& returnAcceptedTokensLogits()
-    {
-        mReturnAcceptedTokensLogits = true;
-        return *this;
-    }
-
     ModelSpec& replaceLogits()
     {
         mReplaceLogits = true;
@@ -326,7 +320,6 @@ public:
     bool mReturnLogProbs{false};
     bool mSmokeTest{false};
     bool mUseMultipleProfiles{false};
-    bool mReturnAcceptedTokensLogits{false};
     int mMaxInputLength{0};
     int mMaxOutputLength{0};
     bool mUseLoraPlugin{false};

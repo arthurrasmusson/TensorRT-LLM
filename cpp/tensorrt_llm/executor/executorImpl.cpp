@@ -11,7 +11,6 @@
  */
 
 #include "tensorrt_llm/executor/executorImpl.h"
-
 #include "tensorrt_llm/batch_manager/decoderBuffers.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
 #include "tensorrt_llm/batch_manager/trtEncoderModel.h"
@@ -20,7 +19,6 @@
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaProfilerUtils.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/common/timestampUtils.h"
 #include "tensorrt_llm/common/utils.h"
@@ -29,10 +27,12 @@
 #include "tensorrt_llm/executor/orchestratorUtils.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/serialization.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/executor/version.h"
 #include "tensorrt_llm/runtime/loraCache.h"
 #include "tensorrt_llm/runtime/memoryCounters.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -47,6 +47,7 @@ namespace
 
 using namespace tensorrt_llm::batch_manager;
 using namespace tensorrt_llm::runtime;
+namespace su = tensorrt_llm::executor::serialize_utils;
 
 void checkOptionalParams(TrtGptModelOptionalParams& optionalParams, ModelConfig const& modelConfig)
 {
@@ -641,11 +642,15 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, SizeTy
         auto workerExecPath = orchestratorConfig.getWorkerExecutablePath();
         MPI_Comm intercomm = nullptr;
         MPI_Info mpiInfo = nullptr;
-        MPI_Info_create(&mpiInfo);
-        MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY");
+        MPICHECK(MPI_Info_create(&mpiInfo));
+        MPICHECK(MPI_Info_set(mpiInfo, "env", "FORCE_NCCL_ALL_REDUCE_STRATEGY"));
 
-        MPI_Comm_spawn(workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp * cp, mpiInfo, 0, MPI_COMM_SELF, &intercomm,
-            MPI_ERRCODES_IGNORE);
+        // Binding policy is not inherited for dynamically spawned jobs, resulting in the worker being bound
+        // to a single core. Override the setting to avoid perf issue - see https://nvbugs/4574329
+        MPICHECK(MPI_Info_set(mpiInfo, "bind_to", "none"));
+
+        MPICHECK(MPI_Comm_spawn(workerExecPath.c_str(), MPI_ARGV_NULL, tp * pp * cp, mpiInfo, 0, MPI_COMM_SELF,
+            &intercomm, MPI_ERRCODES_IGNORE));
 
         mOrchLeaderComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(intercomm, true);
         // With intercomm, leader is rank 0 in the local group
@@ -671,7 +676,7 @@ void Executor::Impl::initializeOrchestrator(SizeType32 tp, SizeType32 pp, SizeTy
         mOrchLeaderComm->bcast(buffer.data(), buffer.size(), mpi::MpiType::kCHAR, MPI_ROOT);
 
         // Wait for workers to have created their executor instance
-        MPI_Barrier(intercomm);
+        MPICHECK(MPI_Barrier(intercomm));
     }
 
     // Spawn the thread responsible for sending new requests to the leader of the model
@@ -851,7 +856,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
     TLLM_CHECK_WITH_INFO(!mShutdownCalled, "Shutdown called, cannot enqueue requests");
     checkParallelApiUsage(__func__);
 
-    TLLM_LOG_DEBUG("Enqueuing %d requests", requests.size());
+    TLLM_LOG_DEBUG("Enqueuing %lu requests", requests.size());
     std::vector<RequestWithId> requestWithIds;
     requestWithIds.reserve(requests.size());
 
@@ -891,7 +896,7 @@ std::vector<IdType> Executor::Impl::enqueueRequests(common::ArrayView<Request co
     if (mCommMode == CommunicationMode::kLEADER)
     {
         {
-            std::scoped_lock<std::mutex> lck(mQueuedReqMtx);
+            std::scoped_lock<std::mutex> const lck(mQueuedReqMtx);
             if (mMaxQueueSize)
             {
                 auto const maxQueueSize = mMaxQueueSize.value();
@@ -980,7 +985,7 @@ std::vector<Response> Executor::Impl::awaitResponses(
         {
             TLLM_THROW("ReqId should already be removed from responses!");
         }
-        std::string err = "ReqId " + std::to_string(reqId) + " has already been processed and was terminated.";
+        std::string const err = "ReqId " + std::to_string(reqId) + " has already been processed and was terminated.";
         TLLM_LOG_ERROR("%s", err.c_str());
 
         return {Response(reqId, err)};
@@ -1465,7 +1470,7 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
                 // Validate the request parameters
                 newReq->validate(mModel->getMaxInputLen(), mModel->getMaxSequenceLen(), mModel->getMaxDraftLen(),
                     mEncoderModel ? std::optional<SizeType32>(mEncoderModel->getMaxInputLen()) : std::nullopt,
-                    mEnableBlockReuse);
+                    mEnableBlockReuse, mModel->getModelConfig().computeContextLogits());
 
                 TLLM_CHECK_WITH_INFO(!mEncoderModel || !mIsSchedulerMaxUtilization,
                     "Encoder or Encoder-Decoder model don't support max utilization scheduler yet. Only max requests "

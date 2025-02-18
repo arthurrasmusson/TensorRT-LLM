@@ -53,7 +53,7 @@ TrtEncoderModel::TrtEncoderModel(runtime::ModelConfig const& modelConfig, WorldC
     }
     else
     {
-        mNumMicroBatches = isTtrOverlap() ? 2 : 1;
+        mNumMicroBatches = isTrtOverlap() ? 2 : 1;
     }
 
     mNumBuffers = mNumMicroBatches;

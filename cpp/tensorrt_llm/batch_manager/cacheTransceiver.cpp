@@ -29,9 +29,9 @@
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/common/logger.h"
-#include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/serializeUtils.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
