@@ -29,6 +29,26 @@
 namespace tensorrt_llm::batch_manager::kv_cache_manager
 {
 
+class TransferHelper
+{
+public:
+    static void sendBuffer(
+        executor::kv_cache::Connection const& connection, runtime::IBuffer const& buf, uint64_t requestId)
+    {
+        int const tag = ((requestId & 0xFFF) << 12) | (kDATA_TAG & 0xFF);
+        connection.send(executor::kv_cache::DataContext{tag}, buf.data(), buf.getSizeInBytes());
+    }
+
+    static void recvBuffer(executor::kv_cache::Connection const& connection, runtime::IBuffer& buf, uint64_t requestId)
+    {
+        int const tag = ((requestId & 0xFFF) << 12) | (kDATA_TAG & 0xFF);
+        connection.recv(executor::kv_cache::DataContext{tag}, buf.data(), buf.getSizeInBytes());
+    }
+
+private:
+    static constexpr int32_t kDATA_TAG{43};
+};
+
 // Simple cache block copy. Because it does not involve data splitting or merging, it performs best when the
 // parallel topology is completely identical, making it the preferred method.
 class CacheFormatter final : public IOFormatter
@@ -42,12 +62,12 @@ public:
         TLLM_CHECK(mCacheManager);
     }
 
-    void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
-        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+    void formatOutput(LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::Connection const*> const& connections, CacheState const& selfConfig,
         SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager) override;
 
-    void formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
-        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+    void formatInput(LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::Connection const*> const& connections, CacheState const& selfConfig,
         SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager) override;
 
     [[nodiscard]] bool inquireSupport(CacheState const& selfConfig, CacheState const& destConfig) const override;

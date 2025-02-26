@@ -26,20 +26,19 @@ namespace tk = tensorrt_llm::kernels;
 namespace tensorrt_llm::batch_manager
 {
 
-void CreateNewDecoderRequests::operator()(std::vector<SizeType32> const& seqSlots,
+void CreateNewDecoderRequests::operator()(TensorPtr const& batchSlots,
     std::vector<runtime::decoder_batch::Request> const& requests, std::vector<SamplingConfig> const& samplingConfigs,
-    runtime::ModelConfig const& modelConfig, GptDecoderBatched& decoder, CudaStreamPtr runtimeStream,
+    runtime::ModelConfig const& modelConfig, GptDecoderBatched& decoder, CudaStreamPtr const& runtimeStream,
     SizeType32 maxSequenceLength) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
-    auto batchSlotsPtr = runtime::bufferCast<SizeType32>(*decoder.getBatchSlotsSetup());
-    SizeType32 const localBatchSize = seqSlots.size();
-    for (SizeType32 bi = 0; bi < localBatchSize; ++bi)
+    auto batchSlotsRange = BufferRange<SizeType32>(*batchSlots);
+    auto const localBatchSize = batchSlots->getSize();
+    for (size_t bi = 0; bi < localBatchSize; ++bi)
     {
-        newRequest(
-            seqSlots[bi], requests[bi], samplingConfigs[bi], modelConfig, decoder, runtimeStream, maxSequenceLength);
-        batchSlotsPtr[bi] = seqSlots[bi];
+        newRequest(batchSlotsRange[bi], requests[bi], samplingConfigs[bi], modelConfig, decoder, runtimeStream,
+            maxSequenceLength);
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -78,6 +77,9 @@ void CreateNewDecoderRequests::newRequest(SizeType32 batchSlot, runtime::decoder
 
     // input
     auto& dJointInput = decoder.getJointDecodingInput();
+
+    dJointInput.beamWidths.at(batchSlot) = beamWidth;
+    dJointInput.numDecodingEngineTokens.at(batchSlot) = numDecodingEngineTokens;
 
     TensorPtr endIdTensorPtr{ITensor::slice(constPointerCast(dJointInput.endIds), batchSlot, 1)};
     runtime::kernels::invokeFill(*endIdTensorPtr, endId, *stream);
@@ -198,13 +200,6 @@ void CreateNewDecoderRequests::newRequest(SizeType32 batchSlot, runtime::decoder
             decoder.getJointDecodingOutput(), runtimeStream, stream, decoder.getSpeculativeDecodingMode(),
             decoder.getMaxDecodingEngineTokens());
     }
-
-    // remaining
-    decoder.setBeamWidths(batchSlot, beamWidth);
-    decoder.setNbSteps(batchSlot, 0);
-    decoder.setFinished(batchSlot, false);
-    decoder.setMaxNewTokens(batchSlot, maxNewTokens);
-    decoder.setNumDecodingEngineTokens(batchSlot, numDecodingEngineTokens);
 
     // fill outputIds with endIds
     TensorPtr outputIds = ITensor::slice(dJointOutput.ids, batchSlot, 1);

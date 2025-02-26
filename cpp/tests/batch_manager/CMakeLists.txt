@@ -34,19 +34,3 @@ target_link_libraries(trtGptModelRealDecoderTest PRIVATE modelSpecStatic
 add_gtest(peftCacheManagerTest peftCacheManagerTest.cpp)
 add_gtest(trtEncoderModelTest trtEncoderModelTest.cpp)
 add_gtest(guidedDecoderTest guidedDecoderTest.cpp)
-
-if(ENABLE_UCX)
-  find_package(ucx REQUIRED)
-  find_package(ucxx REQUIRED)
-  add_gtest(ucxDataTransceiverTest ucxDataTransceiverTest.cpp)
-  target_include_directories(
-    ucxDataTransceiverTest
-    PRIVATE $<TARGET_PROPERTY:ucxx::ucxx,INTERFACE_INCLUDE_DIRECTORIES>)
-  target_link_libraries(ucxDataTransceiverTest PUBLIC tensorrt_llm_ucx_wrapper
-                                                      ucx::ucs)
-  target_include_directories(
-    cacheTransceiverTest
-    PRIVATE $<TARGET_PROPERTY:ucxx::ucxx,INTERFACE_INCLUDE_DIRECTORIES>)
-  target_link_libraries(cacheTransceiverTest PUBLIC tensorrt_llm_ucx_wrapper
-                                                    ucx::ucs)
-endif()

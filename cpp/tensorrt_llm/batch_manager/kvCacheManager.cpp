@@ -1236,11 +1236,14 @@ void KVCacheManager::allocatePools(nvinfer1::DataType dtype, bool useUvm)
     }
 
     auto const numLayers = mBlockManager.getNumLayers();
-    mLayerToPoolMapping = BufferManager::cpu(ITensor::makeShape({numLayers}), TRTDataType<SizeType32>::value);
+    mLayerToPoolMapping = BufferManager::cpu(ITensor::makeShape({numLayers, 2}), TRTDataType<SizeType32>::value);
     auto poolMappingRange = BufferRange<SizeType32>(*mLayerToPoolMapping);
     for (SizeType32 layerIdx = 0; layerIdx < numLayers; layerIdx++)
     {
-        poolMappingRange[layerIdx] = mBlockManager.getLayerPoolIdx(layerIdx);
+        auto const indexOfPool = mBlockManager.getLayerPoolIdx(layerIdx);
+        auto const layerIdxInCachePool = mBlockManager.getPoolLayerIdx(layerIdx);
+        poolMappingRange[layerIdx * 2] = indexOfPool;
+        poolMappingRange[layerIdx * 2 + 1] = layerIdxInCachePool;
     }
 }
 
@@ -1262,7 +1265,7 @@ SizeType32 KVCacheManager::getNeededBlocksOneStep(LlmRequest const& req, bool tw
     SizeType32 const maxTokensToAddToKVCache = req.mMaxNewTokens - generatedTokens + 1;
     SizeType32 const numTokensPerStep = std::min(numDraftTokens + 1, maxTokensToAddToKVCache);
     SizeType32 const numDraftTokensPerStep = std::min(numDraftTokens, maxTokensToAddToKVCache);
-    if (req.isContextInitState() && req.isFirstContextChunk())
+    if ((req.isContextInitState() && req.isFirstContextChunk()) || req.isDisaggGenerationInitState())
     {
         // Assumes shared among beam = True
         auto const promptCacheLen

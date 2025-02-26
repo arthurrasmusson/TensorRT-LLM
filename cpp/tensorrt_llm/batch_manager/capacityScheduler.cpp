@@ -216,11 +216,16 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::impl(
     SizeType32 claimedPeftPages{0};
     std::unordered_set<uint64_t> uniqTaskIds{};
     RequestVector pendingRequests;
+    RequestVector pendingDisGenInitRequests;
     pendingRequests.reserve(activeRequests.size());
+    pendingDisGenInitRequests.reserve(activeRequests.size());
     for (auto const& req : activeRequests)
     {
         // if request cannot be scheduled yet or request should no longer be scheduled, skip
-        if (!req->hasReachedState(getNoScheduleUntilState()) || req->hasReachedState(getNoScheduleAfterState()))
+        if (
+            // Allow disagg_generation_init requests to be scheduled, so that we'll allocate their KV cache
+            !req->isDisaggGenerationInitState()
+            && (!req->hasReachedState(getNoScheduleUntilState()) || req->hasReachedState(getNoScheduleAfterState())))
         {
             continue;
         }
@@ -243,6 +248,10 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::impl(
             }
             reservedCrossBlocks += crossKvCacheManager ? crossKvCacheManager->getRemainingBlocksToCompletion(*req) : 0;
         }
+        else if (req->isDisaggGenerationInitState())
+        {
+            pendingDisGenInitRequests.emplace_back(req);
+        }
         else
         {
             pendingRequests.emplace_back(req);
@@ -257,45 +266,51 @@ std::tuple<RequestVector, RequestVector> GuaranteedNoEvictScheduler::impl(
         auto availableBlocks = numFreeBlocks - reservedBlocks;
         auto availableCrossBlocks = numFreeCrossBlocks - reservedCrossBlocks;
         auto availablePeftPages = maxPeftCachePages - claimedPeftPages;
-        for (auto const& req : pendingRequests)
+
+        // Loop over pending requests and add them if they can be scheduled
+        // Start by trying to include disagg generation init requests
+        for (auto const& requests : {pendingDisGenInitRequests, pendingRequests})
         {
-            // if context request can reuse blocks contributed by another context request, skip
-            if (!StaticBatchScheduling
-                && beneficialToSkip(req, kvCacheManager, crossKvCacheManager, newlyContributedContextBlocks,
-                    newlyContributedCrossContextBlocks))
+            for (auto const& req : requests)
             {
-                continue;
-            }
-
-            if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests))
-            {
-                break;
-            }
-            else if (req->isContextInitState())
-            {
-                auto neededBlocks = kvCacheManager.getRemainingBlocksToCompletion(*req);
-                auto neededCrossBlocks
-                    = crossKvCacheManager ? crossKvCacheManager->getRemainingBlocksToCompletion(*req) : 0;
-                bool reqHasLora = req->getLoraTaskId().has_value();
-                bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
-                auto neededPeftPages = isNewTask && peftCacheManager ? peftCacheManager->determineNumPages(req) : 0;
-
-                if (neededBlocks <= availableBlocks && neededCrossBlocks <= availableCrossBlocks
-                    && neededPeftPages <= availablePeftPages)
+                // if context request can reuse blocks contributed by another context request, skip
+                if (!StaticBatchScheduling && !req->isDisaggGenerationInitState()
+                    && beneficialToSkip(req, kvCacheManager, crossKvCacheManager, newlyContributedContextBlocks,
+                        newlyContributedCrossContextBlocks))
                 {
-                    scheduledRequests.emplace_back(req);
-                    availableBlocks -= neededBlocks;
-                    availableCrossBlocks -= neededCrossBlocks;
-                    availablePeftPages -= neededPeftPages;
-                    if (isNewTask)
-                    {
-                        uniqTaskIds.insert(req->getLoraTaskId().value());
-                    }
+                    continue;
                 }
-                else if (neededBlocks > availableBlocks || neededCrossBlocks > availableCrossBlocks)
+
+                if (scheduledRequests.size() >= static_cast<std::size_t>(mMaxNumRequests))
                 {
-                    // If one requests fails to be scheduled, break
                     break;
+                }
+                else if (req->isContextInitState() || req->isDisaggGenerationInitState())
+                {
+                    auto neededBlocks = kvCacheManager.getRemainingBlocksToCompletion(*req);
+                    auto neededCrossBlocks
+                        = crossKvCacheManager ? crossKvCacheManager->getRemainingBlocksToCompletion(*req) : 0;
+                    bool reqHasLora = req->getLoraTaskId().has_value();
+                    bool isNewTask = reqHasLora && !uniqTaskIds.count(req->getLoraTaskId().value());
+                    auto neededPeftPages = isNewTask && peftCacheManager ? peftCacheManager->determineNumPages(req) : 0;
+
+                    if (neededBlocks <= availableBlocks && neededCrossBlocks <= availableCrossBlocks
+                        && neededPeftPages <= availablePeftPages)
+                    {
+                        scheduledRequests.emplace_back(req);
+                        availableBlocks -= neededBlocks;
+                        availableCrossBlocks -= neededCrossBlocks;
+                        availablePeftPages -= neededPeftPages;
+                        if (isNewTask)
+                        {
+                            uniqTaskIds.insert(req->getLoraTaskId().value());
+                        }
+                    }
+                    else if (neededBlocks > availableBlocks || neededCrossBlocks > availableCrossBlocks)
+                    {
+                        // If one requests fails to be scheduled, break
+                        break;
+                    }
                 }
             }
         }
@@ -334,7 +349,10 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(
         TLLM_LOG_DEBUG("MaxUtilizationScheduler: scheduling request ID %lu", req->mRequestId);
 
         // if request cannot be scheduled yet or request should no longer be scheduled, skip
-        if (!req->hasReachedState(getNoScheduleUntilState()) || req->hasReachedState(getNoScheduleAfterState()))
+        if (
+            // Allow disagg_generation_init requests to be scheduled, so that we'll allocate their KV cache
+            !req->isDisaggGenerationInitState()
+            && (!req->hasReachedState(getNoScheduleUntilState()) || req->hasReachedState(getNoScheduleAfterState())))
         {
             TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu cannot / should not be scheduled", req->mRequestId);
             reqIt++;
@@ -456,7 +474,7 @@ CapacityScheduler::CapacityScheduler(SizeType32 maxNumRequests,
     }
 }
 
-std::tuple<RequestVector, RequestVector> CapacityScheduler::operator()(RequestList const& activeRequests,
+std::tuple<RequestVector, RequestVector, RequestVector> CapacityScheduler::operator()(RequestList const& activeRequests,
     OptionalRef<kv_cache_manager::BaseKVCacheManager> kvCacheManager,
     OptionalRef<BasePeftCacheManager const> peftCacheManager,
     OptionalRef<kv_cache_manager::BaseKVCacheManager const> crossKvCacheManager) const
@@ -464,22 +482,23 @@ std::tuple<RequestVector, RequestVector> CapacityScheduler::operator()(RequestLi
     NVTX3_SCOPED_RANGE(capacitySchedulerScheduling);
     return std::visit(
         [&activeRequests, &kvCacheManager, &crossKvCacheManager, &peftCacheManager](
-            auto const& scheduler) -> std::tuple<RequestVector, RequestVector>
+            auto const& scheduler) -> std::tuple<RequestVector, RequestVector, RequestVector>
         {
-            RequestVector fittingRequests, pausedRequests;
+            RequestVector tmpFittingRequests;
+            RequestVector pausedRequests;
             if constexpr (std::is_same_v<std::decay_t<decltype(scheduler)>, MaxRequestsScheduler>)
             {
-                std::tie(fittingRequests, pausedRequests) = scheduler(activeRequests);
+                std::tie(tmpFittingRequests, pausedRequests) = scheduler(activeRequests);
             }
             else if constexpr (std::is_same_v<std::decay_t<decltype(scheduler)>, MaxUtilizationScheduler>)
             {
-                std::tie(fittingRequests, pausedRequests)
+                std::tie(tmpFittingRequests, pausedRequests)
                     = scheduler(*kvCacheManager, peftCacheManager, activeRequests);
             }
             else if constexpr (std::is_same_v<std::decay_t<decltype(scheduler)>, GuaranteedNoEvictScheduler>
                 || std::is_same_v<std::decay_t<decltype(scheduler)>, StaticBatchScheduler>)
             {
-                std::tie(fittingRequests, pausedRequests)
+                std::tie(tmpFittingRequests, pausedRequests)
                     = scheduler(*kvCacheManager, crossKvCacheManager, peftCacheManager, activeRequests);
             }
             else
@@ -487,8 +506,23 @@ std::tuple<RequestVector, RequestVector> CapacityScheduler::operator()(RequestLi
                 throw std::runtime_error("Unsupported capacity scheduler policy");
             }
             TLLM_LOG_DEBUG("[Summary] Capacity scheduler allows %d requests, pauses %d requests",
-                fittingRequests.size(), pausedRequests.size());
-            return {std::move(fittingRequests), std::move(pausedRequests)};
+                tmpFittingRequests.size(), pausedRequests.size());
+
+            RequestVector fittingRequests;
+            RequestVector fittingDisaggGenInitRequests;
+            for (auto const& llmReq : tmpFittingRequests)
+            {
+                if (llmReq->isDisaggGenerationInitState())
+                {
+                    fittingDisaggGenInitRequests.push_back(llmReq);
+                }
+                else
+                {
+                    fittingRequests.push_back(llmReq);
+                }
+            }
+
+            return {std::move(fittingRequests), std::move(fittingDisaggGenInitRequests), std::move(pausedRequests)};
         },
         mScheduler);
 }

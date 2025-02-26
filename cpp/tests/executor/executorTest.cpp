@@ -3491,7 +3491,7 @@ TEST_P(GuidedDecodingParamsTest, All)
     {
         expectedOutputTokens.push_back({1849, 7, 16, 10, 16, 8, 198, 16, 10, 16});
         expectedOutputTokens.push_back({90, 366, 3672, 1298, 366, 7554, 31780, 1600, 366, 12888});
-        expectedOutputTokens.push_back({90, 1, 64, 77, 2032, 68, 81, 1298, 352, 92});
+        expectedOutputTokens.push_back({90, 366, 64, 77, 2032, 68, 81, 1, 1058, 352});
         expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
         expectedOutputTokens.push_back({25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645, 25645});
     }

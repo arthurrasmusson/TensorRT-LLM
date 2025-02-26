@@ -29,19 +29,13 @@ public:
     using SizeType32 = tensorrt_llm::runtime::SizeType32;
     using CacheState = executor::kv_cache::CacheState;
 
-    /// @brief Perform data transmission with formatting actions.
-    /// @param llmRequest The request associated with this data transmission.
-    /// @param comm The communicator associated with this data transmission.
-    virtual void formatOutput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
-        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+    virtual void formatOutput(LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::Connection const*> const& connections, CacheState const& selfConfig,
         SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager)
         = 0;
 
-    /// @brief Accept transmitted data with unformatting actions.
-    /// @param llmRequest The request associated with this data transmission.
-    /// @param comm The communicator associated with this data transmission.
-    virtual void formatInput(executor::kv_cache::Communicator const& comm, LlmRequest const& llmRequest,
-        std::vector<executor::kv_cache::ProcessInfo> const& processInfos, CacheState const& selfConfig,
+    virtual void formatInput(LlmRequest const& llmRequest,
+        std::vector<executor::kv_cache::Connection const*> const& connections, CacheState const& selfConfig,
         SizeType32 selfIdx, CacheState const& destConfig, runtime::BufferManager const& bufferManager)
         = 0;
 

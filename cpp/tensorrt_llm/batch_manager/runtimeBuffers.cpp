@@ -163,8 +163,8 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     if (modelConfig.useMrope())
     {
         auto const mropeRotaryCosSinSize = modelConfig.getMaxPositionEmbeddings() * modelConfig.getRotaryEmbeddingDim();
-        mropeRotaryCosSin->reshape(ITensor::makeShape({numRequests, mropeRotaryCosSinSize}));
-        mropePositionDeltas->reshape(ITensor::makeShape({numRequests, 1}));
+        mropeRotaryCosSin->reshape(ITensor::makeShape({numSequences, mropeRotaryCosSinSize}));
+        mropePositionDeltas->reshape(ITensor::makeShape({numSequences, 1}));
     }
 
     if (worldConfig.isPipelineParallel())
@@ -455,7 +455,6 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     std::vector<TokenIdType> inputHost;
     std::vector<SizeType32> positionIdsHost;
     std::vector<SizeType32> positionIdsHostRow2;
-    std::vector<float> mropeRotaryCosSinHost;
     std::vector<SizeType32> mropePositionDeltasHost;
 
     auto* contextLengthsHostPtr = bufferCast<SizeType32>(*contextLengthsHost);
@@ -595,9 +594,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
                     "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotaryCosSin->getShape().d[0],
                     int(mropeRotaryCosSinSize));
-                float* mropeRotaryCosSinFLoat = bufferCast<float>(*optMropeRotaryCosSin);
-                mropeRotaryCosSinHost.insert(mropeRotaryCosSinHost.end(), mropeRotaryCosSinFLoat,
-                    mropeRotaryCosSinFLoat + mropeRotaryCosSinSize);
+
+                auto const mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, batchIdx, 1);
+                manager.copy(*optMropeRotaryCosSin, *mropeRotaryCosSinCtx);
             }
 
             totalInputSize += inputLength;
@@ -785,14 +784,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
 
     if (modelConfig.useMrope())
     {
-        if (!mropeRotaryCosSinHost.empty())
-        {
-            auto mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, 0, numContextRequests);
-            manager.copy(mropeRotaryCosSinHost.data(), *mropeRotaryCosSinCtx);
-        }
         if (!mropePositionDeltasHost.empty())
         {
-            auto mropePositionDeltasGen = ITensor::slice(mropePositionDeltas, 0, numGenRequests);
+            auto mropePositionDeltasGen = ITensor::slice(mropePositionDeltas, 0, numGenSequences);
             manager.copy(mropePositionDeltasHost.data(), *mropePositionDeltasGen);
         }
     }

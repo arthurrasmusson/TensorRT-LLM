@@ -15,6 +15,8 @@ set(TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # keep this list sorted alphabetically
 set(SRCS
+    cache_transmission/mpi_utils/connection.cpp
+    cache_transmission/cacheConcatenate.cu
     contextPhaseParams.cpp
     debugConfig.cpp
     decodingConfig.cpp
@@ -50,8 +52,7 @@ set(SRCS
     types.cpp
     requestUtils.cpp
     contextPhaseParams.cpp
-    disaggServerUtil.cpp
-    cache_transmission/cacheConcatenate.cu)
+    disaggServerUtil.cpp)
 
 if(NOT WIN32)
   # additional warnings
@@ -79,3 +80,5 @@ set_property(TARGET ${EXECUTOR_STATIC_TARGET}
 set(TOP_LEVEL_DIR "${PROJECT_SOURCE_DIR}/..")
 target_compile_definitions(${EXECUTOR_STATIC_TARGET}
                            PUBLIC TOP_LEVEL_DIR="${TOP_LEVEL_DIR}")
+
+add_subdirectory(cache_transmission/ucx_utils)

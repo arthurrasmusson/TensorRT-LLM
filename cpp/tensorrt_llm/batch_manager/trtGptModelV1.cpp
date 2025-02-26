@@ -474,7 +474,10 @@ void TrtGptModelV1::forwardAsync(RequestList const& activeRequests)
     auto const device = getWorldConfig().getDevice();
     TLLM_CUDA_CHECK(cudaSetDevice(device));
 
-    auto [fittingRequests, pausedRequests] = (*mCapacityScheduler)(activeRequests, mSession->mKvCacheManager);
+    auto [fittingRequests, fittingDisaggGenInitRequests, pausedRequests]
+        = (*mCapacityScheduler)(activeRequests, mSession->mKvCacheManager);
+    TLLM_CHECK_WITH_INFO(fittingDisaggGenInitRequests.empty(), "Disaggregated servering is not support by V1 batcher.");
+
     auto [scheduledRequests, genRequests]
         = (*mMicroBatchScheduler)(fittingRequests, {}, mPpTimesMaxBatchSize, getModelConfig().getMaxNumTokens());
 

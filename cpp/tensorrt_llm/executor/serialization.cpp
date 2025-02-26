@@ -483,6 +483,14 @@ size_t Serialization::serializedSize(kv_cache::CacheState const& state)
 }
 
 // DataTransceiverState
+
+DataTransceiverState Serialization::deserializeDataTransceiverState(std::vector<char>& buffer)
+{
+    su::VectorWrapBuf<char> strbuf(buffer);
+    std::istream is(&strbuf);
+    return deserializeDataTransceiverState(is);
+}
+
 DataTransceiverState Serialization::deserializeDataTransceiverState(std::istream& is)
 {
     DataTransceiverState state;
@@ -503,6 +511,17 @@ void Serialization::serialize(DataTransceiverState const& state, std::ostream& o
 {
     su::serialize(state.mCommState, os);
     su::serialize(state.mCacheState, os);
+}
+
+std::vector<char> Serialization::serialize(DataTransceiverState const& state)
+{
+    std::vector<char> buffer(serializedSize(state));
+
+    std::stringbuf strbuf(std::ios_base::out | std::ios_base::in);
+    strbuf.pubsetbuf(buffer.data(), buffer.size());
+    std::ostream os(&strbuf);
+    serialize(state, os);
+    return buffer;
 }
 
 size_t Serialization::serializedSize(DataTransceiverState const& state)

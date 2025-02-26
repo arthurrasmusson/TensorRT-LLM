@@ -11,12 +11,12 @@
  * its affiliates is strictly prohibited.
  */
 
-#include "../dataTransceiverState.h"
 #include "cacheConcatenate.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaFp8Utils.h"
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/reduceKernelUtils.cuh"
+#include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/tensor.h"
 #include "tensorrt_llm/executor/types.h"
 #include "tensorrt_llm/runtime/bufferManager.h"

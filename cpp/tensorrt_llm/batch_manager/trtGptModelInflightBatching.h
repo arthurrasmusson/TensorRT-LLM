@@ -55,13 +55,14 @@ class RnnStateManager;
 class SequenceSlotManager;
 class DecoderStepAsyncSend;
 class DecoderSlotAsyncSend;
+class DecoderInputBuffers;
 class DecoderBuffers;
 class SlotDecoderBuffers;
 class LlmRequest;
 class RuntimeBuffers;
 class BasePeftCacheManager;
 class GuidedDecoder;
-class CacheTransceiver;
+class BaseCacheTransceiver;
 
 // Algorithms
 class CapacityScheduler;
@@ -174,7 +175,9 @@ public:
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
     [[nodiscard]] static TrtGptModelOptionalParams fixOptionalParams(
         runtime::ModelConfig const& modelConfig, TrtGptModelOptionalParams const& optionalParams);
-    void prepareDistGenInitRequests(RequestList const& activeRequests);
+
+    void prepareDisaggGenInitRequests(RequestList const& activeRequests, RequestVector& newGenReques);
+    void checkDisaggGenTransferStatus(RequestList const& activeRequests);
     void prepareDistGenBufferAndDecoder(RequestVector const& generationRequests);
     RequestVector scheduleDistGenInitRequests(RequestList const& activeRequests);
 
@@ -274,7 +277,8 @@ private:
     void setupContext(
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
-    void setupDecoderStep(RequestVector const& contextRequests, std::shared_ptr<RuntimeBuffers>& buffers);
+    void setupDecoderStep(
+        RequestVector const& contextRequests, RuntimeBuffers const& buffers, DecoderInputBuffers const& inputBuffers);
     DecoderFinishedEventPtr decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, DecoderFinishedEventPtr decoderFinishEvent);
@@ -491,14 +495,14 @@ private:
     /******************** Buffers ********************/
     // Buffers for each micro batch. Unfused path (mCtxGenFusion==false) uses two times the buffers.
     std::vector<std::shared_ptr<RuntimeBuffers>> mBuffers;
+    // Decoder buffers for each micro batch.
+    std::vector<DecoderInputBuffers> mDecoderInputBuffers;
     // Global buffer to interface with decoder. Slots in this buffer are selected by mSeqSlotManager.
     std::shared_ptr<DecoderBuffers> mDecoderBuffers;
     // Buffers for each slot in the decoder
     std::vector<std::shared_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
     // PEFT table for each micro batch
     std::vector<PeftTable> mPeftTables;
-    // Decoder input ids buffer.
-    TensorPtr mDecoderInputsIds;
     // Decoder input for each micro batch.
     std::vector<std::unique_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
     std::unique_ptr<runtime::decoder_batch::Output> mDecodingOutput;
@@ -520,7 +524,7 @@ private:
     std::vector<utils::CudaGraphExecutorCache> mCudaGraphExecutorCaches;
 
     /******************** Cache transceiver ********************/
-    std::unique_ptr<CacheTransceiver> mCacheTransceiver;
+    std::unique_ptr<BaseCacheTransceiver> mCacheTransceiver;
 
     /******************** Spec dec ***********************/
     std::unique_ptr<std::thread> mDraftModelSendLogitsThread;

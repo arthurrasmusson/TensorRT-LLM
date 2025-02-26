@@ -19,6 +19,7 @@
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/batch_manager/peftCacheManager.h"
 #include "tensorrt_llm/batch_manager/sequenceSlotManager.h"
+#include "tensorrt_llm/common/stringUtils.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/requestUtils.h"
 #include "tensorrt_llm/executor/types.h"
@@ -53,6 +54,7 @@ struct ExpectedState
     int32_t itEnd;
     std::vector<uint64_t> activeIds;
     std::vector<RequestState> scheduledState;
+    std::vector<RequestState> scheduledDisaggGenInitState;
 };
 
 class MockPeftCacheManager : public BasePeftCacheManager
@@ -140,12 +142,14 @@ protected:
 
     static std::shared_ptr<LlmRequest> createRequest(std::shared_ptr<std::vector<int32_t>> inputTokens,
         int32_t maxNewTokens, std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
-        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority)
+        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority,
+        LlmRequestState state = LlmRequestState::kCONTEXT_INIT)
     {
         tensorrt_llm::runtime::SamplingConfig samplingConfig;
         uint64_t reqId = optionalReqId.value_or((rand() % INT64_MAX) + 1);
         auto req = std::make_shared<LlmRequest>(reqId, maxNewTokens, inputTokens, samplingConfig, false);
         req->setPriority(priority);
+        req->setState(state);
 
         if (loraTaskId.has_value())
         {
@@ -156,10 +160,11 @@ protected:
 
     static std::shared_ptr<LlmRequest> createRequest(int32_t promptLen, int32_t maxNewTokens,
         std::optional<uint64_t> optionalReqId, std::optional<uint64_t> loraTaskId = std::nullopt,
-        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority)
+        tensorrt_llm::executor::PriorityType priority = tensorrt_llm::executor::Request::kDefaultPriority,
+        LlmRequestState state = LlmRequestState::kCONTEXT_INIT)
     {
         auto inputTokens = std::make_shared<std::vector<int32_t>>(promptLen, 1);
-        return createRequest(inputTokens, maxNewTokens, optionalReqId, loraTaskId, priority);
+        return createRequest(inputTokens, maxNewTokens, optionalReqId, loraTaskId, priority, state);
     }
 
     static std::shared_ptr<LlmRequest> createFromExecutorRequest(int32_t promptLen, int32_t maxNewTokens,
@@ -216,20 +221,26 @@ int runTest(CapacityScheduler& capacityScheduler,
     std::shared_ptr<kv_cache_manager::BaseKVCacheManager> const& kvCacheManager, RequestList& activeRequests,
     std::vector<ExpectedState> const& expectedStates, AddNewRequestsCallback const& addNewRequestsCb,
     SizeType32 maxInputLen, std::shared_ptr<BasePeftCacheManager> const& peftCacheManager = nullptr,
-    std::shared_ptr<kv_cache_manager::BaseKVCacheManager> const& crossKvCacheManager = nullptr)
+    std::shared_ptr<kv_cache_manager::BaseKVCacheManager> const& crossKvCacheManager = nullptr,
+    bool hasDisaggGenInit = false)
 {
     int itCount = 0;
     while (!activeRequests.empty())
     {
         addNewRequestsCb(activeRequests, itCount);
         prepRequestsForEncoderSkip(activeRequests);
-        auto [scheduledRequestsList, pausedRequests]
+        auto [scheduledRequestsList, scheduledDisaggGenInitRequestsLists, pausedRequests]
             = capacityScheduler(activeRequests, kvCacheManager, peftCacheManager, crossKvCacheManager);
 
         RequestTable scheduledRequests;
         for (auto& req : scheduledRequestsList)
         {
             scheduledRequests.emplace(req->mRequestId, req);
+        }
+        RequestTable scheduledDisaggGenInitRequests;
+        for (auto& req : scheduledDisaggGenInitRequestsLists)
+        {
+            scheduledDisaggGenInitRequests.emplace(req->mRequestId, req);
         }
 
         // ------------------
@@ -255,6 +266,8 @@ int runTest(CapacityScheduler& capacityScheduler,
 
                 EXPECT_EQ(activeRequests.size(), expectedState.activeIds.size()) << "itCount: " << itCount;
                 EXPECT_EQ(scheduledRequests.size(), expectedState.scheduledState.size()) << "itCount: " << itCount;
+                EXPECT_EQ(scheduledDisaggGenInitRequests.size(), expectedState.scheduledDisaggGenInitState.size())
+                    << "itCount: " << itCount;
 
                 // Check that active requests are as expected
                 int reqCount = 0;
@@ -272,22 +285,34 @@ int runTest(CapacityScheduler& capacityScheduler,
                         << "itCount: " << itCount << "mRequestId:" << scheduledReqState.mRequestId;
                 }
 
+                // Check that scheduled requests are as expected
+                for (auto scheduledReqState : expectedState.scheduledDisaggGenInitState)
+                {
+                    // Check that scheduleId is found in scheduled Requests
+                    EXPECT_NE(
+                        scheduledRequests.find(scheduledReqState.mRequestId), scheduledDisaggGenInitRequests.end())
+                        << "itCount: " << itCount << "mRequestId:" << scheduledReqState.mRequestId;
+                }
+
                 // Check that all new scheduled are in context init state
                 if (itCount == expectedState.itBegin)
                 {
                     for (auto scheduledReqState : expectedState.scheduledState)
                     {
                         auto scheduledId = scheduledReqState.mRequestId;
-                        if (previousScheduled.find(scheduledId) == previousScheduled.end())
+                        if (!hasDisaggGenInit)
                         {
-                            EXPECT_EQ(scheduledRequests.at(scheduledId)->getState(), LlmRequestState::kCONTEXT_INIT)
-                                << "itCount: " << itCount << "reqId: " << scheduledId;
-                        }
-                        else if (!scheduledRequests.at(scheduledId)->getContextRemainingLength())
-                        {
-                            EXPECT_EQ(
-                                scheduledRequests.at(scheduledId)->getState(), LlmRequestState::kGENERATION_IN_PROGRESS)
-                                << "itCount: " << itCount << "reqId: " << scheduledId;
+                            if (previousScheduled.find(scheduledId) == previousScheduled.end())
+                            {
+                                EXPECT_EQ(scheduledRequests.at(scheduledId)->getState(), LlmRequestState::kCONTEXT_INIT)
+                                    << "itCount: " << itCount << "reqId: " << scheduledId;
+                            }
+                            else if (!scheduledRequests.at(scheduledId)->getContextRemainingLength())
+                            {
+                                EXPECT_EQ(scheduledRequests.at(scheduledId)->getState(),
+                                    LlmRequestState::kGENERATION_IN_PROGRESS)
+                                    << "itCount: " << itCount << "reqId: " << scheduledId;
+                            }
                         }
 
                         // Check that request parameters are as expected
@@ -323,11 +348,22 @@ int runTest(CapacityScheduler& capacityScheduler,
             EXPECT_EQ(llmReq->getState(), LlmRequestState::kCONTEXT_INIT);
         }
 
+        // Move scheduled disagg gen init to generation in progress
+        for (auto& [reqId, llmReq] : scheduledDisaggGenInitRequests)
+        {
+            if (llmReq->isDisaggGenerationInitState())
+            {
+                kvCacheManager->addSequence(
+                    llmReq->mRequestId, llmReq->mPromptLen, llmReq->mSamplingConfig.beamWidth, llmReq);
+                llmReq->setState(LlmRequestState::kGENERATION_IN_PROGRESS);
+                llmReq->setContextCurrentPosition(llmReq->mPromptLen);
+                llmReq->setDecodingIter(1);
+                llmReq->addNewTokens({itCount});
+            }
+        }
         // Append a token for all scheduled requests
         for (auto& [reqId, llmReq] : scheduledRequests)
         {
-            auto const isReqNew = llmReq->isContextInitState() && llmReq->isFirstContextChunk();
-
             auto const promptLen = llmReq->mPromptLen;
             if (llmReq->isContextInitState())
             {
@@ -710,6 +746,50 @@ TEST_F(CapacitySchedulerTest, SimpleDoesntFitMaxUtilization)
         int expectedNumIters = (sinkTokenLen == 0) ? 119 : 125;
         EXPECT_EQ(numIterations, expectedNumIters);
     }
+}
+
+TEST_F(CapacitySchedulerTest, DisaggGenInitMaxUtilization)
+{
+    SizeType32 kvCacheMaxNumTokens = 100;
+    SizeType32 kvCacheTokensPerBlock = 10;
+    SizeType32 kvCacheMaxNumTokensPerSeq = 90;
+    SizeType32 maxNumRequests = 2;
+    SizeType32 maxInputLen = 1000;
+
+    SizeType32 sinkTokenLen = 0;
+    auto kvCacheManager = getKvCacheManager(
+        maxNumRequests, kvCacheTokensPerBlock, kvCacheMaxNumTokens, kvCacheMaxNumTokensPerSeq, sinkTokenLen);
+    auto peftCacheManager = getPeftCacheManager();
+    CapacitySchedulerPolicy capacitySchedulerPolicy = CapacitySchedulerPolicy::kMAX_UTILIZATION;
+    auto capacityScheduler = CapacityScheduler(maxNumRequests, capacitySchedulerPolicy, kvCacheManager != nullptr);
+
+    // Create two requests that will not fit in kvCache for entire duration
+    int32_t maxNewTokens = 80;
+    int32_t promptLen = 10;
+
+    RequestList activeRequests;
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 0, std::nullopt,
+        tensorrt_llm::executor::Request::kDefaultPriority, LlmRequestState::kDISAGG_GENERATION_INIT));
+    activeRequests.push_back(createRequest(promptLen, maxNewTokens, 1, std::nullopt,
+        tensorrt_llm::executor::Request::kDefaultPriority, LlmRequestState::kDISAGG_GENERATION_INIT));
+
+    std::vector<ExpectedState> expectedStates;
+    expectedStates.push_back(ExpectedState{0, 1, {0, 1}, {}, {{0, 80, 10, 0}, {1, 80, 10, 0}}});
+    // Up to iteration 41, kvCache is big enough, expect 2 requests
+    expectedStates.push_back(ExpectedState{1, 41, {0, 1}, {{0, 80, 10, 1, 10}, {1, 80, 10, 1, 10}}});
+    // At iteration 41, running out of space, only one scheduled (req 0)
+    expectedStates.push_back(ExpectedState{41, 80, {0, 1}, {{0, 80, 10, 41, 10}}});
+    // At iteration 80, req 0 is done
+    expectedStates.push_back(ExpectedState{80, 120, {1}, {{1, 39, 51, 0}}});
+
+    // Callback to call at each iteration, to have option to add new active Requests
+    auto addNewRequestsCb = [this](RequestList& activeRequests, int itCount) {};
+
+    int numIterations = runTest(capacityScheduler, kvCacheManager, activeRequests, expectedStates, addNewRequestsCb,
+        maxInputLen, peftCacheManager, nullptr, true);
+
+    int expectedNumIters = (sinkTokenLen == 0) ? 119 : 125;
+    EXPECT_EQ(numIterations, expectedNumIters);
 }
 
 TEST_F(CapacitySchedulerTest, RequestsSortedByPriorities)

@@ -270,7 +270,11 @@ void TrtEncoderModel::forwardAsync(RequestList const& activeRequests)
         // TODO: add pause handling logic
         TLLM_LOG_DEBUG("Running ENCODER request scheduler");
 
-        auto [fittingRequests, requestsToPause] = (*mCapacityScheduler)(activeRequests);
+        auto [fittingRequests, fittingDisaggeGenInitReuqests, requestsToPause] = (*mCapacityScheduler)(activeRequests);
+
+        TLLM_CHECK_WITH_INFO(
+            fittingDisaggeGenInitReuqests.empty(), "Disaggregated servering is not support by encoder model.");
+
         std::tie(currRequests.contextRequests, std::ignore) = (*mMicroBatchScheduler)(
             fittingRequests, mInflightReqIds, getMaxBatchSize(), mModelConfig.getMaxNumTokens());
 

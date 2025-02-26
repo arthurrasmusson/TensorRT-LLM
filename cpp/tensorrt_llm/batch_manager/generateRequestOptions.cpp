@@ -13,29 +13,30 @@
 #include "tensorrt_llm/batch_manager/generateRequestOptions.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
 #include "tensorrt_llm/batch_manager/medusaBuffers.h"
+#include "tensorrt_llm/batch_manager/runtimeBuffers.h"
 #include "tensorrt_llm/batch_manager/utils/logitsThread.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+
+#include <NvInferRuntimeBase.h>
+#include <cstddef>
 
 using namespace tensorrt_llm::runtime;
 
 namespace tensorrt_llm::batch_manager
 {
 
-std::tuple<std::vector<SizeType32>, std::vector<decoder_batch::Request>, std::vector<SamplingConfig>>
+std::tuple<ITensor::SharedPtr, std::vector<decoder_batch::Request>, std::vector<SamplingConfig>>
 GenerateRequestOptions::operator()(ModelConfig const& modelConfig, tr::WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, runtime::TllmRuntime const& runtime,
-    RequestVector const& contextRequests, RuntimeBuffers& buffers, TensorPtr& decoderInputsIds) const
+    RequestVector const& contextRequests, RuntimeBuffers const& buffers, DecoderInputBuffers const& inputBuffers) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(GenerateRequestOptions);
 
-    std::vector<SizeType32> seqSlots;
-    std::vector<decoder_batch::Request> decoderRequests;
-    std::vector<SamplingConfig> samplingConfigs;
-
     auto const& manager = runtime.getBufferManager();
 
+    SizeType32 batchSize{0};
     size_t decoderInputSize{0};
     if (!contextRequests.empty())
     {
@@ -45,11 +46,20 @@ GenerateRequestOptions::operator()(ModelConfig const& modelConfig, tr::WorldConf
             if (llmReq->isLastContextChunk())
             {
                 decoderInputSize += reqTokens.size();
+                ++batchSize;
             }
         }
     }
-    decoderInputsIds->resize(decoderInputSize);
+    inputBuffers.inputsIds->resize(decoderInputSize);
 
+    TensorPtr batchSlotsView = runtime::ITensor::slice(inputBuffers.setupBatchSlots, 0, batchSize);
+    auto batchSlotsRange = BufferRange<SizeType32>(*batchSlotsView);
+    std::vector<decoder_batch::Request> decoderRequests;
+    decoderRequests.reserve(batchSize);
+    std::vector<SamplingConfig> samplingConfigs;
+    samplingConfigs.reserve(batchSize);
+
+    SizeType32 batchIdx{0};
     SizeType32 inputOffset{0};
     for (auto const& llmReq : contextRequests)
     {
@@ -61,7 +71,7 @@ GenerateRequestOptions::operator()(ModelConfig const& modelConfig, tr::WorldConf
         auto const promptLen = llmReq->getPromptLen();
         auto const& reqTokens = llmReq->getTokens(0);
         TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen));
-        TensorPtr inputView = ITensor::slice(decoderInputsIds, inputOffset, promptLen);
+        TensorPtr inputView = ITensor::slice(inputBuffers.inputsIds, inputOffset, promptLen);
         manager.copy(reqTokens.data(), *inputView);
 
         auto decoderRequest = decoder_batch::Request{inputView, promptLen, llmReq->mMaxNewTokens, llmReq->mEndId};
@@ -129,23 +139,24 @@ GenerateRequestOptions::operator()(ModelConfig const& modelConfig, tr::WorldConf
             decoderRequest.stopWordsList = manager.copyFrom(*llmReq->getStopWordsList().value(), MemoryType::kGPU);
             decoderRequest.stopWordsList->squeeze(0);
         }
-        seqSlots.push_back(llmReq->mSeqSlot.value());
+        batchSlotsRange[batchIdx] = llmReq->mSeqSlot.value();
         decoderRequests.push_back(decoderRequest);
         samplingConfigs.push_back(llmReq->mSamplingConfig);
 
         inputOffset += promptLen;
+        ++batchIdx;
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
-    return {std::move(seqSlots), std::move(decoderRequests), std::move(samplingConfigs)};
+    return {std::move(batchSlotsView), std::move(decoderRequests), std::move(samplingConfigs)};
 }
 
 std::shared_ptr<runtime::ITensor> GenerateRequestOptions::retrieveDraftLogits(tr::ModelConfig const& modelConfig,
-    tr::WorldConfig const& worldConfig, std::shared_ptr<runtime::ITensor> tensor,
+    tr::WorldConfig const& worldConfig, std::shared_ptr<runtime::ITensor> const& tensor,
     runtime::TllmRuntime const& runtime) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    auto& manager = runtime.getBufferManager();
+    auto const& manager = runtime.getBufferManager();
 
     if (!mSpeculativeDecodingFastLogits)
     {

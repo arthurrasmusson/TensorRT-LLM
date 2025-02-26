@@ -518,7 +518,7 @@ private:
             if (message.id == MessageID::TERMINATION)
             {
 
-                TLLM_LOG_DEBUG("controller get terminiation message in sendQueue");
+                TLLM_LOG_DEBUG("controller get termination message in sendQueue");
                 break;
             }
             if (message.id == MessageID::PENDING_CONTEXT_REQUEST)

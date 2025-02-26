@@ -12,10 +12,11 @@
 
 #include "tensorrt_llm/batch_manager/decoderBuffers.h"
 
-#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
+#include "tensorrt_llm/runtime/iBuffer.h"
+#include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 
@@ -23,6 +24,16 @@ using namespace tensorrt_llm::runtime;
 
 namespace tensorrt_llm::batch_manager
 {
+
+DecoderInputBuffers::DecoderInputBuffers(SizeType32 maxBatchSize, SizeType32 maxTokensPerEngineStep)
+{
+    setupBatchSlots = BufferManager::pinnedPool(ITensor::makeShape({maxBatchSize}), TRTDataType<SizeType32>::value);
+
+    inputsIds = BufferManager::pinnedPool(ITensor::makeShape({0}), TRTDataType<TokenIdType>::value);
+
+    forwardBatchSlots = BufferManager::pinnedPool(
+        ITensor::makeShape({maxTokensPerEngineStep, maxBatchSize}), TRTDataType<SizeType32>::value);
+}
 
 DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWidth, SizeType32 maxAttentionWindow,
     SizeType32 maxSeqLen, SizeType32 maxTokensPerStep, TllmRuntime const& runtime, ModelConfig const& modelConfig,
@@ -46,7 +57,7 @@ DecoderBuffers::DecoderBuffers(SizeType32 maxNumSequences, SizeType32 maxBeamWid
     sequenceLengthsHost
         = BufferManager::pinned(ITensor::makeShape({maxNumSequences, maxBeamWidth}), nvinfer1::DataType::kINT32);
 
-    finished = BufferManager::pinned(ITensor::makeShape({maxNumSequences}), nvinfer1::DataType::kUINT8);
+    finishedSumHost = BufferManager::pinned(ITensor::makeShape({maxNumSequences}), nvinfer1::DataType::kINT32);
 
     newOutputTokens
         = manager.gpu(ITensor::makeShape({maxTokensPerStep, maxNumSequences, maxBeamWidth}), TRTTokenIdType);
@@ -228,7 +239,7 @@ DecoderSlotAsyncSend::~DecoderSlotAsyncSend()
 std::unique_ptr<DecoderStepAsyncSend> DecoderBuffers::asyncSend(std::shared_ptr<mpi::MpiComm> const& commSession,
     bool const returnLogProbs, SizeType32 const maxBeamWidth, bool const useMedusa, int const peer)
 {
-    auto decStepAsyncSndHdl = std::make_unique<DecoderStepAsyncSend>(commSession, newOutputTokensHost, finished,
+    auto decStepAsyncSndHdl = std::make_unique<DecoderStepAsyncSend>(commSession, newOutputTokensHost, finishedSumHost,
         sequenceLengthsHost, returnLogProbs ? cumLogProbsHost : nullptr, returnLogProbs ? logProbsHost : nullptr,
         maxBeamWidth > 1 ? cacheIndirectionOutput : nullptr,
         useMedusa ? draftBuffers.acceptedLengthsCumSumDevice : nullptr,
@@ -243,7 +254,7 @@ void DecoderBuffers::recv(std::shared_ptr<mpi::MpiComm> const& commSession, bool
     TLLM_LOG_DEBUG("start recv outputs of DecoderBuffers from rank %d", peer);
 
     commSession->recv(*newOutputTokensHost, peer, DecoderStepAsyncSend::kMpiTagOffset);
-    commSession->recv(*finished, peer, DecoderStepAsyncSend::kMpiTagOffset + 1);
+    commSession->recv(*finishedSumHost, peer, DecoderStepAsyncSend::kMpiTagOffset + 1);
     commSession->recv(*sequenceLengthsHost, peer, DecoderStepAsyncSend::kMpiTagOffset + 2);
     if (returnLogProbs)
     {
@@ -272,7 +283,7 @@ void DecoderBuffers::bcast(std::shared_ptr<mpi::MpiComm> const& commSession, boo
     TLLM_LOG_DEBUG("start bcast outputs of DecoderBuffers from rank %d", root);
 
     auto request1 = commSession->bcastAsync(*newOutputTokensHost, root);
-    auto request2 = commSession->bcastAsync(*finished, root);
+    auto request2 = commSession->bcastAsync(*finishedSumHost, root);
     auto request3 = commSession->bcastAsync(*sequenceLengthsHost, root);
     auto request4 = returnLogProbs ? commSession->bcastAsync(*cumLogProbsHost, root) : nullptr;
     auto request5 = returnLogProbs ? commSession->bcastAsync(*logProbsHost, root) : nullptr;

@@ -12,8 +12,12 @@
 
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/serialization.h"
+#include "tensorrt_llm/executor/serializeUtils.h"
 
 #include <optional>
+
+namespace su = tensorrt_llm::executor::serialize_utils;
 
 namespace tensorrt_llm::executor
 {
@@ -29,6 +33,20 @@ ContextPhaseParams::ContextPhaseParams(VecTokens firstGenTokens, RequestIdType r
     : mReqId{reqId}
     , mFirstGenTokens{std::move(firstGenTokens)}
 {
+}
+
+ContextPhaseParams::ContextPhaseParams(
+    VecTokens firstGenTokens, RequestIdType reqId, std::vector<char> const& serializedState)
+    : mReqId{reqId}
+    , mFirstGenTokens{std::move(firstGenTokens)}
+{
+
+    su::VectorWrapBuf<char> strbuf(const_cast<std::vector<char>&>(serializedState));
+    std::istream is(&strbuf);
+
+    auto dataTransceiverState = Serialization::deserializeDataTransceiverState(is);
+    auto dataTransceiverStatePtr = std::make_unique<executor::DataTransceiverState>(std::move(dataTransceiverState));
+    mState = StatePtr{dataTransceiverStatePtr.release(), deleter};
 }
 
 ContextPhaseParams::ContextPhaseParams(ContextPhaseParams const& other)
@@ -79,6 +97,11 @@ void const* ContextPhaseParams::getState() const noexcept
 void* ContextPhaseParams::getState() noexcept
 {
     return mState.get();
+}
+
+std::vector<char> ContextPhaseParams::getSerializedState() const noexcept
+{
+    return Serialization::serialize(*static_cast<DataTransceiverState const*>(mState.get()));
 }
 
 void* ContextPhaseParams::releaseState() noexcept

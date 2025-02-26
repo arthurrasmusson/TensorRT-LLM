@@ -714,6 +714,18 @@ TEST(SerializeUtilsTest, ContextPhaseParams)
         auto stats2 = serializeDeserialize(stats);
         EXPECT_EQ(stats, stats2);
     }
+
+    {
+        auto state = std::make_unique<texec::DataTransceiverState>();
+        state->setCommState(texec::kv_cache::CommState{{10, 20}});
+        auto state2 = *state;
+        auto contextPhaseParams = texec::ContextPhaseParams({10, 20, 30, 40, 50, 60}, 1, state.release());
+
+        auto serializedState = contextPhaseParams.getSerializedState();
+        auto stateCopy = texec::Serialization::deserializeDataTransceiverState(serializedState);
+
+        EXPECT_EQ(state2, stateCopy);
+    }
 }
 
 TEST(SerializeUtilsTest, SpeculativeDecodingFastLogitsInfo)

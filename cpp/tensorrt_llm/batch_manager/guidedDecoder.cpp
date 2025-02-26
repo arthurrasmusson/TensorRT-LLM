@@ -15,8 +15,6 @@
 #include "tensorrt_llm/kernels/logitsBitmask.h"
 
 #include <xgrammar/xgrammar.h>
-// TODO(enweiz): WAR for regex, will ask XGrammar to expose formal API to xgrammar/xgrammar.h
-#include <../../xgrammar/cpp/regex_converter.h>
 
 using namespace tensorrt_llm::runtime;
 
@@ -95,7 +93,7 @@ void GuidedDecoder::build(ScheduledRequests const& scheduledRequests)
                     }
                     else if (guideType == executor::GuidedDecodingParams::GuideType::kREGEX)
                     {
-                        auto const& grammar = xgrammar::Grammar::FromEBNF(xgrammar::RegexToEBNF(guide.value()));
+                        auto const& grammar = xgrammar::Grammar::FromRegex(guide.value());
                         mXGrammarMatchers.at(seqSlot)
                             = std::make_shared<xgrammar::GrammarMatcher>(mXGrammarCompiler->CompileGrammar(grammar));
                     }

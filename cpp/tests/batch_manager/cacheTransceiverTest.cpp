@@ -10,19 +10,18 @@
  * its affiliates is strictly prohibited.
  */
 
+#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/cacheFormatter.h"
+#include "tensorrt_llm/batch_manager/dataTransceiverImpl.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#if ENABLE_UCX
-#include "tensorrt_llm/batch_manager/ucxDataTransceiver.h"
-#endif
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/envUtils.h"
+#include "tensorrt_llm/executor/cache_transmission/mpi_utils/connection.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/utils/mpiUtils.h"
-#include <tensorrt_llm/batch_manager/cacheFormatter.h>
-#include <tensorrt_llm/batch_manager/mpiDataTransceiver.h>
 
 #include <csignal>
 #include <cstddef>
@@ -124,7 +123,10 @@ TEST_F(CacheConfigTest, EqualTo)
     modelConfig.setTokensPerBlock(tokensPerBlock);
     tr::WorldConfig worldConfig{tensorParallelism, pipelineParallelism, contextParallelism};
 
-    texec::kv_cache::CacheState state0{modelConfig, worldConfig};
+    texec::kv_cache::CacheState::ModelConfig cacheStateCfg{
+        modelConfig.getNumKvHeadsPerLayer(), modelConfig.getSizePerHead(), modelConfig.getTokensPerBlock()};
+
+    texec::kv_cache::CacheState state0{cacheStateCfg, worldConfig, modelConfig.getKvDataType()};
     texec::kv_cache::CacheState state1{
         nbAttentionLayers, nbHeads, sizePerHead, tokensPerBlock, tensorParallelism, pipelineParallelism, dtype};
     EXPECT_EQ(state0, state1);
@@ -199,6 +201,7 @@ TEST_F(MockTransceiverTest, MpiResponderBasic)
                 texec::kv_cache::CommState{std::vector<SizeType32>{0}, 0}}}));
     EXPECT_CALL(*sender, sendSync).WillOnce(Return());
     EXPECT_CALL(*sender, getCounterpartsCount).WillOnce(Return(1));
+    EXPECT_CALL(*sender, release).WillOnce(Return());
 
     DataResponder responder{std::move(sender)};
     auto request = makeLlmRequest(0);
@@ -232,7 +235,7 @@ TEST_F(MockTransceiverTest, MpiRequesterBasic)
 //          RealTransceiverTest
 // ---------------------------------------
 
-class MpiSymmetricalCacheTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
+class SymmetricalCacheTest : public ::testing::Test // NOLINT(cppcoreguidelines-pro-type-member-init)
 {
 protected:
     void SetUp() override {}
@@ -291,6 +294,7 @@ protected:
             sinkTokenLength, stream, std::nullopt, enableBlockReuse, onboardBlocks);
         mCacheState = std::make_unique<texec::kv_cache::CacheState>(
             numLayers, numHeads, sizePerHead, tokensPerBlock, 1, 1, dataType);
+        mConnectionManager = std::make_unique<texec::kv_cache::MpiConnectionManager>(mComm);
 
         // UVM seems to be incompatible with MPI, and it is continuing to investigate.
         bool constexpr useUvm = false;
@@ -301,13 +305,13 @@ protected:
     {
         if (isSender)
         {
-            mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
-                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
+            mResponder = std::make_unique<DataResponder>(std::make_unique<DataSenderImpl>(
+                mConnectionManager.get(), *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
         }
         else
         {
-            mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
-                *mComm, *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
+            mRequester = std::make_unique<DataRequester>(std::make_unique<DataReceiverImpl>(
+                mConnectionManager.get(), *mCacheState, mlocalRank, std::make_unique<CacheFormatter>(mManager.get())));
         }
     }
 
@@ -363,9 +367,10 @@ protected:
     std::unique_ptr<DataRequester> mRequester;
     std::unique_ptr<texec::kv_cache::CacheState> mCacheState;
     std::vector<std::future<void>> mFutures;
+    std::unique_ptr<texec::kv_cache::ConnectionManager> mConnectionManager;
 };
 
-TEST_F(MpiSymmetricalCacheTest, SimpleTest)
+TEST_F(SymmetricalCacheTest, SimpleTest)
 {
     auto worldSize = setUpCommunicator();
     if (worldSize != 2)
@@ -391,7 +396,7 @@ TEST_F(MpiSymmetricalCacheTest, SimpleTest)
 
 using AsymmetricTestParam = std::tuple<int, int, int, int, int, int, int, int, nvinfer1::DataType>;
 
-class MpiAsymmetricalCacheTest : public ::testing::TestWithParam<AsymmetricTestParam>
+class AsymmetricalCacheTest : public ::testing::TestWithParam<AsymmetricTestParam>
 {
 
 protected:
@@ -530,92 +535,21 @@ protected:
         {
             return;
         }
-
-        if (tensorrt_llm::common::getEnvUseUCXKvCache())
-        {
-#if ENABLE_UCX
-
-            TLLM_LOG_INFO("Enable UCX KV cache transport.");
-            namespace su = tensorrt_llm::executor::serialize_utils;
-
-            if (mIsContext)
-            {
-
-                mResponder = makeUcxCacheResponder(*mCacheState, mRankInInstance, mManager.get());
-
-                COMM_SESSION.barrier();
-                tensorrt_llm::executor::kv_cache::CommState commState = mResponder->getCommState();
-                std::ostringstream oStream;
-                su::serialize(commState, oStream);
-                auto str = oStream.str();
-                std::vector<char> buffer(str.begin(), str.end());
-                std::vector<SizeType32> sizeofBuffer(COMM_SESSION.getSize());
-                SizeType32 bufferSize = buffer.size();
-                COMM_SESSION.allgather(&bufferSize, sizeofBuffer.data(), 1, tensorrt_llm::mpi::MpiType::kINT32);
-                SizeType32 recvBufferSize = std::accumulate(sizeofBuffer.begin(), sizeofBuffer.end(), 0);
-                std::vector<char> recvBuffer(recvBufferSize);
-                std::vector<int> displs(COMM_SESSION.getSize());
-                for (int r = 0; r < COMM_SESSION.getSize(); r++)
-                {
-                    displs[r] = (r == 0) ? 0 : (displs[r - 1] + sizeofBuffer[r - 1]);
-                }
-                COMM_SESSION.allgatherv(buffer.data(), bufferSize, tensorrt_llm::mpi::MpiType::kCHAR, recvBuffer.data(),
-                    sizeofBuffer, displs, tensorrt_llm::mpi::MpiType::kCHAR);
-
-                // deserialize
-                std::vector<tensorrt_llm::executor::kv_cache::CommState> commSessionCommState(COMM_SESSION.getSize());
-                std::vector<tensorrt_llm::executor::kv_cache::SocketState> socketStates;
-                for (int i = 0; i < COMM_SESSION.getSize(); i++)
-                {
-                    std::vector<char> serBuffer(
-                        recvBuffer.begin() + displs[i], recvBuffer.begin() + (displs[i] + sizeofBuffer[i]));
-                    su::VectorWrapBuf<char> strbuf(serBuffer);
-                    std::istream is(&strbuf);
-                    commSessionCommState[i] = su::deserialize<tensorrt_llm::executor::kv_cache::CommState>(is);
-                    TLLM_CHECK_WITH_INFO(
-                        commSessionCommState[i].getSocketState().size() == 1, "getSocketState size should be 1");
-                    socketStates.push_back(commSessionCommState[i].getSocketState()[0]);
-                }
-                tensorrt_llm::executor::kv_cache::CommState allCommState{socketStates, mRankInInstance};
-                mResponder->setCommState(std::move(allCommState));
-                {
-                    mContextCommState
-                        = std::make_unique<tensorrt_llm::executor::kv_cache::CommState>(mResponder->getCommState());
-                    std::ostringstream oStream2;
-                    su::serialize(*mContextCommState, oStream2);
-                    auto str2 = oStream2.str();
-                    std::vector<char> buffer2(str2.begin(), str2.end());
-                    mComm->bcast(buffer2, 0);
-                }
-            }
-            else
-            {
-                mRequester = makeUcxCacheRequester(*mCacheState, mRankInInstance, mManager.get());
-                std::vector<char> buffer{};
-                mComm->bcast(buffer, 0);
-                su::VectorWrapBuf<char> strbuf(buffer);
-                std::istream is(&strbuf);
-                mContextCommState = std::make_unique<tensorrt_llm::executor::kv_cache::CommState>(
-                    su::deserialize<tensorrt_llm::executor::kv_cache::CommState>(is));
-            }
-#else
-            TLLM_THROW("Responder based UCX need to compiled with ENABLE_UCX");
-#endif
-        }
         else if (tensorrt_llm::common::getEnvUseMPIKvCache())
         {
-
             TLLM_LOG_INFO("Enable MPI KV cache transport.");
+            mConnectionManager = std::make_unique<texec::kv_cache::MpiConnectionManager>(mComm);
 
             if (mIsContext)
             {
-                mResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
-                    *mComm, *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
+                mResponder = std::make_unique<DataResponder>(std::make_unique<DataSenderImpl>(mConnectionManager.get(),
+                    *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
             }
             else
             {
-                mRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
-                    *mComm, *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
+                mRequester
+                    = std::make_unique<DataRequester>(std::make_unique<DataReceiverImpl>(mConnectionManager.get(),
+                        *mCacheState, mRankInInstance, std::make_unique<CacheFormatter>(mManager.get())));
             }
 
             std::vector<int> contextRankVec(mContextRankSize);
@@ -624,6 +558,10 @@ protected:
                 contextRankVec[i] = i;
             }
             mContextCommState = std::make_unique<tensorrt_llm::executor::kv_cache::CommState>(contextRankVec);
+        }
+        else
+        {
+            TLLM_CHECK(false);
         }
     }
 
@@ -635,6 +573,7 @@ protected:
 
         auto state = std::make_unique<texec::DataTransceiverState>();
 
+        TLLM_CHECK(mContextCommState);
         state->setCommState(texec::kv_cache::CommState{*mContextCommState});
         state->setCacheState(*mContextCacheState);
         auto stats = texec::ContextPhaseParams({}, mRequestId, state.release());
@@ -651,7 +590,6 @@ protected:
         int blockIdx = 0;
         for (auto it = getBlockBeginIt(*mManager, *llmRequest, beamIdx, 0); it != blockEndIt; ++it)
         {
-
             fillBlockData(*it, blockIdx, llmRequest->mRequestId);
             blockIdx++;
         }
@@ -832,10 +770,11 @@ protected:
     std::unique_ptr<texec::kv_cache::CacheState> mCacheState;
     std::unique_ptr<texec::kv_cache::CacheState> mContextCacheState;
     std::unique_ptr<texec::kv_cache::CommState> mContextCommState;
+    std::unique_ptr<texec::kv_cache::ConnectionManager> mConnectionManager;
     std::mt19937 generator;
 };
 
-TEST_P(MpiAsymmetricalCacheTest, TestCase)
+TEST_P(AsymmetricalCacheTest, TestCase)
 {
     if (!(tensorrt_llm::common::getEnvUseUCXKvCache()))
     {
@@ -906,17 +845,17 @@ TEST_P(MpiAsymmetricalCacheTest, TestCase)
     tensorrt_llm::mpi::MpiComm::world().barrier();
 }
 
-INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest0, MpiAsymmetricalCacheTest,
+INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest0, AsymmetricalCacheTest,
     testing::Combine(testing::Values(1, 2), testing::Values(1, 2), testing::Values(1, 2), testing::Values(1, 2),
         testing::Values(4), testing::Values(4), testing::Values(4), testing::Values(16),
         testing::Values(nvinfer1::DataType::kFLOAT, nvinfer1::DataType::kINT8)));
 
-INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest1, MpiAsymmetricalCacheTest,
+INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest1, AsymmetricalCacheTest,
     testing::Combine(testing::Values(4), testing::Values(1), testing::Values(1), testing::Values(4), testing::Values(4),
         testing::Values(4), testing::Values(4), testing::Values(8),
         testing::Values(nvinfer1::DataType::kFLOAT, nvinfer1::DataType::kINT8)));
 
-INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest2, MpiAsymmetricalCacheTest,
+INSTANTIATE_TEST_CASE_P(MpiAsymmetricCaseTest2, AsymmetricalCacheTest,
     testing::Combine(testing::Values(1), testing::Values(2), testing::Values(1), testing::Values(1, 4),
         testing::Values(16), testing::Values(16), testing::Values(4), testing::Values(8),
         testing::Values(nvinfer1::DataType::kFLOAT)));

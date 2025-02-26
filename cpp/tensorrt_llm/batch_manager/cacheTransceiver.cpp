@@ -24,17 +24,20 @@
 #define dllGetSym(handle, name) dlsym(handle, name)
 #endif // defined(_WIN32)
 
-#include "cacheTransceiver.h"
+#include "tensorrt_llm/batch_manager/cacheFormatter.h"
+#include "tensorrt_llm/batch_manager/cacheTransceiver.h"
 #include "tensorrt_llm/batch_manager/contextProgress.h"
+#include "tensorrt_llm/batch_manager/dataTransceiverImpl.h"
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/common/logger.h"
+#include "tensorrt_llm/executor/cache_transmission/mpi_utils/connection.h"
 #include "tensorrt_llm/executor/dataTransceiverState.h"
 #include "tensorrt_llm/executor/serializeUtils.h"
 #include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include <algorithm>
 #include <cstddef>
-#include <iterator>
 #include <numeric>
 #include <unordered_set>
 
@@ -43,12 +46,40 @@ namespace tensorrt_llm::batch_manager
 
 std::mutex CacheTransceiver::mDllMutex;
 
-CacheTransceiver::CacheTransceiver(kv_cache_manager::BaseKVCacheManager* cacheManager, CommType commType,
-    runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig)
-    : mCommType{commType}
+std::unique_ptr<BaseCacheTransceiver> CacheTransceiverFactory::createCacheTransceiver(
+    kv_cache_manager::BaseKVCacheManager* cacheManager, runtime::ModelConfig const& modelConfig,
+    runtime::WorldConfig const& worldConfig)
 {
-    using namespace tensorrt_llm::batch_manager::kv_cache_manager;
-    mMpiGroupComm = std::addressof(tensorrt_llm::mpi::MpiComm::session());
+
+    std::optional<CacheTransceiver::CommType> commType;
+    if (common::getEnvUseUCXKvCache())
+    {
+        commType = CacheTransceiver::CommType::UCX;
+        TLLM_LOG_INFO("Enable UCX KV cache transport.");
+    }
+    else if (common::getEnvUseMPIKvCache())
+    {
+        commType = CacheTransceiver::CommType::MPI;
+        TLLM_LOG_INFO("Enable MPI KV cache transport.");
+    }
+    if (commType)
+    {
+        executor::kv_cache::CacheState::ModelConfig cacheStateCfg{
+            modelConfig.getNumKvHeadsPerLayer(), modelConfig.getSizePerHead(), modelConfig.getTokensPerBlock()};
+
+        return std::make_unique<CacheTransceiver>(
+            cacheManager, commType.value(), cacheStateCfg, worldConfig, modelConfig.getKvDataType());
+    }
+    return nullptr;
+}
+
+CacheTransceiver::CacheTransceiver(kv_cache_manager::BaseKVCacheManager* cacheManager, CommType commType,
+    executor::kv_cache::CacheState::ModelConfig const& cacheStateModelCfg, runtime::WorldConfig const& worldConfig,
+    nvinfer1::DataType dataType)
+    : mCommType{commType}
+    , mMpiGroupComm(std::addressof(tensorrt_llm::mpi::MpiComm::session()))
+{
+    using tensorrt_llm::batch_manager::kv_cache_manager::CacheFormatter;
 
     if (worldConfig.isPipelineParallel())
     {
@@ -60,78 +91,15 @@ CacheTransceiver::CacheTransceiver(kv_cache_manager::BaseKVCacheManager* cacheMa
         mMpiGroupTensorParaComm = std::make_shared<tensorrt_llm::mpi::MpiComm>(
             mMpiGroupComm->split(worldConfig.getPipelineParallelRank(), worldConfig.getTensorParallelRank()));
     }
-    mCacheState = std::make_unique<executor::kv_cache::CacheState>(modelConfig, worldConfig);
+    mCacheState = std::make_unique<executor::kv_cache::CacheState>(cacheStateModelCfg, worldConfig, dataType);
     if (mCommType == CommType::MPI)
     {
         mMpiWorldComm = std::addressof(tensorrt_llm::mpi::MpiComm::world());
-        mDataResponder = std::make_unique<DataResponder>(std::make_unique<MpiDataSender>(
-            *mMpiWorldComm, *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
-        mDataRequester = std::make_unique<DataRequester>(std::make_unique<MpiDataReceiver>(
-            *mMpiWorldComm, *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
-    }
-    else if (mCommType == CommType::UCX)
-    {
-        {
-            std::lock_guard<std::mutex> lock(mDllMutex);
-            mWrapperLibHandle = dllOpen(UCX_WRAPPER_LIB_NAME);
-            TLLM_CHECK_WITH_INFO(mWrapperLibHandle != nullptr, "UCX wrapper library is not open correctly.");
-            auto load_sym = [](void* handle, char const* name)
-            {
-                void* ret = dllGetSym(handle, name);
-                TLLM_CHECK_WITH_INFO(ret != nullptr,
-                    "Unable to load UCX wrapper library symbol, possible cause is that TensorRT-LLM library is not "
-                    "built with UCX support, please rebuild in UCX-enabled environment.");
-                return ret;
-            };
-            std::unique_ptr<DataResponder> (*makeUcxCacheResponder)(
-                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::BaseKVCacheManager*);
-            std::unique_ptr<DataRequester> (*makeUcxCacheRequester)(
-                executor::kv_cache::CacheState, SizeType32, kv_cache_manager::BaseKVCacheManager*);
-            *(void**) (&makeUcxCacheResponder) = load_sym(mWrapperLibHandle, "makeUcxCacheResponder");
-            *(void**) (&makeUcxCacheRequester) = load_sym(mWrapperLibHandle, "makeUcxCacheRequester");
-            mDataResponder = makeUcxCacheResponder(*mCacheState, worldConfig.getRank(), cacheManager);
-            mDataRequester = makeUcxCacheRequester(*mCacheState, worldConfig.getRank(), cacheManager);
-        }
-        namespace su = tensorrt_llm::executor::serialize_utils;
-
-        if (mMpiGroupComm->getSize() > 1)
-        {
-            mMpiGroupComm->barrier();
-            executor::kv_cache::CommState commState = mDataResponder->getCommState();
-            std::ostringstream oStream;
-            su::serialize(commState, oStream);
-            auto str = oStream.str();
-            std::vector<char> buffer(str.begin(), str.end());
-            std::vector<SizeType32> sizeofBuffer(mMpiGroupComm->getSize());
-            SizeType32 bufferSize = buffer.size();
-            mMpiGroupComm->allgather(&bufferSize, sizeofBuffer.data(), 1, mpi::MpiType::kINT32);
-            SizeType32 recvBufferSize = std::accumulate(sizeofBuffer.begin(), sizeofBuffer.end(), 0);
-            std::vector<char> recvBuffer(recvBufferSize);
-            std::vector<int> displs(mMpiGroupComm->getSize());
-            for (int r = 0; r < mMpiGroupComm->getSize(); r++)
-            {
-                displs[r] = (r == 0) ? 0 : (displs[r - 1] + sizeofBuffer[r - 1]);
-            }
-            mMpiGroupComm->allgatherv(buffer.data(), bufferSize, mpi::MpiType::kCHAR, recvBuffer.data(), sizeofBuffer,
-                displs, mpi::MpiType::kCHAR);
-
-            // deserialize
-            std::vector<executor::kv_cache::CommState> commSessionCommState(mMpiGroupComm->getSize());
-            std::vector<executor::kv_cache::SocketState> socketStates;
-            for (int i = 0; i < mMpiGroupComm->getSize(); i++)
-            {
-                std::vector<char> serBuffer(
-                    recvBuffer.begin() + displs[i], recvBuffer.begin() + (displs[i] + sizeofBuffer[i]));
-                su::VectorWrapBuf<char> strbuf(serBuffer);
-                std::istream is(&strbuf);
-                commSessionCommState[i] = su::deserialize<executor::kv_cache::CommState>(is);
-                TLLM_CHECK_WITH_INFO(
-                    commSessionCommState[i].getSocketState().size() == 1, "getSocketState size should be 1");
-                socketStates.push_back(commSessionCommState[i].getSocketState()[0]);
-            }
-            executor::kv_cache::CommState allCommState{socketStates, worldConfig.getRank()};
-            mDataResponder->setCommState(std::move(allCommState));
-        }
+        mManager = std::make_unique<executor::kv_cache::MpiConnectionManager>(mMpiWorldComm);
+        mDataResponder = std::make_unique<DataResponder>(std::make_unique<DataSenderImpl>(
+            mManager.get(), *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
+        mDataRequester = std::make_unique<DataRequester>(std::make_unique<DataReceiverImpl>(
+            mManager.get(), *mCacheState, worldConfig.getRank(), std::make_unique<CacheFormatter>(cacheManager)));
     }
     else
     {
@@ -183,7 +151,7 @@ void CacheTransceiver::respondAndSendAsync(LlmRequest* llmRequest)
 void CacheTransceiver::respondAndSendLayerWise(
     RequestVector const& requests, std::shared_ptr<ContextProgress> const& progress)
 {
-    for (auto& llmRequest : requests)
+    for (auto const& llmRequest : requests)
     {
         TLLM_CHECK(llmRequest && llmRequest->isContextOnlyRequest());
         TLLM_CHECK(mResponderFutures.find(llmRequest.get()) == mResponderFutures.end());
