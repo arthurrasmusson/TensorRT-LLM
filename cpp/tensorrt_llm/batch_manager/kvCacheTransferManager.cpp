@@ -17,6 +17,7 @@
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/cudaEvent.h"
 #include "tensorrt_llm/runtime/cudaStream.h"
+#include <cstdio>
 
 namespace tr = tensorrt_llm::runtime;
 
@@ -44,6 +45,7 @@ tr::ITensor::SharedPtr KVCacheTransferManager::computeBlockPointer(
 void KVCacheTransferManager::copyBlock(
     BlockPtr const& src, BlockPtr const& dst, std::vector<KVCacheBlockPool> const& pools, bool isOffload)
 {
+    printf("ENTERED COPY BLOCK\n");
     // TODO: Replace computeBlockPointer with getKOrVBlockPointer calls
     // block spans multiple pool - copy in each pool
     auto const numPools = pools.size();

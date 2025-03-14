@@ -781,6 +781,21 @@ void BlockManager::refreshBlocks()
 {
     mEvictionPolicy->refresh();
     mTransferManager->syncTransfers();
+
+    // DEBUG PRINT:
+    //   - primaryFree = how many blocks are free in primary pool
+    //   - primaryUsed = totalPrimBlocks - primaryFree
+    //   - secondaryFree = how many blocks are free in secondary pool (if any)
+    //   - secondaryUsed = totalSecBlocks - secondaryFree
+    auto primaryFree = mEvictionPolicy->getNumFreeBlocks(kPrimaryLevel);
+    auto secondaryFree = mEvictionPolicy->getNumFreeBlocks(kSecondaryLevel);
+
+    auto primaryUsed = mNumPrimaryBlocks - primaryFree;
+    auto secondaryUsed = mNumSecondaryBlocks - secondaryFree;
+
+    printf("[DEBUG] refreshBlocks(): "
+           "primaryFree=%d used=%d | secondaryFree=%d used=%d\n",
+           primaryFree, primaryUsed, secondaryFree, secondaryUsed);
 }
 
 void BlockManager::addSequence(

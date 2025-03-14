@@ -1,3 +1,9 @@
+# Ignore build artifacts in internal_cutlass_kernels:
+cpp/tensorrt_llm/kernels/internal_cutlass_kernels/**/*.dll
+cpp/tensorrt_llm/kernels/internal_cutlass_kernels/**/*.so
+cpp/tensorrt_llm/kernels/internal_cutlass_kernels/**/*.lib
+cpp/tensorrt_llm/kernels/internal_cutlass_kernels/**/*.a
+
 __pycache__/
 .vscode
 *.engine
