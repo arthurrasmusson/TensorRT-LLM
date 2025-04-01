@@ -401,6 +401,18 @@ set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 add_library(${SHARED_TARGET} SHARED)
 
+# Find cufile
+find_library(CUFILE_LIBRARY cufile
+    HINTS
+        /usr/local/cuda-12.6/targets/x86_64-linux/lib
+        /usr/lib/x86_64-linux-gnu
+        /usr/local/lib
+)
+if(NOT CUFILE_LIBRARY)
+    message(FATAL_ERROR "Could not find cufile library inside container.")
+endif()
+message(STATUS "Linking with cufile: ${CUFILE_LIBRARY}")
+
 set_target_properties(
   ${SHARED_TARGET}
   PROPERTIES CXX_STANDARD "17" CXX_STANDARD_REQUIRED "YES" CXX_EXTENSIONS "NO"
@@ -428,6 +440,9 @@ link_whole_archive(${SHARED_TARGET} ${INTERNAL_CUTLASS_KERNELS_TARGET})
 # Link kernel_src and cutlass_src. static internal cutlass lib overridden.
 target_link_libraries(${SHARED_TARGET} PUBLIC kernels_src cutlass_src)
 
+
+# Ensure final library references cufile
+target_link_libraries(${SHARED_TARGET} PRIVATE ${CUFILE_LIBRARY})
 # Cyclic dependency of batch manager on TRT-LLM
 target_link_libraries(${BATCH_MANAGER_TARGET} INTERFACE ${SHARED_TARGET})
 # Cyclic dependency of executor on TRT-LLM

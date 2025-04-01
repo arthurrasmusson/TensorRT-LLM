@@ -17,7 +17,8 @@ from tensorrt_llm.llmapi.llm_utils import LlmArgs
 @click.command()
 @click.option("--model",
               type=str,
-              default="/mnt/weka/Models/Engines/llama-3.1-8b-engine-2ec70d79308f2e445031393703e5be5793fd777a",
+              #default="/mnt/weka/Models/Engines/llama-3.1-8b-engine-2ec70d79308f2e445031393703e5be5793fd777a",
+              default="/mnt/weka/Models/Engines/Llama-3.1-405B-trtllm_commit_2ec70d79308f2e445031393703e5be5793fd777a-FP8-TP8-PP2/",
               help="Path to the TRT-LLM engine folder or HF checkpoint.")
 @click.option("--tokenizer",
               type=str,
@@ -44,8 +45,8 @@ from tensorrt_llm.llmapi.llm_utils import LlmArgs
               type=int,
               default=BuildConfig.max_seq_len,
               help="Max total length (prompt + generated output).")
-@click.option("--tp_size", type=int, default=1, help="Tensor parallel size.")
-@click.option("--pp_size", type=int, default=1, help="Pipeline parallel size.")
+@click.option("--tp_size", type=int, default=8, help="Tensor parallel size.")
+@click.option("--pp_size", type=int, default=2, help="Pipeline parallel size.")
 def main(model,
          tokenizer,
          backend,

@@ -46,6 +46,9 @@ RUN bash ./install_tensorrt.sh \
     --CUBLAS_VER=${CUBLAS_VER} && \
     rm install_tensorrt.sh
 
+# Update dynamic linker cache
+RUN ldconfig
+
 # Install latest Polygraphy
 COPY docker/common/install_polygraphy.sh install_polygraphy.sh
 RUN bash ./install_polygraphy.sh && rm install_polygraphy.sh

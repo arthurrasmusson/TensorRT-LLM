@@ -63,6 +63,10 @@ install_ubuntu_requirements() {
     # NVRTC static library doesn't exist in NGC PyTorch container.
     NVRTC_CUDA_VERSION=$(echo $CUDA_VER | sed 's/\./-/g')
     apt-get install -y --no-install-recommends cuda-nvrtc-dev-${NVRTC_CUDA_VERSION}=${NVRTC_VER}
+
+    # NEW: Install GDS libraries for CUDA 12.6
+    apt-get install -y --no-install-recommends nvidia-gds-12-6 libcufile-dev-12-6
+
     apt-get clean
     rm -rf /var/lib/apt/lists/*
 }
