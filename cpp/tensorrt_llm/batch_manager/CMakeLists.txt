@@ -107,6 +107,33 @@ if(ENABLE_CUFILE)
   if(NOT CUFILE_LIBRARY)
     message(FATAL_ERROR "Could not find cufile library inside container.")
   endif()
+  target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC ${CUFILE_LIBRARY})
+endif()
 
-target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC ${CUFILE_LIBRARY})
+if(ENABLE_NIC_GPU_PAIRING_GDS)
+  find_library(GDS_CLIENT_API_LIBRARY
+    NAMES libwekagds_client_api weka_gds_client_api
+    HINTS
+      /usr/local/lib
+      /usr/lib
+      /usr/local/cuda/lib64
+  )
+  if(NOT GDS_CLIENT_API_LIBRARY)
+    message(FATAL_ERROR "libwekagds_client_api.so not found. Check library path or set ENABLE_OPTIMIZED_GDS=OFF.")
+  else()
+    message(STATUS "Linking with libwekagds_client_api: ${GDS_CLIENT_API_LIBRARY}")
+    target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC ${GDS_CLIENT_API_LIBRARY})
+  endif()
+endif()
+
+
+
+if(ENABLE_UCX)
+  find_package(ucx REQUIRED)
+  find_package(ucxx REQUIRED)
+  target_include_directories(
+    ${BATCH_MANAGER_STATIC_TARGET}
+    PRIVATE $<TARGET_PROPERTY:ucxx::ucxx,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC)
+
 endif()
