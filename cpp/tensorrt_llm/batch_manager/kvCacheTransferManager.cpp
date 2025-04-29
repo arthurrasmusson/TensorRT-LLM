@@ -51,23 +51,35 @@ tr::ITensor::SharedPtr KVCacheTransferManager::computeBlockPointer(
 }
 
 void KVCacheTransferManager::copyBlock(
-    BlockPtr const& src, BlockPtr const& dst, std::vector<KVCacheBlockPool> const& pools, bool isOffload)
+    BlockPtr const& src,
+    BlockPtr const& dst,
+    std::vector<KVCacheBlockPool> const& pools,
+    bool isOffload,
+    bool dramDestination = false, // default to true to keep old calls valid
+    bool debugNeverGDS = false)  
 {
-    printf("ENTERED COPY BLOCK\n");
-    // TODO: Replace computeBlockPointer with getKOrVBlockPointer calls
-    // block spans multiple pool - copy in each pool
-    /*auto const numPools = pools.size();
-    for (size_t poolIdx = 0; poolIdx < numPools; poolIdx++)
+    // Indicate which mode was requested
+    printf("ENTERED COPY BLOCK: isOffload=%s, dramDestination=%s\n",
+        isOffload ? "true" : "false",
+        dramDestination ? "true" : "false");
+
+    // If dramDestination = true, use the original CPU->GPU (or GPU->CPU) copy logic
+    if (dramDestination)
     {
-        auto const srcPtr = computeBlockPointer(src, pools, poolIdx);
-        auto dstPtr = computeBlockPointer(dst, pools, poolIdx);
-        (isOffload ? mOffloadManager : mOnboardManager).copy(*srcPtr, *dstPtr);
-    }*/
+        printf("[INFO] dramDestination is true; using original GPU to/from DRAM copy\n");
+        auto const numPools = pools.size();
+        for (size_t poolIdx = 0; poolIdx < numPools; poolIdx++)
+        {
+            auto const srcPtr = computeBlockPointer(src, pools, poolIdx);
+            auto const dstPtr = computeBlockPointer(dst, pools, poolIdx);
+            (isOffload ? mOffloadManager : mOnboardManager).copy(*srcPtr, *dstPtr);
+        }
+        // Done, no file I/O when DRAMDestination is used
+        printf("[DEBUG] Exiting copyBlock (dramDestination path)\n\n");
+        return;
+    }
 
-    // EXPLANATION: Instead of copying to CPU memory, we will:
-    //  - If isOffload=true: write the GPU data to a file via cuFile
-    //  - If isOffload=false: load (read) the data from that file back into the GPU
-
+    // Otherwise, proceed with GDS or POSIX (offload or onboard)
     auto const numPools = pools.size();
     for (size_t poolIdx = 0; poolIdx < numPools; poolIdx++)
     {
@@ -84,16 +96,69 @@ void KVCacheTransferManager::copyBlock(
         std::snprintf(filename, sizeof(filename),
             "/mnt/weka/block_%d_pool_%zu.bin", src->getBlockId(), poolIdx);
 
-        // Open the file for R/W. We create it if offloading, read it if onboarding.
+        // Open the file for R/W. We create it if offloading, read if onboarding.
         int openFlags = isOffload ? (O_CREAT | O_WRONLY) : O_RDONLY;
         int fd = ::open(filename, openFlags, 0664);
         if (fd < 0)
         {
-            printf("[ERROR] Failed to open '%s' for %s\n", filename, isOffload ? "writing" : "reading");
+            printf("[ERROR] Failed to open '%s' for %s\n",
+                   filename, isOffload ? "writing" : "reading");
             continue;
         }
 
-        // Register this file descriptor with cuFile
+        // If debugNeverGDS is set, skip GDS registration and go straight to POSIX
+        if (debugNeverGDS)
+        {
+            printf("[INFO] mDebugNeverGDS=true; forcing POSIX fallback for %s\n", filename);
+
+            // Inline POSIX fallback logic
+            ssize_t numBytes = static_cast<ssize_t>(srcPtr->getSizeInBytes());
+            void* hostBuffer = std::malloc(numBytes);
+            if (!hostBuffer)
+            {
+                printf("[ERROR] Host memory allocation failed for POSIX fallback\n");
+                ::close(fd);
+                continue;
+            }
+
+            if (isOffload)
+            {
+                // GPU -> host -> file
+                printf("[DEBUG] Using POSIX write: writing %zd bytes from GPU to %s\n", numBytes, filename);
+                cudaMemcpy(hostBuffer, srcPtr->data(), numBytes, cudaMemcpyDeviceToHost);
+
+                ssize_t bytesWritten = ::write(fd, hostBuffer, numBytes);
+                if (bytesWritten < 0)
+                {
+                    printf("[ERROR]   POSIX write error=%zd\n", bytesWritten);
+                }
+                else
+                {
+                    printf("[DEBUG]   Wrote %zd bytes to %s (POSIX fallback)\n", bytesWritten, filename);
+                }
+            }
+            else
+            {
+                // file -> host -> GPU
+                printf("[DEBUG] Using POSIX read: reading %zd bytes from %s into GPU\n", numBytes, filename);
+                ssize_t bytesRead = ::read(fd, hostBuffer, numBytes);
+                if (bytesRead < 0)
+                {
+                    printf("[ERROR]   POSIX read error=%zd\n", bytesRead);
+                }
+                else
+                {
+                    printf("[DEBUG]   Read %zd bytes from %s (POSIX fallback)\n", bytesRead, filename);
+                    cudaMemcpy(dstPtr->data(), hostBuffer, numBytes, cudaMemcpyHostToDevice);
+                }
+            }
+            std::free(hostBuffer);
+
+            ::close(fd);
+            continue;
+        }
+
+        // Attempt cuFile registration
         CUfileDescr_t cufileDesc;
         memset(&cufileDesc, 0, sizeof(CUfileDescr_t));
         cufileDesc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
@@ -101,51 +166,97 @@ void KVCacheTransferManager::copyBlock(
 
         CUfileHandle_t cufileHandle;
         CUfileError_t status = cuFileHandleRegister(&cufileHandle, &cufileDesc);
-        if (status.err != CU_FILE_SUCCESS)
+
+        // If registration fails, fallback to inline POSIX I/O
+        if (status.err == CU_FILE_SUCCESS)
         {
-            printf("[ERROR] cuFileHandleRegister failed for %s. err=%d\n", filename, status.err);
-            ::close(fd);
-            continue;
-        }
+            printf("[DEBUG] Using GDS mode for file: %s\n", filename);
 
-        // EXPLANATION: We do not call .copy(...) anymore. Instead:
-        //  - Offload -> cuFileWrite
-        //  - Onboard -> cuFileRead
-
-        ssize_t numBytes = static_cast<ssize_t>(srcPtr->getSizeInBytes());
-        if (isOffload)
-        {
-            // Write GPU data to file
-            printf("[DEBUG]   cuFileWrite: writing %zd bytes from GPU to %s\n", numBytes, filename);
-
-            ssize_t bytesWritten = cuFileWrite(cufileHandle, srcPtr->data(), numBytes, 0, 0);
-            if (bytesWritten < 0)
+            // GDS read/write logic
+            ssize_t numBytes = static_cast<ssize_t>(srcPtr->getSizeInBytes());
+            if (isOffload)
             {
-                printf("[ERROR]   cuFileWrite error=%zd\n", bytesWritten);
+                // Write GPU data to file
+                printf("[DEBUG]   cuFileWrite: writing %zd bytes from GPU to %s\n", numBytes, filename);
+                ssize_t bytesWritten = cuFileWrite(cufileHandle, srcPtr->data(), numBytes, 0, 0);
+
+                if (bytesWritten < 0)
+                {
+                    printf("[ERROR]   cuFileWrite error=%zd\n", bytesWritten);
+                }
+                else
+                {
+                    printf("[DEBUG]   Wrote %zd bytes to %s\n", bytesWritten, filename);
+                }
             }
             else
             {
-                printf("[DEBUG]   Wrote %zd bytes to %s\n", bytesWritten, filename);
+                // Read GPU data from file (into dstPtr->data())
+                printf("[DEBUG]   cuFileRead: reading %zd bytes from %s into GPU\n", numBytes, filename);
+                ssize_t bytesRead = cuFileRead(cufileHandle, dstPtr->data(), numBytes, 0, 0);
+
+                if (bytesRead < 0)
+                {
+                    printf("[ERROR]   cuFileRead error=%zd\n", bytesRead);
+                }
+                else
+                {
+                    printf("[DEBUG]   Read %zd bytes from %s\n", bytesRead, filename);
+                }
             }
+
+            // Cleanup GDS handle
+            cuFileHandleDeregister(cufileHandle);
         }
         else
         {
-            // Read GPU data from file (into dstPtr->data())
-            printf("[DEBUG]   cuFileRead: reading %zd bytes from %s into GPU\n", numBytes, filename);
+            printf("[WARN] cuFileHandleRegister failed (err=%d). Falling back to POSIX for file: %s\n",
+                status.err, filename);
 
-            ssize_t bytesRead = cuFileRead(cufileHandle, dstPtr->data(), numBytes, 0, 0);
-            if (bytesRead < 0)
+            // Inline POSIX fallback logic
+            ssize_t numBytes = static_cast<ssize_t>(srcPtr->getSizeInBytes());
+            void* hostBuffer = std::malloc(numBytes);
+            if (!hostBuffer)
             {
-                printf("[ERROR]   cuFileRead error=%zd\n", bytesRead);
+                printf("[ERROR] Host memory allocation failed for POSIX fallback\n");
+                ::close(fd);
+                continue;
+            }
+
+            if (isOffload)
+            {
+                // GPU -> host -> file
+                printf("[DEBUG] Using POSIX write: writing %zd bytes from GPU to %s\n", numBytes, filename);
+                cudaMemcpy(hostBuffer, srcPtr->data(), numBytes, cudaMemcpyDeviceToHost);
+
+                ssize_t bytesWritten = ::write(fd, hostBuffer, numBytes);
+                if (bytesWritten < 0)
+                {
+                    printf("[ERROR]   POSIX write error=%zd\n", bytesWritten);
+                }
+                else
+                {
+                    printf("[DEBUG]   Wrote %zd bytes to %s (POSIX fallback)\n", bytesWritten, filename);
+                }
             }
             else
             {
-                printf("[DEBUG]   Read %zd bytes from %s\n", bytesRead, filename);
+                // file -> host -> GPU
+                printf("[DEBUG] Using POSIX read: reading %zd bytes from %s into GPU\n", numBytes, filename);
+                ssize_t bytesRead = ::read(fd, hostBuffer, numBytes);
+                if (bytesRead < 0)
+                {
+                    printf("[ERROR]   POSIX read error=%zd\n", bytesRead);
+                }
+                else
+                {
+                    printf("[DEBUG]   Read %zd bytes from %s (POSIX fallback)\n", bytesRead, filename);
+                    cudaMemcpy(dstPtr->data(), hostBuffer, numBytes, cudaMemcpyHostToDevice);
+                }
             }
+            std::free(hostBuffer);
         }
 
-        // Cleanup
-        cuFileHandleDeregister(cufileHandle);
         ::close(fd);
     }
 

@@ -1,4 +1,3 @@
-import os
 import click
 import datetime
 import numpy as np
@@ -14,14 +13,17 @@ from tensorrt_llm.llmapi import (
 from tensorrt_llm.bindings.executor import DynamicBatchConfig
 from tensorrt_llm.llmapi.llm_utils import LlmArgs
 
+
 @click.command()
 @click.option("--model",
               type=str,
               default="/mnt/weka/Models/Engines/llama-3.1-8b-engine-2ec70d79308f2e445031393703e5be5793fd777a-singleengine",
+              #default="/mnt/weka/Models/Engines/Llama-3.1-405B-INT8-TP8-PP2",
               help="Path to the TRT-LLM engine folder or HF checkpoint.")
 @click.option("--tokenizer",
               type=str,
               default="/mnt/weka/Models/Safetensors/Meta-Llama-3.1-8B-Instruct",
+              #default="/mnt/weka/Models/Safetensors/Llama-3.1-405B",
               help="Path or name of the tokenizer. "
                    "If using a TRT engine with built-in tokenizer, this can be omitted.")
 @click.option("--backend",
@@ -40,10 +42,10 @@ from tensorrt_llm.llmapi.llm_utils import LlmArgs
               type=int,
               default=BuildConfig.max_num_tokens,
               help="Max number of *input* tokens per batch (after padding removal).")
-@click.option("--prompt_file",
-              type=str,
-              default="/code/tensorrt_llm/book.rawtext",
-              help="Path to the text file containing the long context prompt.")
+@click.option("--max_seq_len",
+              type=int,
+              default=BuildConfig.max_seq_len,
+              help="Max total length (prompt + generated output).")
 @click.option("--tp_size", type=int, default=1, help="Tensor parallel size.")
 @click.option("--pp_size", type=int, default=1, help="Pipeline parallel size.")
 def main(model,
@@ -52,39 +54,21 @@ def main(model,
          max_beam_width,
          max_batch_size,
          max_num_tokens,
-         prompt_file,
+         max_seq_len,
          tp_size,
          pp_size):
     """
-    Repeatedly generate from a base prompt read from prompt_file,
-    appending random tokens each time, while respecting the engine's
-    actual max input length (7968) minus 32 tokens for generation.
-    Prints stats on the 1000th iteration and exits.
+    Continuously submit random input tokens to the LLM.
     """
 
     # -------------------------------------------------------------------------
-    # 0. Constants for the engine's *true* constraints
-    # -------------------------------------------------------------------------
-    # From your logs, TRT-LLM forcibly reduces maxInputLen to 7968.
-    # We reserve 32 tokens for generation.
-    ACTUAL_MAX_INPUT_LEN = 7968
-    RESERVED_FOR_GENERATION = 32
-    max_allowed_prompt_len = ACTUAL_MAX_INPUT_LEN - RESERVED_FOR_GENERATION
-
-    # -------------------------------------------------------------------------
-    # 1. Read the prompt file
-    # -------------------------------------------------------------------------
-    prompt_file = os.path.expanduser(prompt_file)
-    with open(prompt_file, "r", encoding="utf-8") as f:
-        context_prompt = f.read()
-
-    # -------------------------------------------------------------------------
-    # 2. Build configuration objects
+    # 1. Build configuration objects
     # -------------------------------------------------------------------------
     build_config = BuildConfig(
         max_beam_width=max_beam_width,
         max_batch_size=max_batch_size,
         max_num_tokens=max_num_tokens,
+        max_seq_len=max_seq_len
     )
 
     kv_cache_config = KvCacheConfig(
@@ -105,35 +89,26 @@ def main(model,
     )
 
     # -------------------------------------------------------------------------
-    # 3. Create the LLM object
+    # 2. Create LLM object (wrapped Executor internally)
     # -------------------------------------------------------------------------
     llm_args = LlmArgs.from_kwargs(
         model=model,
         tokenizer=tokenizer,
         backend=backend,
-        trust_remote_code=False,
+        trust_remote_code=False,  # set True if you're using HF models requiring remote code
         build_config=build_config,
         kv_cache_config=kv_cache_config,
+        # Optionally enable dynamic_batch_config here:
         # dynamic_batch_config=dynamic_batch_config,
         scheduler_config=scheduler_config,
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size
     )
+
     llm = LLM(**llm_args.to_dict())
 
     # -------------------------------------------------------------------------
-    # 4. Tokenize base prompt & truncate to 7936 if needed
-    # -------------------------------------------------------------------------
-    prefix_token_ids = llm.tokenizer.encode(context_prompt)
-    if len(prefix_token_ids) > max_allowed_prompt_len:
-        print(
-            f"Warning: Base prompt token length {len(prefix_token_ids)} exceeds "
-            f"allowed prompt length {max_allowed_prompt_len}. Truncating."
-        )
-        prefix_token_ids = prefix_token_ids[:max_allowed_prompt_len]
-
-    # -------------------------------------------------------------------------
-    # 5. KvCacheRetentionConfig
+    # 3. Construct the KvCacheRetentionConfig
     # -------------------------------------------------------------------------
     retention_config = trtllm.KvCacheRetentionConfig(
         [
@@ -141,54 +116,51 @@ def main(model,
                 0, None, 30, datetime.timedelta(seconds=30)
             )
         ],
-        80  # Priority for newly generated tokens
+        80  # Retention Priority for newly generated tokens
     )
 
+    #perf_metrics = trtllm.RequestPerfMetrics
     # -------------------------------------------------------------------------
-    # 6. Continuously generate (appending random tokens each time)
+    # 4. Continuously generate
     # -------------------------------------------------------------------------
     prompt_count = 0
     while True:
-        # Let's append, for example, 16 random tokens in the range [0, 999].
-        # If your vocab is smaller or bigger, adjust accordingly. 0..999 is just an example.
-        random_token_ids = np.random.randint(0, 1000, 16).tolist()
+        # Generate random input tokens
+        input_token_ids = np.random.randint(0, 1000, size=320).tolist()
 
-        # Combine prefix + random tokens
-        combined_tokens = prefix_token_ids + random_token_ids
-
-        # Truncate if needed
-        if len(combined_tokens) > max_allowed_prompt_len:
-            combined_tokens = combined_tokens[:max_allowed_prompt_len]
-
-        # Perform inference using the combined prompt
+        # Perform inference
         result = llm.generate(
-            inputs=combined_tokens,
+            inputs=input_token_ids,
             kv_cache_retention_config=retention_config
         )
 
         prompt_count += 1
-
-        # Print stats on the 100th iteration and then exit
-        if prompt_count % 100 == 0:
+        print("[SERVER.PY] PROMPT ITERATION: ", prompt_count)
+        if prompt_count % 50 == 0:
+            print("Entered 50th prompt - getting stats")
+            # Retrieve inference metrics from the List[dict] returned by get_stats()
             iteration_stats_result = llm.get_stats()
+            print("Got stats")
             print(f"Collected iteration stats at prompt #{prompt_count}:")
             for idx, stat in enumerate(iteration_stats_result):
                 print(f"  Iteration {idx} stats: {stat}")
 
+            # Exit after printing stats once
             print("Exiting after printing stats.")
             break
 
-        # Print results for every prompt
+        # 5. Print results
         if not result.outputs:
-            print(f"No generation outputs returned for prompt #{prompt_count}.")
+            print("No generation outputs returned.")
             continue
 
         generated_ids = result.outputs[0].token_ids
         finish_reason = result.outputs[0].finish_reason
-        print(f"Prompt #{prompt_count} - Generated tokens: {generated_ids}")
+        print("Generated tokens:", generated_ids)
         print("Finish reason:", finish_reason)
         print("-" * 50)
 
 
 if __name__ == "__main__":
     main()
+

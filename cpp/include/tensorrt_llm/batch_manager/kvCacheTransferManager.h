@@ -49,7 +49,7 @@ private:
 
     //! \brief Copy content of src block to dst.
     void copyBlock(
-        BlockPtr const& src, BlockPtr const& dst, std::vector<KVCacheBlockPool> const& pools, bool isOffload);
+        BlockPtr const& src, BlockPtr const& dst, std::vector<KVCacheBlockPool> const& pools, bool isOffload, bool dramDestination, bool debugNeverGDS);
 
     runtime::BufferManager mBufferManager;
     runtime::BufferManager mOnboardManager;
